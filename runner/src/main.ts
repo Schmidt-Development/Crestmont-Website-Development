@@ -28,6 +28,7 @@ import { newHealthState, startHealthServer, recordModelProbe, recordModelError, 
 import { OpenAICompatClient } from "./providers/openai-client.ts";
 import type { HealthState } from "./health.ts";
 import { RUNNER_VERSION } from "./protocol.ts";
+import { JobSandbox, cliDockerExecutor } from "./sandbox.ts";
 import { InferenceScheduler } from "./inference/scheduler.ts";
 import { OllamaResidency } from "./inference/ollama.ts";
 import { ModelDetailsCache, buildWorkerStatus } from "./inference/status.ts";
@@ -282,6 +283,18 @@ export async function runLoop(d: LoopDeps): Promise<number> {
  * Only infrastructure errors are caught here. An import that legitimately fails reports itself rejected through the
  * worker, and one that dies without reporting is re-offered when its lease expires; neither should stop the lane.
  */
+/**
+ * The environment docker itself needs, filtered to names a shell would accept.
+ *
+ * The same filtering the import lane does: an environment variable with a surprising name must not become part of
+ * a docker invocation. Only used for the startup reap, which runs `docker ps` and `docker rm`.
+ */
+function dockerEnvForReaper(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) env[k] = v;
+  return env;
+}
+
 export async function runImports(d: LoopDeps): Promise<number> {
   if (!d.imports) return 0;
   const sleep = d.sleep ?? interruptibleSleep;
@@ -407,6 +420,23 @@ async function main(argv: string[]): Promise<number> {
     } catch (err) { logger.warn("worker status report failed", { error: errorMessage(err) }); }
   };
   await reportStatus();
+
+  // Remove build sandboxes this runner left behind, BEFORE any slot or the import lane claims anything.
+  //
+  // `JobSandbox.reapOrphans` was written for exactly this, is covered by [DUR] tests, and was never called from
+  // anywhere. `health.sandboxesReaped` existed beside it and was always 0. Meanwhile a sandbox is started
+  // detached, so every one that outlived its job kept its CPU and memory caps: thirteen were found running on
+  // Node 1, 6 CPUs and 8 GB each, left by the import lane which closed none of them.
+  //
+  // It only ever removes containers labelled with THIS runner's id, so another runner sharing the Docker host is
+  // untouched, and a failure here is reported rather than fatal: a node that cannot tidy up can still build.
+  // Ungated: it removes only containers carrying THIS runner's id, so on a node with no sandboxes the list is
+  // empty and the call does nothing.
+  try {
+    const reaped = await JobSandbox.reapOrphans(cfg.jobSandbox, cliDockerExecutor(cfg.jobSandbox.dockerBin, dockerEnvForReaper()), logger);
+    health.sandboxesReaped = reaped.removed.length;
+    if (reaped.removed.length) logger.warn("removed build sandboxes left by an earlier run", { count: reaped.removed.length });
+  } catch (err) { logger.warn("could not look for leftover build sandboxes", { error: errorMessage(err) }); }
   const statusTimer = setInterval(() => void reportStatus(), 60_000);
   statusTimer.unref();
   if (cfg.preview && cfg.preview.gateSecret.length < 32) logger.warn("PREVIEW_DEPLOY_COMMAND is set but PREVIEW_GATE_SECRET is missing or shorter than 32 characters: no preview will be deployed (previews are private; Founder decision D3)");

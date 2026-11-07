@@ -207,6 +207,69 @@ test("[IMP-10] a platform that is merely unreachable still reports nothing, so t
   }
 });
 
+test("[IMP-11] the import closes its sandbox, whatever the outcome", async () => {
+  // A sandbox is started detached, so one that outlives its import keeps its CPU and memory caps. Nothing closed
+  // the import lane's: thirteen were found running on Node 1, 6 CPUs and 8 GB each, one per import since the
+  // channel started working. The build path closes its own through the provider; this lane had no such owner.
+  //
+  // The fake executor records what docker was asked to do, which is how `close()` is observed without Docker.
+  for (const [label, outcomeOf] of [
+    ["a measured design", () => outcome({ ok: true, baseline: { fingerprint: "a".repeat(64), signatures: [], renders: [] } as never })],
+    ["a rejected archive", () => outcome({ ok: false, failedAt: "ingest", problems: ["it will not build"] })],
+    ["an import that threw", () => { throw new Error("the sandbox died mid-import"); }],
+  ] as const) {
+    const calls: string[][] = [];
+    const f = fakeClient({ claim: claim() });
+    const w = importWorker({
+      client: f.client, cfg, logger: silent, workRoot: cfg.workspacesRoot, runnerId: "r",
+      executor: (async (args: string[]) => { calls.push(args); return { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false }; }) as never,
+      // The real importFrontend starts the sandbox; a close is a no-op on one that never started, so the fake
+      // has to start it too or this test would pass against the bug.
+      importer: (async (args: { sandbox: { start(): Promise<void> } }) => { await args.sandbox.start(); return outcomeOf(); }) as never,
+    });
+
+    assert.equal(await w.serve(), "done", label);
+    const removed = calls.filter((c) => c[0] === "rm" && c[1] === "-f").map((c) => c[2]);
+    assert.ok(
+      removed.some((n) => n.startsWith("cm-job-import-fa_1-a1-")),
+      `${label}: the import sandbox must be removed; docker was asked ${JSON.stringify(calls.map((c) => c.slice(0, 2)))}`,
+    );
+  }
+});
+
+test("[IMP-12] a sandbox that will not close does not lose the import's outcome", async () => {
+  // The outcome has already been decided and reported by the time the close runs. Losing it to a cleanup failure
+  // would be the wrong trade, so the failure is logged and the startup reaper is the backstop.
+  const f = fakeClient({ claim: claim() });
+  const warned: string[] = [];
+  let imported = false;
+  const noisy = {
+    debug() {}, info() {}, error() {},
+    warn(msg: string) { warned.push(msg); },
+    child() { return noisy; },
+  } as unknown as Parameters<typeof importWorker>[0]["logger"];
+
+  const w = importWorker({
+    client: f.client, cfg, logger: noisy, workRoot: cfg.workspacesRoot, runnerId: "r",
+    // Only the CLOSING rm fails. `start()` clears any stale container of the same name with an rm of its own, and
+    // failing that one would be a sandbox that never started -- a different case, covered by [IMP-04].
+    executor: (async (args: string[]) => {
+      if (args[0] === "rm" && imported) throw new Error("docker is not answering");
+      return { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+    }) as never,
+    importer: (async (args: { sandbox: { start(): Promise<void> } }) => {
+      await args.sandbox.start();
+      imported = true;
+      return outcome({ ok: false, failedAt: "ingest", problems: ["it will not build"] });
+    }) as never,
+  });
+
+  assert.equal(await w.serve(), "done", "the import still finishes");
+  assert.equal(f.reports.length, 1, "and its verdict was still reported");
+  assert.equal(f.reports[0].status, "rejected");
+  assert.ok(warned.some((m) => /could not be closed/.test(m)), `and the failure is said out loud: ${warned.join(" | ")}`);
+});
+
 test("[IMP-03] an archive that will not build is the artifact's verdict, with the reasons", async () => {
   const f = fakeClient({ claim: claim() });
   const w = importWorker({

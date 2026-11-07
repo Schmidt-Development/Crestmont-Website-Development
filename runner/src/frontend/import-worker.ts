@@ -92,6 +92,8 @@ export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutc
         d.logger.info(msg, { artifactId: claim.artifactId, projectId: claim.projectId, version: claim.version, ...extra });
       log("frontend artifact claimed for import");
 
+      // Every sandbox this import starts, closed in the `finally` below however it ends.
+      const sandboxesToClose: JobSandbox[] = [];
       try {
         const got = await d.client.frontendImportBytes(claim.artifactId);
         if (!got) {
@@ -128,6 +130,10 @@ export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutc
         const ws = createWorkspace(d.workRoot, { id: `import-${claim.artifactId}`, attempt: 1 });
         const executor = d.executor ?? cliDockerExecutor(d.cfg.jobSandbox.dockerBin, dockerEnv());
         const sandbox = new JobSandbox(d.cfg.jobSandbox, ws, claim.artifactId, executor, d.logger);
+        // Closed however this ends. Nothing closed it before, and a sandbox is started detached: thirteen of them
+        // were left running on Node 1, each holding its 6-CPU and 8 GB caps, one per import since the channel
+        // started working. The build path closes its own through the provider; the import lane had no such owner.
+        sandboxesToClose.push(sandbox);
 
         const outcome = await (d.importer ?? importFrontend)({
           archive,
@@ -207,6 +213,17 @@ export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutc
           artifactId: claim.artifactId, error: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
         });
         return "done";
+      } finally {
+        // A failure to close is logged, not thrown: the import's own outcome has already been decided and
+        // reported, and losing it to a cleanup error would be the wrong trade. The startup reaper is the backstop.
+        for (const sandbox of sandboxesToClose) {
+          try { await sandbox.close(); }
+          catch (err) {
+            d.logger.warn("the import sandbox could not be closed; it is left for the startup reaper", {
+              artifactId: claim.artifactId, error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+            });
+          }
+        }
       }
     },
   };
