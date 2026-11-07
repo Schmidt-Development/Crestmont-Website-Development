@@ -124,6 +124,7 @@ await check("customer signs in and uploads two harmless files and the EICAR test
     }
     assert(ok, "two-factor sign-in was refused");
   }
+  const early: string[] = [];
   for (const [k, f] of Object.entries(FILES) as [keyof typeof FILES, (typeof FILES)[keyof typeof FILES]][]) {
     const fd = new FormData();
     fd.set("file", new File([f.bytes], f.name, { type: f.type }));
@@ -133,10 +134,21 @@ await check("customer signs in and uploads two harmless files and the EICAR test
     const row = (await q<{ id: string; sha256: string; scan_status: string }>(`SELECT id, sha256, scan_status FROM files WHERE filename = ${lit(f.name)} AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1`))[0];
     assert(row, `${k} not found in D1 after upload`);
     assert(row.sha256 === sha(f.bytes), `${k}: stored SHA-256 differs from the uploaded bytes`);
+    ids[k] = row.id; // before the status check, so one early verdict does not leave the later checks without their files
+    if (REMOTE && row.scan_status !== "pending") {
+      // The operational scanner polls continuously and can reach a file between the upload and this read (run
+      // 42350361962: the PDF was clean ~5 s after upload). That is the system working, not a skipped scan -- but only if
+      // a recorded scan of exactly these bytes produced the state. A status with no matching file_scans row still fails.
+      const scan = (await q<{ verdict: string; scanned_sha256: string; engine: string }>(
+        `SELECT verdict, scanned_sha256, engine FROM file_scans WHERE file_id = ${lit(row.id)} ORDER BY recorded_at DESC LIMIT 1`))[0];
+      assert(scan && scan.verdict === row.scan_status && scan.scanned_sha256 === row.sha256,
+        `${k} starts as ${row.scan_status} without a matching scan record (${JSON.stringify(scan ?? null)})`);
+      early.push(`${k} already ${row.scan_status} by ${scan.engine}`);
+      continue;
+    }
     assert(row.scan_status === "pending", `${k} starts as ${row.scan_status}, expected pending`);
-    ids[k] = row.id;
   }
-  return "3 files pending";
+  return early.length ? `3 files uploaded; the remote scanner reached some first: ${early.join("; ")}` : "3 files pending";
 });
 
 await check("a share link for the EICAR file works before it is scanned", async () => {
