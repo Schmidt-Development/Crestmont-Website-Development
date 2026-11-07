@@ -34,6 +34,7 @@ import { ModelDetailsCache, buildWorkerStatus } from "./inference/status.ts";
 import { meteredVariables } from "./orchestrator/cost-guard.ts";
 import { rmSync } from "node:fs";
 import path from "node:path";
+import { importWorker } from "./frontend/import-worker.ts";
 import { fileURLToPath } from "node:url";
 
 export interface LoopDeps {
@@ -56,6 +57,8 @@ export interface LoopDeps {
   previews?: { sweep: () => Promise<"unsupported" | number> } | null;
   /** Owner-authorized customer releases (null = PRODUCTION_DEPLOY_COMMAND not configured). */
   deployments?: { serve: () => Promise<"unsupported" | "none" | "done"> } | null;
+  /** Import and measure an uploaded frontend artifact when idle (null = no sandbox, so nothing to import with). */
+  imports?: { serve: () => Promise<"unsupported" | "none" | "done"> } | null;
   health?: HealthState;
   /**
    * Model-server readiness probe (local provider). While it fails the runner claims neither builds nor drafts, so an
@@ -121,6 +124,7 @@ export async function runLoop(d: LoopDeps): Promise<number> {
   let draftsSupported = true;
   let previewsSupported = true;
   let deploymentsSupported = true;
+  let importsSupported = true;
   let lastProbeAt = 0;
   let modelOk = true;
   let paidRefusalLogged = false;
@@ -195,6 +199,16 @@ export async function runLoop(d: LoopDeps): Promise<number> {
           else if (r === "done") served++;
         } catch (err) { d.logger.warn("customer release handling failed", { error: errorMessage(err) }); }
       }
+      // An uploaded artifact has to be unpacked, built and measured before anyone can approve its design, and
+      // until the platform grew a channel for it there was nowhere for that to happen. It runs when idle, like
+      // the workers above: it is not a build, and it must never take a slot from one.
+      if (d.imports && importsSupported && !d.shouldStop()) {
+        try {
+          const r = await d.imports.serve();
+          if (r === "unsupported") { importsSupported = false; d.logger.info("the control plane does not offer frontend imports; not polling for them again until restart"); }
+          else if (r === "done") served++;
+        } catch (err) { d.logger.warn("frontend import handling failed", { error: errorMessage(err) }); }
+      }
       if (d.once) return jobs;
       if (served > 0) { idleMs = d.cfg.pollMinMs; continue; }
       const factor = claimed.reason === "none_queued" ? 1.5 : 3;
@@ -261,7 +275,7 @@ export async function runSlots(d: LoopDeps, slots: number, stagger = 3000): Prom
   shared.active ??= new Set<string>();
   const loops: Promise<number>[] = [];
   for (let i = 0; i < Math.max(1, slots); i++) {
-    const deps: LoopDeps = i === 0 ? { ...d, shared } : { ...d, shared, drafts: null, previews: null, deployments: null, modelProbe: null, logger: d.logger.child({ slot: i }) };
+    const deps: LoopDeps = i === 0 ? { ...d, shared } : { ...d, shared, drafts: null, previews: null, deployments: null, imports: null, modelProbe: null, logger: d.logger.child({ slot: i }) };
     loops.push((async () => { if (i > 0) await (d.sleep ?? interruptibleSleep)(i * stagger, d.shouldStop); return d.shouldStop() ? 0 : runLoop(deps); })());
   }
   return (await Promise.all(loops)).reduce((a, b) => a + b, 0);
@@ -359,6 +373,10 @@ async function main(argv: string[]): Promise<number> {
     drafts: ds ? { serve: () => serveOneDraft({ client, model: ds.model, modelName: ds.modelName, baseUrl: ds.baseUrl, log: logger, onError: onDraftError }) } : null,
     previews: cfg.previewDelete ? { sweep: () => sweepPreviews(cfg, client, logger) } : null,
     deployments: cfg.delivery && cfg.repo ? { serve: () => serveOneDeployment(cfg, client, capabilities(cfg), { logger }) } : null,
+    // Importing needs the sandbox: the archive is installed, built and measured inside it, never on this machine.
+    imports: importWorker({
+      client, cfg, logger, runnerId: cfg.runnerId, workRoot: cfg.workspacesRoot,
+    }),
     // The local provider (and local drafts) need the model server; the paid adapter's model is not ours to probe.
     modelProbe: cfg.agentProvider === "local" ? { check: localModelProbe(cfg), intervalMs: 300_000 } : null,
   }, argv.includes("--once") ? 1 : cfg.slots);

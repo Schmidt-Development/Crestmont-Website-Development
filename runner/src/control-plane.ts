@@ -7,7 +7,7 @@ import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
   AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, DiagnosticCheckpoint, ExpiredPreview, ExpiredPreviewsResponse,
-  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus, ApprovedArtifact } from "./protocol.ts";
+  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus, ApprovedArtifact, FrontendImportClaim } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
 import { silentLogger, errorMessage } from "./log.ts";
@@ -193,6 +193,56 @@ export class ControlPlaneClient {
       // 404/405: a platform that predates this endpoint. 409: no approved baseline for this project. Both mean
       // "there is no design-locked work here", and the job falls through to the path it would otherwise take.
       if (err instanceof ControlPlaneError && [404, 405, 409].includes(err.status)) return null;
+      throw err;
+    }
+  }
+
+
+  // ── the import step ────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // Not a build. An artifact that has been uploaded and scanned has to be unpacked, built and measured before
+  // anyone can approve its design, and until now nothing asked for that work: both calls above serve a leased
+  // BUILD and require a baseline that is already approved. These three are this runner's half of the channel.
+  //
+  // Each treats a platform that predates them as "there is no such work", so an older control plane simply never
+  // offers an import and this runner behaves exactly as it did before.
+
+  /**
+   * One artifact waiting to be imported, or null when there is none.
+   *
+   * A 404/405 is NOT flattened to null here: "this platform has no import channel" and "there is nothing to
+   * import" are different answers, and only the caller can act on the difference -- it stops asking. Flattening
+   * them would leave the worker polling an older control plane for ever and its `unsupported` branch unreachable.
+   */
+  async claimFrontendImport(runnerId: string): Promise<FrontendImportClaim | null> {
+    const r = await this.post<{ artifact: FrontendImportClaim | null }>("/api/builds/runner/frontend/import/claim", { runnerId });
+    return r?.artifact ?? null;
+  }
+
+  /** The archive for a claimed artifact. The caller verifies the sha256 before opening it. */
+  async frontendImportBytes(artifactId: string): Promise<{ artifactId: string; sha256: string; filename: string; base64: string } | null> {
+    try { return await this.post("/api/builds/runner/frontend/import/bytes", { artifactId }); }
+    catch (err) {
+      // 409: it stopped being importable while we held it (flagged, superseded, released). That is the platform's
+      // decision, and the right answer is to stop rather than to retry.
+      if (err instanceof ControlPlaneError && [404, 405, 409].includes(err.status)) return null;
+      throw err;
+    }
+  }
+
+  /** What the import found. A measured design is a DRAFT baseline: nothing here ever approves one. */
+  async reportFrontendImport(r: {
+    artifactId: string;
+    status: "imported" | "rejected";
+    framework?: string | null;
+    archiveRoot?: string | null;
+    lockfileSha?: string | null;
+    problems?: string[];
+    baseline?: unknown;
+  }): Promise<void> {
+    try { await this.post("/api/builds/runner/frontend/import/report", { ...r }); }
+    catch (err) {
+      if (err instanceof ControlPlaneError && [404, 405].includes(err.status)) return;
       throw err;
     }
   }
