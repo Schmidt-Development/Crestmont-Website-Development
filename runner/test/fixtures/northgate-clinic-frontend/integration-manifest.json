@@ -241,6 +241,22 @@
             "role"
           ]
         }
+      ],
+      "acceptanceProbes": [
+        {
+          "criterion": 1,
+          "as": "anonymous",
+          "method": "POST",
+          "path": "/api/register",
+          "body": {
+            "name": "Acceptance Driver",
+            "email": "{{email}}",
+            "password": "{{password}}",
+            "confirm": "{{password}}",
+            "terms": true
+          },
+          "expect": 422
+        }
       ]
     },
     {
@@ -267,6 +283,30 @@
       ],
       "dependsOn": [
         "account-register"
+      ],
+      "acceptanceProbes": [
+        {
+          "criterion": 1,
+          "as": "anonymous",
+          "method": "POST",
+          "path": "/api/login",
+          "body": {
+            "email": "{{email}}",
+            "password": "definitely-not-the-password-Aa1!"
+          },
+          "expect": 401
+        },
+        {
+          "criterion": 2,
+          "as": "anonymous",
+          "method": "POST",
+          "path": "/api/login",
+          "body": {
+            "email": "nobody-not-registered@crestmont.test",
+            "password": "{{password}}"
+          },
+          "expect": 401
+        }
       ]
     },
     {
@@ -296,6 +336,16 @@
             "status",
             "account_id"
           ]
+        }
+      ],
+      "acceptanceProbes": [
+        {
+          "criterion": 1,
+          "as": "anonymous",
+          "method": "POST",
+          "path": "/api/appointments",
+          "body": {},
+          "expect": 422
         }
       ]
     },
@@ -327,6 +377,22 @@
       "dependsOn": [
         "account-login",
         "appointment-request"
+      ],
+      "acceptanceProbes": [
+        {
+          "criterion": 1,
+          "as": "anonymous",
+          "method": "GET",
+          "path": "/api/appointments",
+          "expect": 401
+        },
+        {
+          "criterion": 2,
+          "as": "other-customer",
+          "method": "GET",
+          "path": "/api/appointments",
+          "expect": 200
+        }
       ]
     },
     {
@@ -353,6 +419,15 @@
       ],
       "dependsOn": [
         "patient-appointments"
+      ],
+      "acceptanceProbes": [
+        {
+          "criterion": 2,
+          "as": "anonymous",
+          "method": "POST",
+          "path": "/api/appointments/:id/cancel",
+          "expect": 401
+        }
       ]
     },
     {
@@ -382,6 +457,22 @@
       ],
       "dependsOn": [
         "account-login"
+      ],
+      "acceptanceProbes": [
+        {
+          "criterion": 1,
+          "as": "customer",
+          "method": "GET",
+          "path": "/api/staff/appointments",
+          "expect": 403
+        },
+        {
+          "criterion": 2,
+          "as": "anonymous",
+          "method": "GET",
+          "path": "/api/staff/appointments",
+          "expect": 401
+        }
       ]
     },
     {
@@ -408,6 +499,15 @@
       ],
       "dependsOn": [
         "staff-schedule"
+      ],
+      "acceptanceProbes": [
+        {
+          "criterion": 1,
+          "as": "customer",
+          "method": "POST",
+          "path": "/api/staff/appointments/:id/status",
+          "expect": 403
+        }
       ]
     }
   ],

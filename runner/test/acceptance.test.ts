@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  DRIVER, DRIVER_SOURCE, PLAN, acceptancePlan, readAcceptanceOutput, startCommand, summarise, writeAcceptanceDriver,
+  DRIVER, DRIVER_SOURCE, PLAN, acceptancePlan, coverageChecks, readAcceptanceOutput, startCommand, summarise, writeAcceptanceDriver,
 } from "../src/frontend/acceptance.ts";
 import type { IntegrationManifest, ManifestContract } from "../src/frontend/integration-manifest.ts";
 
@@ -138,4 +138,49 @@ test("[ACC-05] the driver source itself only ever reports what it measured", () 
   assert.match(DRIVER_SOURCE, /a customer can read staff data/, "and the failure says what it means");
   assert.match(DRIVER_SOURCE, /persistence:session-survives-restart/, "a session held only in memory is not a session");
   assert.match(DRIVER_SOURCE, /status === 403/, "an empty list is not a refusal");
+});
+
+const probedOp = {
+  id: "staff-schedule", element: "table.schedule", kind: "data-read" as const,
+  behaviour: "staff see every appointment", expectChange: "content" as const,
+  acceptance: [
+    "a staff session receives every appointment",
+    "a customer session is refused with 403 rather than receiving an empty list",
+    "an unauthenticated request is refused with 401",
+  ],
+  acceptanceProbes: [
+    { criterion: 1, as: "customer" as const, method: "GET", path: "/api/appointments", expect: 403 },
+    { criterion: 2, as: "anonymous" as const, method: "GET", path: "/api/appointments", expect: 401 },
+  ],
+};
+
+test("[ACC-06] a criterion the contract made executable is run and reported, and is no longer counted as unverified", () => {
+  // Before this, every written criterion was reported UNDETERMINED whatever the driver had done -- including the
+  // seven of Northgate's 28 that it had just established. A criterion something DID establish and that is still
+  // reported unverified is not caution, it is a wrong answer.
+  const m = manifest({ operations: [probedOp] as never });
+  const plan = acceptancePlan(tmp(), m);
+
+  assert.equal(plan.probes.length, 2, "both probes reach the plan the driver reads");
+  assert.deepEqual(plan.probes.map((p) => p.id),
+    ["staff-schedule :: acceptance[1]", "staff-schedule :: acceptance[2]"],
+    "under exactly the ids coverageChecks would have used, so one criterion never appears twice");
+  assert.equal(plan.probes[0].text, probedOp.acceptance[1], "the criterion travels with its probe");
+  assert.equal(plan.probes[0].as, "customer");
+  assert.equal(plan.probes[1].expect, 401);
+
+  // And the coverage pass must now leave those two alone, reporting only the one with no probe.
+  const left = coverageChecks(m as never);
+  assert.deepEqual(left.map((c) => c.id), ["staff-schedule :: acceptance[0]"]);
+  assert.ok(left[0].undetermined, "a criterion with no probe is still undetermined, which still fails the gate");
+});
+
+test("[ACC-07] the driver executes probes from the session the contract named, and never infers a result", () => {
+  // The driver source is the thing that runs, so the behaviour has to be visible in it rather than inferred.
+  assert.match(DRIVER_SOURCE, /for \(const pr of plan\.probes \|\| \[\]\)/, "it iterates the contract's probes");
+  assert.match(DRIVER_SOURCE, /pr\.as === "customer" \? session : pr\.as === "other-customer" \? otherSession : ""/,
+    "each probe runs from the session it declared");
+  assert.match(DRIVER_SOURCE, /no " \+ pr\.as \+ " session was obtained/, "and is undetermined when that session is missing");
+  assert.match(DRIVER_SOURCE, /status === pr\.expect/, "judged against the declared status and nothing else");
+  assert.ok(!/probes[\s\S]*ok: true/.test(DRIVER_SOURCE), "no probe result is assumed");
 });

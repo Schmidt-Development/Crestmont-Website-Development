@@ -226,3 +226,32 @@ test("[IM-009] operations that spend money or grant access are flagged for a per
   // Out-of-scope work is stated in the plan rather than discovered at the end.
   assert.match(describeManifest({ ...m, outOfScope: ["no live Stripe keys until release"] }), /out of scope: no live Stripe keys until release/);
 });
+
+test("[IM-010] an acceptance probe must point at a criterion that exists and a surface the contract declared", () => {
+  // A probe is the executable form of a written criterion. Pointed at the wrong index it would silently establish a
+  // different criterion from the one it checked; pointed at an undeclared path it would verify the contract against
+  // an endpoint the contract never agreed to. Either turns the gate into a thing that reports rather than checks.
+  const apis = [{ method: "POST", path: "/api/quotes", auth: "public" as const, success: 201, invalid: 422 }];
+
+  const good = valid(manifest([op({ acceptanceProbes: [{ criterion: 1, as: "anonymous", path: "/api/quotes", method: "POST", expect: 422 }] })], { apis } as never));
+  assert.ok(good.ok, codes(good.problems).join(","));
+
+  const outOfRange = valid(manifest([op({ acceptanceProbes: [{ criterion: 7, as: "anonymous", path: "/api/quotes", expect: 422 }] })], { apis } as never));
+  assert.ok(codes(outOfRange.problems).includes("probe-criterion"), codes(outOfRange.problems).join(","));
+
+  const undeclared = valid(manifest([op({ acceptanceProbes: [{ criterion: 0, as: "anonymous", path: "/api/not-declared", expect: 422 }] })], { apis } as never));
+  assert.ok(codes(undeclared.problems).includes("probe-path"), codes(undeclared.problems).join(","));
+
+  const twice = valid(manifest([op({ acceptanceProbes: [
+    { criterion: 0, as: "anonymous", path: "/api/quotes", expect: 422 },
+    { criterion: 0, as: "customer", path: "/api/quotes", expect: 401 },
+  ] })], { apis } as never));
+  assert.ok(codes(twice.problems).includes("probe-duplicate"), codes(twice.problems).join(","));
+
+  // Deliberately not one of the three sessions, which is the whole point of the check.
+  const noSession = valid(manifest([op({ acceptanceProbes: [{ criterion: 0, as: "nobody" as never, path: "/api/quotes", expect: 422 }] })], { apis } as never));
+  assert.ok(codes(noSession.problems).includes("probe-session"), codes(noSession.problems).join(","));
+
+  const notAStatus = valid(manifest([op({ acceptanceProbes: [{ criterion: 0, as: "anonymous", path: "/api/quotes", expect: 4220 }] })], { apis } as never));
+  assert.ok(codes(notAStatus.problems).includes("probe-status"), codes(notAStatus.problems).join(","));
+});
