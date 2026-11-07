@@ -16,7 +16,9 @@
 //       time (everPassed, lastPassedCommit);
 //   (d) per requirement and source, one failed and one passed row if any exist (the whole-history verdict that
 //       missingSources uses when no commit is proven).
-// One aggregate pass computes the keys inside D1 and returns a few hundred rows; one filtered pass returns the rows.
+// The keys come from evidence_rollup, which a trigger keeps current as rows arrive (migration 0091), and one indexed
+// filtered pass returns the rows. Neither reads the whole history: before 0091 both did, on every cache miss in every
+// isolate, and that was the largest D1 consumer when certification run 42345838991 overloaded staging (2026-11-07).
 // Equivalence with the full load is proven on randomized histories by tests/readiness-evidence-load.test.ts.
 import { underlyingDb, type Db } from "../lib/db.ts";
 import type { EvidenceRow } from "./engine.ts";
@@ -68,16 +70,12 @@ async function loadRelevant(db: Db, defaultBranch: string): Promise<EvidenceRow[
     .all<{ environment: string; commit_sha: string }>().catch(() => ({ results: [] as { environment: string; commit_sha: string }[] }))).results;
   const commits = [...new Set([...headMain, ...newestCi, ...deployed.map((d) => d.commit_sha)].filter((c): c is string => !!c))];
 
-  // One aggregate pass: per requirement × environment × source, the times and representative rows the verdicts use.
-  const agg = (await db.prepare(`SELECT te.requirement_id AS r, er.environment AS env, er.source AS src,
-        MAX(er.finished_at) AS any_at,
-        MAX(CASE WHEN te.outcome <> 'skipped' THEN er.finished_at END) AS ns_at,
-        MAX(CASE WHEN te.outcome = 'passed' THEN er.finished_at END) AS pass_at,
-        MIN(CASE WHEN te.outcome = 'failed' THEN te.id END) AS f_id,
-        MIN(CASE WHEN te.outcome = 'passed' THEN te.id END) AS p_id
-      FROM test_evidence te JOIN evidence_runs er ON er.id = te.run_id GROUP BY te.requirement_id, er.environment, er.source`).all<Agg>()).results;
+  // Per requirement × environment × source, the times and representative rows the verdicts use. Kept current at insert
+  // time by the test_evidence_rollup trigger (migration 0091), so this reads a few hundred rows instead of aggregating
+  // the whole history: that aggregate was the largest D1 consumer when certification run 42345838991 overloaded staging.
+  const agg = (await db.prepare(`SELECT requirement_id AS r, environment AS env, source AS src, any_at, ns_at, pass_at, f_id, p_id FROM evidence_rollup`).all<Agg>()).results;
 
-  const keys = new Set<string>(), ids = new Set<number>();
+  const ids = new Set<number>();
   const k = (...p: string[]) => p.join("\u0001");
   const maxBy = (m: Map<string, string>, key: string, v: string | null) => { if (v !== null && (!m.has(key) || v > m.get(key)!)) m.set(key, v); };
   const nsEnv = new Map<string, string>(), anyReq = new Map<string, string>(), ciPass = new Map<string, string>();
@@ -90,21 +88,31 @@ async function loadRelevant(db: Db, defaultBranch: string): Promise<EvidenceRow[
     if (a.p_id !== null) passRep.set(k(a.r, a.src), Math.min(passRep.get(k(a.r, a.src)) ?? Infinity, a.p_id));
   }
   // (b) latest non-skipped run time per requirement and environment: rows matched by (requirement, environment, time).
-  for (const [key, at] of nsEnv) keys.add(`${key}\u0001${at}`);
+  const nsKeys = [...nsEnv].map(([key, at]) => [...key.split("\u0001"), at]);
   // (c) newest evidence and newest passing CI per requirement: rows matched by (requirement, any environment, time).
-  const timeKeys = new Set<string>();
-  for (const [r, at] of anyReq) timeKeys.add(k(r, at));
-  for (const [r, at] of ciPass) timeKeys.add(k(r, at));
+  const timeKeys = new Map<string, [string, string]>();
+  for (const [r, at] of anyReq) timeKeys.set(k(r, at), [r, at]);
+  for (const [r, at] of ciPass) timeKeys.set(k(r, at), [r, at]);
   // (d) whole-history verdict per requirement and source.
   for (const v of failRep.values()) ids.add(v);
   for (const v of passRep.values()) ids.add(v);
 
+  // The same four conditions as one OR over the history, but each answered through an index (runs by commit, by
+  // environment and time, by time; rows by run and requirement; rows by id), so the cost follows the output. CROSS JOIN
+  // fixes SQLite's join order (runs first, then rows by run): left to choose, the planner reaches test_evidence through
+  // idx_test_evidence_req instead, which visits a requirement's whole history for every key.
   const rows = (await db.prepare(`SELECT ${COLS} FROM test_evidence te JOIN evidence_runs er ON er.id = te.run_id
-      WHERE er.commit_sha IN (SELECT value FROM json_each(?1))
-         OR te.id IN (SELECT value FROM json_each(?2))
-         OR (te.outcome <> 'skipped' AND (te.requirement_id || char(1) || er.environment || char(1) || er.finished_at) IN (SELECT value FROM json_each(?3)))
-         OR (te.requirement_id || char(1) || er.finished_at) IN (SELECT value FROM json_each(?4))
+      WHERE te.id IN (
+        SELECT te.id FROM evidence_runs er CROSS JOIN test_evidence te ON te.run_id = er.id WHERE er.commit_sha IN (SELECT value FROM json_each(?1))
+        UNION SELECT value FROM json_each(?2)
+        UNION SELECT te.id FROM json_each(?3) k
+          CROSS JOIN evidence_runs er ON er.environment = json_extract(k.value, '$[1]') AND er.finished_at = json_extract(k.value, '$[2]')
+          CROSS JOIN test_evidence te ON te.run_id = er.id AND te.requirement_id = json_extract(k.value, '$[0]')
+          WHERE te.outcome <> 'skipped'
+        UNION SELECT te.id FROM json_each(?4) k
+          CROSS JOIN evidence_runs er ON er.finished_at = json_extract(k.value, '$[1]')
+          CROSS JOIN test_evidence te ON te.run_id = er.id AND te.requirement_id = json_extract(k.value, '$[0]'))
       ORDER BY te.id`)
-    .bind(JSON.stringify(commits), JSON.stringify([...ids]), JSON.stringify([...keys]), JSON.stringify([...timeKeys])).all<EvidenceRow>()).results;
+    .bind(JSON.stringify(commits), JSON.stringify([...ids]), JSON.stringify(nsKeys), JSON.stringify([...timeKeys.values()])).all<EvidenceRow>()).results;
   return rows;
 }
