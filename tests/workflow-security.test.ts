@@ -134,6 +134,28 @@ test("[SEC-007] F-18/F-19: no workflow uploads unsealed access notes, credential
 
 const nonComment = (src: string) => src.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
 
+/**
+ * A `name:` whose unquoted value contains ": " is not a string -- it is a second mapping key, and the step is invalid
+ * YAML. GitHub does not say so. It names the workflow after its own file path, creates one synthetic failed run with
+ * no annotation, and answers every dispatch with "Workflow does not have 'workflow_dispatch' trigger", which reads
+ * like a missing trigger rather than a file it could not read. Measured on scanner-staging-verify.yml, whose step was
+ * called "Apply staging access (same epoch, no rotation: the same derived passwords)".
+ *
+ * Line-based, like every other check here: the platform has no YAML dependency. Quoting the value also satisfies it.
+ */
+test("[SEC-007] a name: value containing a colon-space is unquoted YAML and silently invalidates the workflow", () => {
+  const bad: string[] = [];
+  for (const f of files) for (const raw of read(f).split("\n")) {
+    const l = raw.replace(/\r$/, "");
+    const m = /^\s*(?:-\s+)?name:\s*(.*)$/.exec(l);
+    if (!m) continue;
+    const v = m[1].trim();
+    if (/^["']/.test(v)) continue;   // quoted: the colon is inside the scalar and harmless
+    if (/:\s/.test(v)) bad.push(`${f}: ${l.trim()}`);
+  }
+  assert.deepEqual(bad, [], 'quote the value, or drop the colon');
+});
+
 test("[SEC-004] every action is pinned to a full 40-character commit SHA with a trailing # vN comment (tags can be moved; SHAs cannot)", () => {
   const bad: string[] = [];
   let pinned = 0;
