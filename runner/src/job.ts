@@ -413,7 +413,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     await stopHeartbeats();
     guard();
     await client.complete(job, req);
-    log.info("job completed", { outcome, costUsd: req.runCostUsd, turns: req.turns });
+    // The REASON, not just the outcome. Six design-locked builds finished "stopped" with turns 0 in thirteen
+    // seconds each on Node 1 and the node's log said only "stopped"; the reason -- no integration manifest, so no
+    // contract to build against -- was on the platform and nowhere an operator reading the node could see it.
+    log.info("job completed", { outcome, costUsd: req.runCostUsd, turns: req.turns, stopReason: fields.stopReason ?? null });
     return { outcome, complete: req, workspace: ws?.dir ?? null, stopReason: fields.stopReason ?? null, checks: fields.checks ?? [] };
   };
 

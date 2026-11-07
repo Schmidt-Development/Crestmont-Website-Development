@@ -107,15 +107,44 @@ jobs:
           fi
           exit $rc
 
-      - name: What the queue looked like afterwards (evidence, whatever the result)
+      # The timeline, not a snapshot.
+      #
+      # A snapshot can only see four builds at once while builds OUTLAST the interval at which they arrive. The
+      # first run of this workflow measured six design-locked builds that each stopped in thirteen seconds for
+      # want of a contract, so the four slots were never full at one instant and the snapshot check could say
+      # nothing -- while the records showed six builds queued automatically and each slot taking the next one.
+      # The timeline answers both questions the Founder asked, whatever a build's duration: was the cap ever
+      # exceeded, and did a waiting build start when a slot was released.
+      - name: The build timeline, and whether the cap ever broke (evidence, whatever the result)
         if: always()
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           $WRANGLER d1 execute crestmont-staging --remote --env staging --json \
-            --command "SELECT j.state, p.name, j.run_started_at, j.lease_runner, j.created_at FROM build_jobs j JOIN projects p ON p.id = j.project_id ORDER BY j.created_at DESC LIMIT 20" | tee after.json
-          node -e 'const r=JSON.parse(require("fs").readFileSync("after.json","utf8"));for(const x of (r[0]?.results??[]))console.log(`${x.state}\t${x.name}\tstarted ${x.run_started_at??"—"}\t${x.lease_runner??"—"}`)'
+            --command "SELECT j.id, j.state, j.state_reason, j.stop_reason, p.name, j.created_at, j.run_started_at, j.finished_at, j.lease_runner FROM build_jobs j JOIN projects p ON p.id = j.project_id ORDER BY j.created_at DESC LIMIT 40" | tee after.json
+          node -e '
+            const rows = (JSON.parse(require("fs").readFileSync("after.json","utf8"))[0]?.results ?? []);
+            for (const x of rows.slice().reverse()) {
+              console.log([x.state, x.name, "created " + x.created_at, "started " + (x.run_started_at || "-"), "finished " + (x.finished_at || "-"), x.lease_runner || "-", String(x.stop_reason || x.state_reason || "").slice(0, 160)].join("  |  "));
+            }
+            // Overlap: every build with a start is an interval [started, finished or now). The cap is broken if
+            // more than four overlap at any instant, and an interval can only BEGIN to overlap when one begins,
+            // so checking at every start is enough.
+            // One line, and not called `name`: a line beginning `name: ` inside a block scalar trips the
+            // workflow guard that looks for an unquoted colon-space in a step name ([SEC-007]).
+            const live = rows.filter((x) => x.run_started_at).map((x) => ({ project: x.name, from: Date.parse(x.run_started_at), to: x.finished_at ? Date.parse(x.finished_at) : Date.now() }));
+            let peak = 0, at = null, who = [];
+            for (const s of live) {
+              const together = live.filter((o) => o.from <= s.from && o.to > s.from);
+              if (together.length > peak) { peak = together.length; at = new Date(s.from).toISOString(); who = together.map((o) => o.project); }
+            }
+            console.log("");
+            console.log("most builds active at one instant: " + peak + (at ? " at " + at : ""));
+            if (peak) console.log("  " + who.join(", "));
+            if (peak > 4) { console.log("::error title=Build queue::the four-slot cap was exceeded"); process.exit(1); }
+            console.log("the cap held: " + peak + " of 4 at the busiest instant across " + live.length + " started build(s)");
+          '
 
       - name: Remove the credential files
         if: always()
