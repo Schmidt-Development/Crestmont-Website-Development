@@ -193,6 +193,34 @@ export function checkConformance(o: {
     }
   }
 
+  // ── the verification seed, which must not be a way in ────────────────────────────────────────────────────
+  //
+  // A build that declares visual states is verified signed in, so the application creates the accounts the runner
+  // asks for. That path exists for the gate and for nothing else: if it runs without the environment variable, the
+  // finished site creates accounts nobody asked for, with known passwords, and that is a hole rather than a detail.
+  if (m.visualStates?.length) {
+    checked.push(`${m.visualStates.length} seeded visual state(s)`);
+    const mentionsSeed = files.filter((f) => /CRESTMONT_SEED/.test(f.text));
+    if (!mentionsSeed.length) {
+      violation("verification", "seed-not-implemented",
+        `The contract asks for ${m.visualStates.length} page(s) to be checked signed in, and nothing in the source reads CRESTMONT_SEED, so no account can be created and the design cannot be compared.`,
+        `Read the JSON file named by CRESTMONT_SEED on start-up and create exactly the accounts it lists, through the same code path a real registration uses.`);
+    }
+    for (const f of mentionsSeed) {
+      // The read has to be conditional on the variable. A file that names it and then seeds regardless is worse
+      // than one that never heard of it, because it looks deliberate.
+      const guarded = /if\s*\([^)]*CRESTMONT_SEED/.test(f.text)
+        || /CRESTMONT_SEED[^;]{0,80}\?\?/.test(f.text)
+        || /const\s+\w+\s*=\s*process\.env\.CRESTMONT_SEED[\s\S]{0,200}?if\s*\(\s*\w+\s*\)/.test(f.text);
+      if (!guarded) {
+        violation("verification", "seed-not-gated",
+          `${f.path} reads CRESTMONT_SEED but does not visibly make the seeding conditional on it. A seeding path that runs unasked creates accounts with known passwords in the finished site.`,
+          `Guard it: read the variable, and when it is unset do nothing at all — no accounts, no rows.`,
+          "source", f.path);
+      }
+    }
+  }
+
   // ── tables and fields ─────────────────────────────────────────────────────────────────────────────────────
   if (m.dataModels?.length) {
     checked.push(`${m.dataModels.length} declared table(s)`);

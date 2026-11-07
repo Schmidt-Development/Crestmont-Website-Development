@@ -26,7 +26,7 @@ import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSy
 import path from "node:path";
 
 function args(argv) {
-  const o = { root: "dist", out: ".crestmont/import", json: false, timeoutMs: 20000, maxPages: 40, maxProbes: 12 };
+  const o = { root: "dist", out: ".crestmont/import", json: false, timeoutMs: 20000, maxPages: 40, maxProbes: 12, app: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--root") o.root = argv[++i];
     else if (argv[i] === "--out") o.out = argv[++i];
@@ -34,6 +34,7 @@ function args(argv) {
     else if (argv[i] === "--timeout-ms") o.timeoutMs = Number(argv[++i]) || o.timeoutMs;
     else if (argv[i] === "--max-pages") o.maxPages = Number(argv[++i]) || o.maxPages;
     else if (argv[i] === "--max-probes") o.maxProbes = Number(argv[++i]) || o.maxProbes;
+    else if (argv[i] === "--app") o.app = argv[++i];
   }
   return o;
 }
@@ -51,6 +52,54 @@ function pages(root, dir = root, depth = 0) {
   }
   return out;
 }
+
+/**
+ * Measure against the running APPLICATION rather than a static copy of the built site.
+ *
+ * Without this the instrument serves `dist` from its own file server, so there is no backend in the picture at all
+ * -- at baseline or afterwards -- and a page behind authentication can only ever be captured as an anonymous
+ * visitor sees it. Comparing that with an approved rendering that shows its content is comparing two different
+ * views and calling the difference drift.
+ *
+ * The baseline capture has no application to start and is unaffected: it keeps the static server, which is what
+ * the approved frontend is.
+ */
+async function startApp(spec, cwd) {
+  const { spawn } = await import("node:child_process");
+  const env = { ...process.env, PORT: String(spec.port), NODE_ENV: "test" };
+  if (spec.seedFile) env.CRESTMONT_SEED = spec.seedFile;
+  const child = spawn(spec.start[0], spec.start.slice(1), {
+    cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
+  });
+  let log = "";
+  child.stdout.on("data", (d) => { log += d; });
+  child.stderr.on("data", (d) => { log += d; });
+  const origin = "http://127.0.0.1:" + spec.port;
+  for (let i = 0; i < 120; i++) {
+    if (child.exitCode !== null) throw new Error("the application exited (" + child.exitCode + "): " + log.slice(-300));
+    try { await fetch(origin + "/", { signal: AbortSignal.timeout(1500) }); break; } catch { /* not yet */ }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (child.exitCode !== null) throw new Error("the application exited (" + child.exitCode + "): " + log.slice(-300));
+  const stop = async () => {
+    try {
+      if (process.platform === "win32") spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+      else process.kill(-child.pid, "SIGTERM");
+    } catch { try { child.kill("SIGTERM"); } catch { /* already gone */ } }
+    for (let i = 0; i < 40 && child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 250));
+  };
+  return { origin, stop, log: () => log };
+}
+
+/** Normalise the text of the declared selectors, AFTER the signature has been measured and before the screenshot. */
+const MASK = (selectors) => {
+  for (const sel of selectors) {
+    for (const el of document.querySelectorAll(sel)) {
+      for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim()) n.textContent = "—";
+    }
+  }
+  return selectors.length;
+};
 
 function serve(root) {
   const base = path.resolve(root);
@@ -432,8 +481,18 @@ async function main() {
   const shotDir = path.join(o.out, "screenshots");
   mkdirSync(shotDir, { recursive: true });
 
-  const server = await serve(o.root);
-  const origin = "http://127.0.0.1:" + server.address().port;
+  // Either the approved frontend as shipped (a static server, which is what the baseline is) or the finished
+  // application (so a page behind authentication can be captured as a signed-in person sees it).
+  const spec = o.app ? JSON.parse(readFileSync(o.app, "utf8")) : null;
+  const byPage = new Map((spec?.states ?? []).map((st) => [st.page, st]));
+  let server = null, app = null, origin;
+  if (spec) {
+    app = await startApp(spec, process.cwd());
+    origin = app.origin;
+  } else {
+    server = await serve(o.root);
+    origin = "http://127.0.0.1:" + server.address().port;
+  }
   const browser = await chromium.launch({ args: ["--disable-dev-shm-usage"] });
 
   const routes = [];
@@ -455,12 +514,25 @@ async function main() {
         p.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text().slice(0, 200)); });
 
         try {
+          // A page the contract declared as needing a session is captured as a signed-in person sees it. The
+          // anonymous rendering of the same page is captured below as its own state, so access control is still
+          // checked -- separately, which is what it is.
+          const want = byPage.get(name);
+          if (want && spec?.login && spec.credentials?.[want.session]) {
+            await context.request.post(origin + spec.login.path, { data: spec.credentials[want.session] }).catch(() => {});
+          }
+
           await p.goto(origin + "/" + rel, { waitUntil: "load", timeout: o.timeoutMs });
           // Let fonts settle and any entry animation finish, so the baseline is the resting design.
           await p.evaluate(() => document.fonts && document.fonts.ready).catch(() => {});
           await p.waitForTimeout(250);
 
           const m = await p.evaluate(MEASURE);
+
+          // Masking happens AFTER the signature is measured, so palette, skeleton, fonts and type scale are read
+          // from the page as it really rendered. Only the screenshot hash is affected, which is the only thing a
+          // date or a row count can move.
+          if (want?.mask?.length) await p.evaluate(MASK, want.mask).catch(() => {});
 
           const shot = path.join(shotDir, safeName(name) + "-" + vp.name + ".png");
           await p.screenshot({ path: shot, fullPage: true });
@@ -541,8 +613,28 @@ async function main() {
                 states.push({ page: name, viewport: vp.name, state: "form-focus", sha: sha256(readFileSync(f)), file: path.relative(o.out, f).split(path.sep).join("/") });
               }
             }
+          }
 
-            for (const it of m.items) inventory.push({ page: name, viewport: vp.name, ...it });
+
+          for (const it of m.items) inventory.push({ page: name, viewport: vp.name, ...it });
+
+          // The access-denied rendering of a session-gated page, captured in its own right rather than mistaken for
+          // the page. "Never expose private data to satisfy a screenshot" cuts both ways: the signed-in capture is
+          // the design comparison, and this is the proof that an anonymous visitor does not get it.
+          if (byPage.has(name) && spec && vp.name === "desktop") {
+            const anon = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+            try {
+              const ap = await anon.newPage();
+              await ap.goto(origin + "/" + rel, { waitUntil: "load", timeout: o.timeoutMs });
+              await ap.waitForTimeout(200);
+              const f2 = path.join(shotDir, safeName(name) + "-" + vp.name + "-access-denied.png");
+              await ap.screenshot({ path: f2, fullPage: false });
+              states.push({ page: name, viewport: vp.name, state: "access-denied", sha: sha256(readFileSync(f2)), file: path.relative(o.out, f2).split(path.sep).join("/") });
+            } catch (e) {
+              problems.push(name + " at " + vp.name + ": the access-denied state could not be captured: " + String(e.message).slice(0, 120));
+            } finally {
+              await anon.close().catch(() => {});
+            }
           }
 
           if (consoleErrors.length) problems.push(name + " @ " + vp.name + ": " + consoleErrors.slice(0, 3).join(" | "));
@@ -557,7 +649,8 @@ async function main() {
     }
   } finally {
     await browser.close().catch(() => {});
-    server.close();
+    if (server) server.close();
+    if (app) await app.stop().catch(() => {});
   }
 
   // One inventory entry per page+element. A control measured at several viewports is one interaction; the
