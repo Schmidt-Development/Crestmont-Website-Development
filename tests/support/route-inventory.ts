@@ -547,6 +547,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // Starting a backend job goes through the platform's own queueing path, which decides eligibility; this route
   // only asks it to. Audited by the build record's own events rather than a separate audit row.
   "POST /staff/builds/frontends/:projectId/build": staff(rolesWith("builds.configure"), { projectId: "project" }, act("builds.backend_job_started")),
+  // The integration contract: what a design-locked build is judged against. Configure-level, because recording
+  // one decides what the next build is held to, and audited for the same reason.
+  "POST /staff/builds/frontends/:projectId/contract": staff(rolesWith("builds.configure"), { projectId: "project" }, act("design_locked_contract.recorded")),
   "GET /staff/builds/gallery": staff(rolesWith("builds.read")),
   "GET /staff/builds/gallery/:id": staff(rolesWith("builds.read"), P("designReference")),
   "GET /staff/builds/gallery/:id/image": staff(rolesWith("builds.read"), P("designReference")),
