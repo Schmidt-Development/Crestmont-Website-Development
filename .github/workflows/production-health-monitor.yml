@@ -1,6 +1,6 @@
 name: Production health monitor
 
-# CREST-GAP-015 / INFRA-006: the production twin of staging-health-monitor.yml. Probes the public production health
+# CREST-GAP-015 / INFRA-006: the production monitor (the staging check it was modelled on is on demand only since 2026-11-07). Probes the public production health
 # endpoints from GitHub's infrastructure (outside Cloudflare) on a 30-minute cron that GitHub does not honour (the
 # staging twin measures about 4 runs a day; see its "Schedule reality" note), three attempts a minute apart, and fails
 # loudly. A failed run is the alert: GitHub emails the account that last changed this schedule and anyone watching the

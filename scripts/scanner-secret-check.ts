@@ -117,18 +117,25 @@ if (probeInstalled) {
 
 const root = process.env.ACCESS_ROOT_KEY ?? "";
 if (!root) { console.error("::error::ACCESS_ROOT_KEY is required (the Cloudflare API token), or use --probe-installed <origin>"); process.exit(1); }
-if (root !== root.trim()) console.log(`!! the token has surrounding whitespace (${root.length} characters, ${root.trim().length} trimmed) — an HMAC key is byte-exact, so this alone changes the derived secret`);
-
-const derived = deriveStagingKey(root.trim(), "scanner");
+// Derived EXACTLY as deploy-staging.yml derives it: `staging-secrets.ts derive scanner` uses the token byte for byte,
+// surrounding whitespace included, and so does the fingerprint it records in D1. Trimming here (as this script once
+// did) asked about a key the deploy never installed: run 42337949581 reported REFUSED and MISMATCH for exactly that
+// reason. When the token carries whitespace, the trimmed variant is reported too, because a copy of the token pasted
+// elsewhere (Node 1) is usually trimmed.
+const padded = root !== root.trim();
+if (padded) console.log(`!! the token has surrounding whitespace (${root.length} characters, ${root.trim().length} trimmed). The deploy derives from it as stored; a trimmed copy derives a DIFFERENT key`);
+const derived = deriveStagingKey(root, "scanner");
+const trimmedDerived = padded ? deriveStagingKey(root.trim(), "scanner") : null;
 // GitHub consumes this directive and masks the value; anywhere else it is just the secret, printed. Measured:
 // run locally, the line read "::add-mask::<the derived key>". Only ask for masking where masking exists.
-if (process.env.GITHUB_ACTIONS === "true") console.log(`::add-mask::${derived}`);
-console.log(`token checksum          : ${checksum(root.trim())}`);
-console.log(`derives scanner key     : ${checksum(derived)}`);
+if (process.env.GITHUB_ACTIONS === "true") { console.log(`::add-mask::${derived}`); if (trimmedDerived) console.log(`::add-mask::${trimmedDerived}`); }
+console.log(`token checksum          : ${checksum(root)}`);
+console.log(`derives scanner key     : ${checksum(derived)}  (as the deploy derives it)`);
+if (trimmedDerived) console.log(`trimmed token derives   : ${checksum(trimmedDerived)}  (what a trimmed copy of the token derives)`);
 
 const installed = installedSecret(envFile);
 console.log(`installed on this host  : ${installed ? `${installed.checksum}  (${installed.shape})` : `not readable at ${envFile}`}`);
-if (installed) console.log(`installed == derived    : ${installed.checksum === checksum(derived) ? "YES" : "NO — scanner.env was written from a different token"}`);
+if (installed) console.log(`installed == derived    : ${installed.checksum === checksum(derived) ? "YES" : trimmedDerived && installed.checksum === checksum(trimmedDerived) ? "NO — scanner.env holds the TRIMMED-token key; the deploy installed the untrimmed one" : "NO — scanner.env was written from a different token"}`);
 
 let exit = 0;
 
@@ -137,6 +144,10 @@ if (probeOrigin) {
     const p = await probe(probeOrigin, derived);
     console.log(`\nPROBE (${probeOrigin}): ${p.verdict}`);
     if (p.status !== 200) exit = 1;
+    if (p.status !== 200 && trimmedDerived) {
+      const t = await probe(probeOrigin, trimmedDerived);
+      console.log(`PROBE (${probeOrigin}, trimmed-token key): ${t.verdict}`);
+    }
   } catch (e) {
     console.error(`::error::probe failed to reach the Worker: ${(e as Error).message}`);
     exit = 1;
@@ -145,7 +156,7 @@ if (probeOrigin) {
 
 if (!offline) {
   try {
-    const fp = secretFingerprint(root.trim(), SECRET_NAME, derived);
+    const fp = secretFingerprint(root, SECRET_NAME, derived);
     // updated_at as well as the fingerprint. A MISMATCH alone cannot say WHY: the row may never have matched this
     // token, or something may have rewritten it. Its timestamp settles that against the deploy history -- a row
     // written after the last deploy means a put ran outside CI, with a root this environment does not hold.
