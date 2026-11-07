@@ -151,6 +151,21 @@ export interface Job {
 }
 
 /** The approved frontend artifact, delivered over the signed channel. */
+/**
+ * An artifact the platform has handed this runner to import and measure (protocol v1.8).
+ *
+ * Not a build: no job and no lease token, because there is no job yet. The artifact's own status is the lease,
+ * and the platform hands out one claim at a time.
+ */
+export interface FrontendImportClaim {
+  artifactId: string;
+  projectId: string;
+  organizationId: string;
+  version: number;
+  sha256: string;
+  sizeBytes: number;
+}
+
 export interface ApprovedArtifact {
   artifactId: string;
   version: number;
