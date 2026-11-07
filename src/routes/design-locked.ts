@@ -760,6 +760,9 @@ ${measured ? html`<section class="card">
       DL.activeContract(ctx.db, p.projectId),
     ]);
     const gate = await DL.designGenerationAllowed(ctx.db, p.projectId);
+    // The newest measurement's dependencies: the baselines are newest-first, so this is the design a person is
+    // being asked about.
+    const stateAssets = baselines[0] ? await AA.listAssets(ctx.db, baselines[0].artifact_id) : [];
     return jsonResponse(ctx, 200, {
       projectId: p.projectId,
       ...state,
@@ -770,6 +773,14 @@ ${measured ? html`<section class="card">
       // the id of a design this staff user can already read on the page beside it.
       artifacts: artifacts.map((a) => ({ id: a.id, version: a.version, source: a.source, framework: a.framework, scanStatus: a.scan_status, status: a.status, sha256: a.sha256 })),
       baselines: baselines.map((b) => ({ id: b.id, version: b.version, status: b.status, fingerprint: b.fingerprint, artifactId: b.artifact_id, approvedAt: b.approved_at, approvedBy: b.approved_by })),
+      // The external dependencies of the design that is up for approval. `missingVisual` above zero is why the
+      // approve control refuses, so an automated check reading this endpoint can tell a design that is waiting
+      // for a person from one that is waiting for an asset.
+      assets: {
+        pinned: stateAssets.filter((a) => a.status === "pinned").length,
+        missingVisual: stateAssets.filter((a) => a.status === "refused" && ["image", "font", "stylesheet"].includes(a.kind)).length,
+        kinds: [...new Set(stateAssets.filter((a) => a.status === "pinned").map((a) => a.kind))].sort(),
+      },
       contract: contractState
         ? {
           version: contractState.version, operations: contractState.operations,

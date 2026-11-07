@@ -86,6 +86,53 @@ const DASH = "/staff/builds/frontends";
 const SUBMIT = `form[action$="${DASH}/new"] button[type=submit]`;
 let projectUrl = "";
 
+/**
+ * The project's design-lock state, from the endpoint rather than from the page's prose.
+ *
+ * [AB-UI-09] failed on this first time round and the failure was the test's: its loop broke as soon as the page
+ * contained "approve" and "design", which the page's own headings do -- "Approved frontend and design baseline",
+ * "Upload an approved frontend". It declared the artifact measured 2.4 seconds after upload, while the table
+ * still said `validating` and the framework was a dash. [AB-UI-04] had the same loose condition and may have been
+ * passing for the same reason. So both now read the backend's own facts.
+ */
+interface FrontendState {
+  state: string | null;
+  designLocked: boolean;
+  artifacts: { id: string; version: number; framework: string | null; scanStatus: string; status: string }[];
+  baselines: { id: string; version: number; status: string; fingerprint: string; artifactId: string }[];
+  assets?: { pinned: number; missingVisual: number; kinds: string[] };
+}
+
+async function frontendState(p: Page, projectUrl: string): Promise<FrontendState | null> {
+  const res = await p.request.get(`${projectUrl}/state`);
+  if (!res.ok()) return null;
+  return await res.json() as FrontendState;
+}
+
+/**
+ * Wait until the newest artifact has been measured, or say exactly what it is doing instead.
+ *
+ * Fails on a rejection rather than skipping: being told "rejected" is a determined answer, and the wrong one.
+ */
+async function waitForMeasuredDesign(p: Page, projectUrl: string, minutes: number): Promise<FrontendState> {
+  const deadline = Date.now() + minutes * 60_000;
+  let last = "(no state yet)";
+  for (;;) {
+    const st = await frontendState(p, projectUrl);
+    if (st) {
+      const a = st.artifacts[0];
+      const measured = st.baselines.find((b) => a && b.artifactId === a.id);
+      last = `artifact v${a?.version ?? "?"} scan=${a?.scanStatus ?? "?"} status=${a?.status ?? "?"} framework=${a?.framework ?? "—"} baselines=${st.baselines.length} state=${st.state}`;
+      if (a?.status === "rejected" || a?.status === "quarantined") {
+        assert.fail(`the artifact was ${a.status}, which for a supported archive is the wrong answer: ${last}`);
+      }
+      if (a?.status === "imported" && measured) return st;
+    }
+    if (Date.now() > deadline) assert.fail(`no measured design within ${minutes} minutes: ${last}`);
+    await new Promise((r) => setTimeout(r, 15_000));
+  }
+}
+
 test("[AB-UI-01] an authorized staff user sees the upload control on the dashboard", { skip: unset }, async () => {
   const o = await signedIn("owner");
   await o.goto(BASE + DASH);
@@ -149,19 +196,15 @@ test("[AB-UI-04] the imported frontend and its measurements appear, and approval
   const o = await signedIn("owner");
 
   // Importing and measuring is the runner's work, claimed from staging over its signed protocol. It takes minutes.
-  const deadline = Date.now() + 12 * 60_000;
-  for (;;) {
-    await o.goto(projectUrl);
-    const text = await o.locator("main").innerText();
-    if (/approve/i.test(text) && /baseline|design/i.test(text)) {
-      assert.match(text, /route|page|interaction/i, `the measurements are shown: ${text.slice(0, 300)}`);
-      return;
-    }
-    if (Date.now() > deadline) {
-      return t.skip(`no measured design within 12 minutes; the page says: ${text.slice(0, 300)}`);
-    }
-    await new Promise((r) => setTimeout(r, 30_000));
-  }
+  const st = await waitForMeasuredDesign(o, projectUrl, 12);
+  assert.equal(st.artifacts[0].framework, "static", JSON.stringify(st.artifacts[0]));
+  assert.ok(st.baselines.some((b) => b.status === "draft"), `a draft baseline is waiting for a person: ${JSON.stringify(st.baselines)}`);
+  assert.equal(st.designLocked, false, "and nothing is locked before somebody approves it");
+
+  // And the page a person actually reads offers the approval for that baseline.
+  await o.goto(projectUrl);
+  const draft = st.baselines.find((b) => b.status === "draft")!;
+  assert.ok(await o.locator(`form[action$="/baselines/${draft.id}/approve"]`).count(), "the approve control for the measured baseline is on the page");
 });
 
 test("[AB-UI-05] an invalid file is refused with a reason, and nothing is created for it", { skip: unset }, async () => {
@@ -269,27 +312,23 @@ test("[AB-UI-09] the single-document artifact reaches a measured design, not a r
   if (!singleDocUrl) return t.skip("no project was created by [AB-UI-08]");
   const o = await signedIn("owner");
 
-  // Scanning is the operational scanner's own 60s poll and importing is the runner's work, so this is patient.
-  // It does NOT skip on a rejection: being told "rejected" is a determined answer, and the wrong one.
-  const deadline = Date.now() + 15 * 60_000;
-  let text = "";
-  for (;;) {
-    await o.goto(singleDocUrl);
-    text = await o.locator("main").innerText();
+  // The regression that matters: this is the shape the Founder's first real upload had -- one document, named
+  // something other than index.html -- and it was refused in 0.55 seconds. Scanning is the operational scanner's
+  // own 60s poll and importing is the runner's work, so this is patient; it fails rather than skipping, because
+  // the whole point is to determine something.
+  const st = await waitForMeasuredDesign(o, singleDocUrl, 15);
 
-    if (/rejected|not a supported|unsupported/i.test(text)) {
-      assert.fail(`a single HTML document is a supported artifact and was refused: ${text.slice(0, 800)}`);
-    }
-    if (/approve/i.test(text) && /baseline|design/i.test(text)) break;
-    if (Date.now() > deadline) {
-      assert.fail(`no measured design within 15 minutes, and no rejection either; the page says: ${text.slice(0, 600)}`);
-    }
-    await new Promise((r) => setTimeout(r, 20_000));
-  }
+  assert.equal(st.artifacts[0].framework, "static", `a single HTML document is a static site: ${JSON.stringify(st.artifacts[0])}`);
+  assert.ok(st.baselines.length >= 1, `and it produced a measured baseline: ${JSON.stringify(st.baselines)}`);
+  assert.match(st.baselines[0].fingerprint, /^[0-9a-f]{64}$/, "with a real design fingerprint over what was rendered");
 
-  // Measured, and measured as a static site with a page in it.
-  assert.match(text, /static/i, `the framework is recognised as static: ${text.slice(0, 400)}`);
-  assert.match(text, /route|page|interaction/i, `the measurements are shown: ${text.slice(0, 400)}`);
+  // This fixture is self-contained, so it depends on nothing external and nothing blocks its approval. A design
+  // that WERE missing a visual dependency would report it here and the approve control would refuse.
+  assert.equal(st.assets?.missingVisual ?? 0, 0, `nothing is missing: ${JSON.stringify(st.assets)}`);
+
   // The rename is the owner's business: they uploaded a file with a name, and the page says what happened to it.
-  assert.match(text, /renamed|index\.html/i, `the normalisation is disclosed on the page: ${text.slice(0, 600)}`);
+  await o.goto(singleDocUrl);
+  const text = await o.locator("main").innerText();
+  assert.match(text, /entry-point-normalised|renamed/i, `the normalisation is disclosed on the page: ${text.slice(0, 600)}`);
+  assert.match(text, /index\.html/, text.slice(0, 600));
 });
