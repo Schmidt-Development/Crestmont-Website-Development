@@ -28,7 +28,7 @@ import { buildFrontend, planBuild } from "./build.ts";
 import { baselineFrom, describeImport, readImportReport, verifyAgainstBaseline } from "./import.ts";
 import type { ImportReport } from "./import.ts";
 import { IMPORT_OUT, IMPORT_SCRIPT, writeBaseline } from "./workflow.ts";
-import type { DesignBaseline } from "./design-lock.ts";
+import type { DesignBaseline, DriftFinding } from "./design-lock.ts";
 import { checkConformance, describeConformance, repairBrief } from "./conformance.ts";
 import type { ConformanceReport } from "./conformance.ts";
 import { integrationMemory, integrationPrompt, readIntegrationOutcome } from "./integrate.ts";
@@ -344,8 +344,28 @@ async function measureVisual(
     ran: true, ok,
     detail: ok
       ? `the approved design held across ${v.drift.compared} page view(s)`
-      : `${drifted.length} drift finding(s)${v.stateChanges.length ? `, ${v.stateChanges.length} interactive state(s) changed` : ""}: ${drifted.slice(0, 3).map((f) => `${f.page} [${f.aspects.join(", ")}]`).join("; ")}`,
+      : visualSummary(drifted, v.stateChanges.length),
   };
+}
+
+/**
+ * What drifted, in words that identify it.
+ *
+ * This printed `${page} [${aspects}]` and nothing else, so a build that had lost three components reported
+ * "staff [palette, skeleton]" three times. Measured on the Northgate run: the approved staff page carries three
+ * summary cards whose `h3` headings hold the only two accent colours on it, and Model B's rewrite deleted the whole
+ * block. The finding already knew that -- `detail` names the elements that went and the approved colours no longer
+ * painted -- and both this summary and the REPAIR BRIEF threw it away, so neither the person reading the result nor
+ * the model asked to fix it was ever told what had changed. Two repair cycles changed nothing on this gate.
+ */
+export function visualSummary(drifted: readonly DriftFinding[], stateChanges: number): string {
+  const head = `${drifted.length} drift finding(s)${stateChanges ? `, ${stateChanges} interactive state(s) changed` : ""}`;
+  const each = drifted.slice(0, 3).map((f) => {
+    const where = `${f.page}${f.viewport ? ` at ${f.viewport}` : ""}`;
+    const what = f.aspects.length ? ` [${f.aspects.join(", ")}]` : "";
+    return `${where}${what}${f.detail ? `: ${f.detail}` : ""}`;
+  });
+  return `${head}: ${each.join("; ")}${drifted.length > 3 ? `; and ${drifted.length - 3} more` : ""}`;
 }
 
 /**
