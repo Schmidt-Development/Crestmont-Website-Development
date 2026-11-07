@@ -61,7 +61,7 @@ export interface CycleRecord {
   cycle: number;
   /** What this cycle was asked to do. */
   intent: "integration" | "repair";
-  conformance: { ok: boolean; violations: string[] };
+  conformance: { ok: boolean; violations: string[]; violationDetails?: string[] };
   functional: { ran: boolean; ok: boolean; detail: string };
   visual: { ran: boolean; ok: boolean; detail: string };
   changedFiles: number;
@@ -274,13 +274,18 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
       : await measureVisual(d, baseline, report, built.outputRoot, importOut, cycle);
     const functional = await runFunctional(d, manifest);
 
-    const violations = conf.findings.filter((f) => f.severity === "violation").map((f) => f.code);
+    const broken = conf.findings.filter((f) => f.severity === "violation");
+    const violations = broken.map((f) => f.code);
+    // Codes drive the progress comparison below -- they are stable and comparable. The detail is what a person
+    // reads, so it is kept beside them rather than thrown away: three bare "table-not-defined" told nobody which
+    // three tables, and that is what the gate's whole value depends on saying.
+    const violationDetails = broken.map((f) => (f.file ? `${f.file}: ` : "") + f.detail);
     const progressed = cycle === 1 || violations.length < previousViolations.length
       || violations.some((v) => !previousViolations.includes(v)) === false && violations.length < previousViolations.length;
 
     cycles.push({
       cycle, intent,
-      conformance: { ok: conf.ok, violations },
+      conformance: { ok: conf.ok, violations, violationDetails },
       functional, visual,
       changedFiles,
       progressed: cycle === 1 ? true : progressed,
@@ -314,7 +319,7 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
   if (!out.ok && !out.failedAt) out.failedAt = "verification";
   const last = cycles[cycles.length - 1];
   if (last) {
-    if (!last.conformance.ok) problems.push(`contract: ${last.conformance.violations.join(", ")}`);
+    if (!last.conformance.ok) problems.push(`contract: ${(last.conformance.violationDetails ?? last.conformance.violations).join("; ")}`);
     if (!last.functional.ok) problems.push(`functional: ${last.functional.detail}`);
     if (!last.visual.ok) problems.push(`visual: ${last.visual.detail}`);
   }
@@ -430,7 +435,7 @@ function finish(out: DesignLockedResult): DesignLockedResult {
   if (out.artifact) lines.push(`artifact v${out.artifact.version} (${out.artifact.framework ?? "unknown"}), baseline v${out.artifact.baselineVersion}`);
   if (out.report) lines.push(describeImport(out.report).split("\n").slice(0, 3).join("\n"));
   for (const c of out.cycles) {
-    lines.push(`cycle ${c.cycle} (${c.intent}): contract ${c.conformance.ok ? "ok" : c.conformance.violations.join(", ")}; functional ${c.functional.ok ? "ok" : c.functional.detail}; visual ${c.visual.ok ? "ok" : c.visual.detail}`);
+    lines.push(`cycle ${c.cycle} (${c.intent}): contract ${c.conformance.ok ? "ok" : (c.conformance.violationDetails ?? c.conformance.violations).join("; ")}; functional ${c.functional.ok ? "ok" : c.functional.detail}; visual ${c.visual.ok ? "ok" : c.visual.detail}`);
   }
   lines.push(out.ok
     ? "RESULT: the backend conforms to the contract, the acceptance checks pass, and the approved design held."

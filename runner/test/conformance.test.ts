@@ -170,6 +170,14 @@ test("[CONF-04] a missing table, and a table missing the fields the contract nam
   });
   assert.match(none.findings.find((x) => x.code === "table-not-defined")!.detail, /nothing in the source defines or mentions it/);
 
+  // The repair has to NAME the technology. Measured on the Northgate run: three bare "table-not-defined" findings
+  // whose repair said "using the contract's storage technology" -- a sentence that only helps a reader who goes
+  // back to the manifest. Model B wrote a JSON file store instead, and two repair cycles and 3.4M input tokens
+  // later it had changed nothing. A remedy that cannot be acted on without a second lookup is not a remedy.
+  const named = none.findings.find((x) => x.code === "table-not-defined")!;
+  assert.match(named.repair, /in sqlite/, "the remedy names the technology rather than referring to it");
+  assert.match(named.repair, /node:sqlite is built in/, "and says how, given the sandbox has no network");
+
   // Column parsing: the real thing, not a toy.
   const tables = declaredTables([{ path: "s.js", text: SQLITE_SERVER }]);
   assert.deepEqual([...tables.keys()], ["quote_requests"]);
