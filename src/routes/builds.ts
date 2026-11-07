@@ -17,7 +17,7 @@ import * as D from "../services/site-delivery.ts";
 import * as W from "../services/build-workers.ts";
 import * as PL from "../services/build-pipeline.ts";
 import { notify } from "../services/notifications.ts";
-import { claimSignatureOnce, securityEvent } from "../services/security.ts";
+import { claimSignatureOnce, securityEvent, audit } from "../services/security.ts";
 import * as DX from "../services/runner-diagnostics.ts";
 import { latestQuality } from "../services/build-quality.ts";
 import * as BR from "../services/build-revisions.ts";
@@ -236,7 +236,47 @@ export function register(r: Router): void {
       problems,
     });
     const recorded = await DL.recordBaseline(ctx.db, artifactId, baseline);
-    return jsonResponse(ctx, 200, { recorded: "imported", baselineId: recorded.id, baselineVersion: recorded.version });
+
+    // If the person who submitted it said at the time that this is the approved design, that becomes an approval
+    // HERE -- now that there is a measured design to approve, written against this baseline's version and
+    // fingerprint and this artifact's own checksum. applySubmissionApproval refuses every case where it would be
+    // approving something else: a rejected or unmeasured artifact, a baseline from different bytes, one that is
+    // already approved, or an acknowledgement another report has already acted on.
+    const approval = await DL.applySubmissionApproval(ctx.db, artifactId, recorded.id);
+    if (!approval.applied) {
+      return jsonResponse(ctx, 200, { recorded: "imported", baselineId: recorded.id, baselineVersion: recorded.version, approved: false, why: approval.why });
+    }
+
+    // Approved and eligible, so the backend build is queued without anyone pressing anything -- through
+    // `syncProjectBuild`, the same path the staff button uses, so the same eligibility rule, the same brief
+    // snapshot and the same capacity limit apply. A refusal here is reported, not hidden: the design is approved
+    // either way, and a build that the rules decline is something a person needs to see rather than a silence.
+    const project = await ctx.db.prepare(`SELECT project_id FROM frontend_artifacts WHERE id = ?`).bind(artifactId)
+      .first<{ project_id: string }>();
+    let queued: string | null = null;
+    let queueRefusal: string | null = null;
+    if (project) {
+      const job = await B.syncProjectBuild(ctx.db, project.project_id, "backfill", { kind: "user", userId: approval.approvedBy });
+      if (job) {
+        queued = job.id;
+        await audit(ctx.db, {
+          actorUserId: approval.approvedBy, actorKind: "user", action: "builds.backend_job_started",
+          subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id,
+          details: { trigger: "submission approval", baselineId: recorded.id, baselineVersion: recorded.version, artifactId },
+        });
+      } else {
+        const decision = B.decideEligibility(await B.projectFacts(ctx.db, project.project_id));
+        const settings = await B.getBuildSettings(ctx.db);
+        queueRefusal = decision.verdict === "ineligible"
+          ? decision.reasons.join("; ")
+          : !settings.automation_enabled ? "automatic starts are switched off in the AI builds settings"
+            : "the project is not yet eligible for a build";
+      }
+    }
+    return jsonResponse(ctx, 200, {
+      recorded: "imported", baselineId: recorded.id, baselineVersion: recorded.version,
+      approved: true, approvedBy: approval.approvedBy, queued, queueRefusal,
+    });
   }));
 
   // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.

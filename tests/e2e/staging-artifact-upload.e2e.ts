@@ -115,7 +115,13 @@ test("[AB-UI-02] a first test project is created and a valid ZIP is accepted, th
 
   const text = await o.locator("main").innerText();
   assert.match(text, new RegExp(`Artifact upload check ${RUN}`), "the page is the project that was just created");
-  assert.match(text, /not yet scanned|pending|scanning/i, `the artifact is awaiting a scan: ${text.slice(0, 400)}`);
+  // Any state before approval will do. Insisting on "pending" failed on the system being FASTER than the test
+  // assumed: measured on staging, by the time this page was read the scanner had already returned clean and the
+  // runner had claimed it, so the page said "validating artifact". What this check is for is that the upload was
+  // accepted and the artifact is moving, not that nothing has happened to it yet.
+  assert.match(text, /not yet scanned|pending|scanning|validating|awaiting approval|clean/i,
+    `the artifact is somewhere before approval: ${text.slice(0, 400)}`);
+  assert.doesNotMatch(text, /design-locked/i, "and nothing is locked before a person approves it");
 });
 
 test("[AB-UI-03] the scanner's verdict becomes visible on the page", { skip: unset }, async (t) => {

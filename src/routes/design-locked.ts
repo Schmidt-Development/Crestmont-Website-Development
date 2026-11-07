@@ -29,7 +29,10 @@ const BASE = "/staff/builds/frontends";
  * that is not an allowed type, is empty, is oversized, or whose bytes do not match its extension -- a refusal to
  * show the person, so it is answered 422 with the reason rather than becoming a 500.
  */
-async function receiveArtifact(ctx: AppContext, o: { projectId: string; organizationId: string; file: File }): Promise<void> {
+async function receiveArtifact(
+  ctx: AppContext,
+  o: { projectId: string; organizationId: string; file: File; approveOnMeasure?: boolean },
+): Promise<void> {
   let stored;
   try {
     stored = await storeUpload(ctx, {
@@ -44,6 +47,9 @@ async function receiveArtifact(ctx: AppContext, o: { projectId: string; organiza
     projectId: o.projectId, organizationId: o.organizationId, source: "upload",
     fileId: stored.id, sha256: stored.sha256, sizeBytes: stored.size_bytes,
     uploadedBy: actorId(ctx), scanStatus: stored.scan_status,
+    // Not an approval. It records that this person, submitting this upload, says it is the approved design; it
+    // becomes an approval only once the artifact has been scanned clean, imported and measured.
+    approvalIntentBy: o.approveOnMeasure ? actorId(ctx) : null,
   });
 }
 
@@ -154,6 +160,16 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
     <p class="faint">Up to ${limitMb} MB. A ZIP of the complete frontend project, as it was built.</p>
     <input type="file" name="artifact" accept=".zip,application/zip" required>
 
+    <h2>3. Approve it now, or later</h2>
+    <p><label><input type="checkbox" name="approve" value="1"> This is the approved design. Approve it automatically and start the backend.</label></p>
+    <p class="faint">
+      Ticking this does not approve anything yet: there is nothing to approve until the ZIP has been scanned,
+      unpacked and measured. It records that you said it. The approval is then written against the design that
+      was actually measured &mdash; its version, its fingerprint and this archive's own checksum &mdash; and the
+      backend build is queued. An artifact that is infected, invalid or cannot be measured is never approved.
+      Leave it unticked to review the measurements first and approve by hand.
+    </p>
+
     <p style="margin-top:1rem">${button("Upload and scan", { variant: "primary" })}</p>
   </form>
 </section>
@@ -205,7 +221,7 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
     }
 
     try {
-      await receiveArtifact(ctx, { projectId, organizationId, file });
+      await receiveArtifact(ctx, { projectId, organizationId, file, approveOnMeasure: str(form, "approve") === "1" });
     } catch (e) {
       // storeUpload is the authority on what a frontend artifact may be, and it can still refuse a file that
       // passed the checks above -- bytes that do not match the extension, for one. A project created a moment ago
