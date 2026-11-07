@@ -228,6 +228,31 @@ export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutc
         const outcome = await (d.importer ?? importFrontend)({
           archive,
           source: "customer-upload",
+          // The artifact's external dependencies, acquired by the platform and written in before anything is
+          // built or measured. The runner cannot fetch them: its egress proxy allows the npm registry, the
+          // control plane and the model server, and denies the domain Google Fonts is served from. Batched,
+          // because a page can reference dozens and a Worker has a subrequest budget.
+          resolveAssets: async (refs) => {
+            const out: Awaited<ReturnType<NonNullable<Parameters<typeof importFrontend>[0]["resolveAssets"]>>> = [];
+            for (let i = 0; i < refs.length; i += 10) {
+              const batch = refs.slice(i, i + 10);
+              const answer = await d.client.resolveFrontendAssets({
+                artifactId: claim.artifactId,
+                assets: batch.map((r) => ({ url: r.url, kind: r.kind, referencedBy: r.referencedBy })),
+              });
+              // An older platform has no asset channel. Reported as refused with a reason rather than silently
+              // skipped, so the import record says the design was measured without them.
+              if (!answer) {
+                out.push(...batch.map((r) => ({
+                  url: r.url, kind: r.kind, status: "refused" as const,
+                  why: "this platform has no asset channel, so external dependencies cannot be pinned",
+                })));
+                break;
+              }
+              out.push(...answer.assets);
+            }
+            return out;
+          },
           // The platform only ever offers a clean artifact and re-checks the scan at delivery, so the gate has
           // already been applied twice by the time the bytes arrive here.
           scan: { status: "clean" },

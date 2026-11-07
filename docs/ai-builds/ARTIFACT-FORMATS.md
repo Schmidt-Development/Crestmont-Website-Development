@@ -57,11 +57,35 @@ arbitrarily named single entry points; `index.html` projects; separate CSS and J
 fonts; a top-level folder inside the ZIP; several HTML pages where one of them is `index.html`; client-side
 JavaScript interactions; relative and absolute asset references; compiled framework output (`dist/`).
 
-**External references are not fetched.** The measurement runs in a container with `--network none`, so a web font,
-a CDN script or a remote image does not load, and the approved design is *the site as it renders with no network*.
-This is deliberate — an artifact is measured and verified identically at import and at build time, so the two
-agree — but it is a real limitation: a site whose typography comes from Google Fonts will be approved and rebuilt
-with its fallback font. Package the fonts and images you want measured inside the archive.
+**External images, fonts and stylesheets are acquired once and pinned.** The measurement runs in a container with
+`--network none`, so nothing can be fetched while a design is being measured — and it must not be, or the
+approved design would be whatever a CDN served that minute. So the dependencies are resolved at ingestion
+instead, by the platform (`src/services/artifact-assets.ts`), written into the artifact under
+`_crestmont-assets/<content-hash>.<ext>`, and the references rewritten to point at them. The measurement, the
+approved baseline, Model B's build and the final visual verification then all render the same bytes, and none of
+them fetches anything. Resolution happens on the platform because Node 1 cannot: its egress proxy allows the npm
+registry, the control plane and the model server, and explicitly denies the domain Google Fonts is served from.
+
+Two rounds, because a font-CDN stylesheet names the font files rather than containing them: the document's
+references are resolved first, then the references inside any stylesheet that was just pinned. A chain deeper
+than that is not a website's typography and is not followed.
+
+The rules, all in one place and applied at every redirect hop:
+
+| rule | why |
+|---|---|
+| `https` only, port 443, no credentials in the URL | an upload must not be able to name a scheme or a secret |
+| no IP-literal host; no private, loopback, link-local or `.internal` name | an uploaded file must not be able to address the inside of anything |
+| redirects followed at most 3 times, each hop re-checked | a public URL that redirects inward is the attack this stops |
+| an allow-list of content types, each confirmed against the bytes' own magic numbers | a `Content-Type` is a claim by a stranger |
+| 8 MB per asset, 64 MB and 120 assets per artifact | an artifact is a website, not a crawl |
+| scripts are never fetched | pinning somebody's bundle means running code we downloaded |
+
+**A dependency that cannot be acquired blocks approval.** It is recorded with the reason and with what its absence
+does to the page — "the typeface served by fonts.gstatic.com is not available, so this text renders in a fallback
+font" — shown on the project page, and `approveBaseline` refuses while any remain. The remedy is to package the
+asset in the archive or make it publicly readable, not to approve around it. A remote **script** is reported the
+same way but does not block: anything it draws after load is simply not part of the measured design.
 
 ## Refused, and why
 
@@ -101,5 +125,5 @@ offers `received` artifacts, so every artifact refused before a fix to the impor
 Anything that is not a ZIP. Server-rendered frameworks that need a runtime of their own (Next.js SSR, Nuxt,
 SvelteKit with an adapter, Astro SSR): the builder serves static output and adds a backend behind it, so a project
 that needs its own server is out of scope rather than quietly half-built. Several HTML documents with no
-`index.html`. Archives whose assets are only reachable over the network, in the sense above — they import, but
-what is approved is not what the owner sees in their own browser.
+`index.html`. Assets that are not publicly readable: the platform does not authenticate to a third party on an
+owner's behalf, so an asset behind a login or a signed URL is reported as missing and blocks approval.

@@ -198,6 +198,33 @@ export interface FrontendImportReportResult {
   why?: string | null;
 }
 
+/**
+ * What the platform did with each external dependency the runner found (protocol v1.10).
+ *
+ * The runner cannot fetch these itself: Node 1's egress proxy allows the npm registry, the control plane and the
+ * model server, and explicitly denies the domain Google Fonts is served from. The platform has the network, the
+ * SSRF rules and the storage, so it acquires them once and hands back the bytes to be written into the artifact.
+ */
+export interface AssetResolution {
+  url: string;
+  kind: "image" | "font" | "stylesheet" | "other";
+  status: "pinned" | "refused";
+  why: string | null;
+  sha256: string | null;
+  bytes: number | null;
+  contentType: string | null;
+  /** Where to write it inside the artifact. The platform decides it; the runner checks it stays inside.  */
+  localPath: string | null;
+  /** base64, on `pinned`. */
+  body: string | null;
+}
+
+export interface AssetResolveResult {
+  assets: AssetResolution[];
+  /** Visual dependencies that could not be acquired: the reason a baseline is materially incomplete. */
+  refusedVisual: number;
+}
+
 /** The platform validator's answer to a drafted integration contract. A refusal carries its reasons. */
 export interface ContractSubmitResult {
   recorded: boolean;

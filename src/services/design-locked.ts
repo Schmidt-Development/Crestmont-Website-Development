@@ -23,6 +23,7 @@ import type {
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
+import { missingVisualAssets } from "./artifact-assets.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 
@@ -670,10 +671,21 @@ export async function applySubmissionApproval(
   ).bind(nowIso(), nowIso(), artifactId).run();
   if (!stamped.meta.changes) return { applied: false, why: "the acknowledgement was applied by another report" };
 
-  await approveBaseline(db, baselineId, {
-    approvedBy: a.approval_intent_by,
-    note: `approved at submission and applied after measurement (artifact v${a.version}, sha256 ${a.sha256.slice(0, 12)}…)`,
-  });
+  // The gates inside `approveBaseline` throw, and this path is reached from the import report, where a throw
+  // would become a 500 and lose the measured design. A refusal is an answer, so it is returned as one -- the most
+  // likely being a design whose external visual dependencies could not be acquired.
+  try {
+    await approveBaseline(db, baselineId, {
+      approvedBy: a.approval_intent_by,
+      note: `approved at submission and applied after measurement (artifact v${a.version}, sha256 ${a.sha256.slice(0, 12)}…)`,
+    });
+  } catch (err) {
+    const why = err instanceof DesignLockError ? err.message : String((err as Error)?.message ?? err).slice(0, 400);
+    // The acknowledgement was stamped before this ran, so it is released: the owner resolves what was wrong and
+    // the next import applies it, rather than the acknowledgement being spent on a refusal.
+    await db.prepare(`UPDATE frontend_artifacts SET approval_intent_applied_at = NULL WHERE id = ?`).bind(artifactId).run();
+    return { applied: false, why };
+  }
   return { applied: true, approvedBy: a.approval_intent_by, baselineVersion: b.version };
 }
 
@@ -1020,6 +1032,24 @@ export async function approveBaseline(db: Db, baselineId: string, o: { approvedB
   if (!b) throw new DesignLockError("no such design baseline", 404);
   if (!o.approvedBy) throw new DesignLockError("a design baseline must record who approved it");
   if (b.status !== "draft") throw new DesignLockError(`this baseline is already ${b.status}; approve a new version instead`, 409);
+
+  // A baseline that is missing a visual dependency is not the design anyone meant to approve.
+  //
+  // The measurement runs with no network, so an external font or photograph that could not be acquired and
+  // pinned was simply absent from it: the fallback face and the empty image box became the approved design, and
+  // every later comparison was against that. Approving it is the one step where that stops being recoverable, so
+  // it is refused here, with the dependencies named. The remedy is to resolve them -- package them in the
+  // archive, or make them publicly readable -- not to approve around them.
+  const missing = await missingVisualAssets(db, b.artifact_id);
+  if (missing.length) {
+    throw new DesignLockError(
+      `this design depends on ${missing.length} external visual asset(s) that could not be acquired, so what was measured is not what the site looks like: `
+      + missing.slice(0, 5).map((m) => `${m.kind} ${m.url} (${m.why ?? "not acquired"})`).join("; ")
+      + (missing.length > 5 ? `; and ${missing.length - 5} more` : "")
+      + ". Package them inside the archive, or make them publicly readable, and import again.",
+      409,
+    );
+  }
 
   const at = nowIso();
   const current = await approvedBaseline(db, b.project_id);

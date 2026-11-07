@@ -66,7 +66,7 @@ function fakeClient(o: {
 
 const outcome = (over: Partial<ImportOutcome> = {}): ImportOutcome => ({
   ok: true, failedAt: null, ingest: null, build: null, report: null,
-  baseline: null, manifestProblems: [], verify: null, problems: [], ...over,
+  baseline: null, manifestProblems: [], verify: null, problems: [], assets: null, ...over,
 });
 
 test("[IMP-01] nothing to import, and an older platform is asked only once", async () => {

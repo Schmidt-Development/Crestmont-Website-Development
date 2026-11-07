@@ -8,7 +8,7 @@ import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
   AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, DiagnosticCheckpoint, ExpiredPreview, ExpiredPreviewsResponse,
   SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus, ApprovedArtifact, FrontendImportClaim,
-  FrontendImportReportResult, ContractSubmitResult } from "./protocol.ts";
+  FrontendImportReportResult, ContractSubmitResult, AssetResolveResult } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
 import { silentLogger, errorMessage } from "./log.ts";
@@ -251,6 +251,23 @@ export class ControlPlaneClient {
     measurement?: unknown;
   }): Promise<FrontendImportReportResult | null> {
     try { return (await this.post<FrontendImportReportResult>("/api/builds/runner/frontend/import/report", { ...r })) ?? null; }
+    catch (err) {
+      if (err instanceof ControlPlaneError && [404, 405].includes(err.status)) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Ask the platform to acquire the external assets this artifact depends on.
+   *
+   * Sent in batches by the caller. A 404/405 means this platform has no asset channel, which is an older
+   * platform rather than a failure: the import then measures the artifact as it stands, and says so.
+   */
+  async resolveFrontendAssets(r: {
+    artifactId: string;
+    assets: { url: string; kind: string; referencedBy?: string | null }[];
+  }): Promise<AssetResolveResult | null> {
+    try { return (await this.post<AssetResolveResult>("/api/builds/runner/frontend/assets/resolve", { ...r })) ?? null; }
     catch (err) {
       if (err instanceof ControlPlaneError && [404, 405].includes(err.status)) return null;
       throw err;

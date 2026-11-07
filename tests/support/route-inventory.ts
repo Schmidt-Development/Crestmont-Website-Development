@@ -126,6 +126,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/frontend/import/claim": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/frontend/import/bytes": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/frontend/import/report": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/frontend/assets/resolve": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/frontend/contract/submit": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/gallery/image": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/gallery/seen": signed("x-crestmont-runner-signature"),
