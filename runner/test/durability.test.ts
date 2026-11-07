@@ -263,7 +263,7 @@ test("[DUR] an uploaded frontend is still imported while every slot is building"
     const deadline = Date.now() + 20_000;
     while (imported === 0 && Date.now() < deadline) await tick();
     stop = true;
-    release();
+    release!();
     await loops;
 
     assert.equal(peak, 4, `all four slots have to be in a build for this to prove anything (peak ${peak})`);
