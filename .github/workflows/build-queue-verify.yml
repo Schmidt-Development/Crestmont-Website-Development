@@ -93,7 +93,19 @@ jobs:
         run: |
           npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
-          node --no-warnings --test --test-concurrency=1 tests/e2e/staging-build-queue.e2e.ts
+          rc=0
+          node --no-warnings --test --test-concurrency=1 tests/e2e/staging-build-queue.e2e.ts 2>&1 | tee queue-e2e.log || rc=$?
+          # A SKIPPED check is UNDETERMINED, and this run exists to determine something. node:test exits 0 when a
+          # test skips itself, so the first run of this workflow finished GREEN while reporting
+          #   [AB-Q-02] ... # SKIP only 0 of 6 fixtures had reached the queue within 45 minutes
+          # A verification that cannot say the four-slot queue works must not look like one that said it does.
+          skipped=$(grep -cE '^ok [0-9]+ - .* # SKIP' queue-e2e.log || true)
+          if [ "${skipped:-0}" -gt 0 ]; then
+            echo "::error title=Build queue::${skipped} check(s) could not be determined, which is not a pass:"
+            grep -E '^ok [0-9]+ - .* # SKIP' queue-e2e.log | cut -c1-400
+            rc=1
+          fi
+          exit $rc
 
       - name: What the queue looked like afterwards (evidence, whatever the result)
         if: always()
