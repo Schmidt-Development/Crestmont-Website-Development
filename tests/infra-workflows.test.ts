@@ -216,3 +216,18 @@ test("[TEST-004] CREST-NEW-007: every workflow sharing the deploy-staging group 
     assert.ok(ifAt > 0 && cAt > ifAt, `${f}: the group is taken after the if:, so a skipped job never enters it`);
   }
 });
+
+/**
+ * The checkout must be LF on every platform, or this suite lies on the machine the work happens on.
+ *
+ * core.autocrlf=true rewrites text files to CRLF on checkout while the blobs stay LF. CI is unaffected, so the
+ * failures are local-only -- and they are not obviously environmental. JavaScript regular expressions treat a
+ * carriage return as a line terminator, so `.` will not match it: on 2026-11-07 the action-pinning check matched 4
+ * of 83 `uses:` lines and reported "all workflow actions found (4)". A suite whose failures the reader has to
+ * classify as real or environmental is worse than no suite, because that is where the mistakes happen.
+ */
+test("[INFRA-004] .gitattributes forces LF, so the suite behaves the same on Windows as in CI", () => {
+  const ga = readFileSync(".gitattributes", "utf8");
+  assert.match(ga, /^\s*\* text=auto eol=lf\s*$/m, "every text file is checked out with LF");
+  assert.match(ga, /autocrlf/, "and it says why, since the symptom does not point at the cause");
+});

@@ -1,0 +1,16 @@
+# Line endings are LF everywhere, including on Windows checkouts.
+#
+# Without this, core.autocrlf=true (the default this project's Windows machine has) rewrites every text file to CRLF
+# on checkout while the blobs stay LF. The committed content is unaffected and CI is unaffected -- CI runs on Linux --
+# but the test suite cannot be run truthfully on the machine the work happens on. Measured on 2026-11-07: three tests
+# failed locally and passed in CI, and the cause took two investigations to pin down, because JavaScript's `.` does
+# not match a carriage return. The pinning check's regex matched 4 of 83 `uses:` lines instead of all of them:
+#
+#   C:\Crestmont-Admin     ci.yml crlf=176 lf=176  uses-matched=4
+#   an LF checkout         ci.yml crlf=0   lf=176  uses-matched=83
+#
+# A suite that reports failures the reader must then classify as real or environmental is worse than no suite: the
+# classification is where the mistakes happen.
+#
+# Nothing here needs CRLF -- there are no .bat or .cmd files -- and `text=auto` leaves binaries alone.
+* text=auto eol=lf
