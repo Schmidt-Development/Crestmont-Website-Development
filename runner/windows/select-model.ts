@@ -208,7 +208,29 @@ export function parseHardwareBytes(buf: Uint8Array): Hardware {
   return normalizeHardware(JSON.parse(text.replace(/^﻿/, "")));
 }
 
-export function selectModel(input: Hardware): Recommendation {
+/**
+ * The share of the machine's threads the build containers may take between them.
+ *
+ * The rest is not spare: the model server answers every one of those builds, the file scanner runs beside them,
+ * and Docker Desktop and Windows need enough left to stay responsive. A reserve that only exists when the node is
+ * idle is not a reserve.
+ */
+const BUILD_THREAD_SHARE = 0.75;
+/** The same idea for RAM, where the model server's own footprint is already resident. */
+const BUILD_RAM_SHARE = 0.6;
+
+export interface SelectModelOptions {
+  /**
+   * How many website builds this runner will run at once (`RUNNER_SLOTS`).
+   *
+   * The per-build limits below are what each build's container is capped at, so they only mean anything once the
+   * number of builds sharing the machine is known. Omitted, it is one, which is what the installer defaults to.
+   */
+  slots?: number;
+}
+
+export function selectModel(input: Hardware, options: SelectModelOptions = {}): Recommendation {
+  const slots = Math.max(1, Math.min(16, Math.floor(Number(options.slots) || 1)));
   const hw = normalizeHardware(input);
   const reasons: string[] = [];
   const warnings: string[] = [];
@@ -264,17 +286,49 @@ export function selectModel(input: Hardware): Recommendation {
   const numParallel = 1;
   reasons.push(`OLLAMA_NUM_PARALLEL=${numParallel}: memory scales with NUM_PARALLEL x CONTEXT_LENGTH (S9); one build or one draft at a time.`);
 
-  // Disk: model file + images + workspaces + checkpoints. ESTIMATE: 40 GB beyond the model.
-  const diskNeeded = (pick?.fileGB ?? 20) + 40;
-  if (!bestDisk || bestDisk.freeGB < diskNeeded) blockers.push(`Free disk: needs about ${diskNeeded} GB (model + images + workspaces; estimate), largest free is ${bestDisk ? `${bestDisk.freeGB} GB on ${bestDisk.drive}` : "unknown"}.`);
-  if (ram < 32 && pick) warnings.push("Less than 32 GB RAM: Docker Desktop, the runner and the build containers compete with the model server.");
-
-  // Per-build container limits: a quarter of the threads (2..8) and ~15% of RAM (4..8 GB). ESTIMATE.
+  // Per-build container limits: what ONE build's container is capped at.
+  //
+  // Two ceilings, and the lower wins. The first is the long-standing per-build ceiling -- a quarter of the threads
+  // and ~15% of RAM, 2..8 CPUs and 4..8 GB -- which stops a single build from monopolising a large machine and is
+  // all that applied while a runner took one build at a time. The second is new, and is the one that matters at
+  // four slots: the builds have to FIT TOGETHER. Without it, 4 slots x 8 CPUs is 32 of this node's 32 threads, and
+  // the model server every one of those builds is waiting on, the file scanner and the host are left nothing.
+  //
+  // So the share is divided by the slots. On the measured node (32 threads, 95 GB) that is 6 CPUs and 8 GB per
+  // build at four slots -- 24 threads for the builds, 8 held back -- and an unchanged 8 CPUs at one slot, where
+  // the per-build ceiling is still the binding one.
+  //
+  // Both are estimates, as the comment above has always said, and deliberately static: this is sizing at install
+  // time, not a scheduler. What actually enforces them is the container limit the runner passes per sandbox.
+  const perBuildCpus = Math.min(8, Math.max(2, Math.floor(threads / 4)));
+  const perBuildMemoryGB = Math.min(8, Math.max(4, Math.floor(ram * 0.15)));
   const jobLimits = {
-    cpus: Math.min(8, Math.max(2, Math.floor(threads / 4))),
-    memoryGB: Math.min(8, Math.max(4, Math.floor(ram * 0.15))),
+    cpus: Math.max(2, Math.min(perBuildCpus, Math.floor((threads * BUILD_THREAD_SHARE) / slots))),
+    memoryGB: Math.max(4, Math.min(perBuildMemoryGB, Math.floor((ram * BUILD_RAM_SHARE) / slots))),
     diskGB: 4,
   };
+  if (slots > 1) {
+    reasons.push(
+      `${slots} build slots: each build container is capped at ${jobLimits.cpus} CPU and ${jobLimits.memoryGB} GB, ` +
+      `so all ${slots} together take ${slots * jobLimits.cpus} of ${threads} threads and ${slots * jobLimits.memoryGB} of ${ram} GB, ` +
+      `leaving the model server, the file scanner and the host the rest.`,
+    );
+    // The floors (2 CPUs, 4 GB) mean the division can be overruled: say so rather than quietly overcommitting.
+    if (slots * jobLimits.cpus > threads * BUILD_THREAD_SHARE || slots * jobLimits.memoryGB > ram * BUILD_RAM_SHARE) {
+      warnings.push(
+        `${slots} slots is more than this machine comfortably holds: ${slots} x ${jobLimits.cpus} CPU is ` +
+        `${slots * jobLimits.cpus} of ${threads} threads and ${slots} x ${jobLimits.memoryGB} GB is ` +
+        `${slots * jobLimits.memoryGB} of ${ram} GB, which leaves little for the model server and the host. ` +
+        `Builds will still run, more slowly and with the model server contended. Lower -Slots, or use a larger node.`,
+      );
+    }
+  }
+
+  // Disk: model file + images + workspaces + checkpoints, plus one sandbox quota per extra slot (they are
+  // concurrent, so their quotas are concurrent too). ESTIMATE: 40 GB beyond the model.
+  const diskNeeded = (pick?.fileGB ?? 20) + 40 + (slots - 1) * jobLimits.diskGB;
+  if (!bestDisk || bestDisk.freeGB < diskNeeded) blockers.push(`Free disk: needs about ${diskNeeded} GB (model + images + workspaces + ${slots} concurrent build sandbox${slots === 1 ? "" : "es"}; estimate), largest free is ${bestDisk ? `${bestDisk.freeGB} GB on ${bestDisk.drive}` : "unknown"}.`);
+  if (ram < 32 && pick) warnings.push("Less than 32 GB RAM: Docker Desktop, the runner and the build containers compete with the model server.");
 
   const ok = !!pick && blockers.length === 0;
   const summary = !pick
@@ -292,8 +346,12 @@ export function selectModel(input: Hardware): Recommendation {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const file = process.argv[2];
-  if (!file) { process.stderr.write("usage: node windows/select-model.ts <hardware.json>\n"); process.exit(2); }
-  const rec = selectModel(parseHardwareBytes(readFileSync(file)));
+  if (!file) { process.stderr.write("usage: node windows/select-model.ts <hardware.json> [slots]\n"); process.exit(2); }
+  // The slot count sizes the per-build container limits, so the installer passes the -Slots it is installing with.
+  // Absent or unreadable it is one, which is the installer's own default, so an older caller gets what it got before.
+  const slots = process.argv[3] === undefined ? 1 : Number(process.argv[3]);
+  if (!Number.isFinite(slots) || slots < 1) { process.stderr.write(`slots must be a whole number of 1 or more, not ${JSON.stringify(process.argv[3])}\n`); process.exit(2); }
+  const rec = selectModel(parseHardwareBytes(readFileSync(file)), { slots });
   process.stdout.write(JSON.stringify(rec, null, 2) + "\n");
   process.exit(rec.ok ? 0 : 3);
 }

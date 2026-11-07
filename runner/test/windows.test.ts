@@ -238,6 +238,86 @@ test("[AIB-RUNNER] select-model CLI reads a UTF-16 hardware.json and exits 0 (ok
   assert.equal(spawnSync(process.execPath, ["--no-warnings", path.join(WIN, "select-model.ts"), weak], { encoding: "utf8" }).status, 3);
 });
 
+// ── sizing a node that runs several builds at once ────────────────────────────────────────────────────────────
+//
+// The per-build container limits are what ONE build is capped at, so they only mean something once the number of
+// builds sharing the machine is known. Sized as though each build had the node to itself, four slots hand the
+// builds the whole machine and leave the model server every one of them is waiting on with nothing. These fix the
+// division, and fix that the one-slot sizing did not change.
+
+test("[AIB-SLOTS] per-build limits divide the machine by the slots, and never hand the builds all of it", () => {
+  // Node 1 as measured: 32 logical processors, 95.1 GB, one 32 GB GPU.
+  const node1 = hw({ gpus: [{ vramGB: 31.8 }], ram: 95.1, threads: 32 });
+
+  const one = selectModel(node1, { slots: 1 });
+  assert.equal(one.jobLimits.cpus, 8, "one slot is unchanged: the per-build ceiling is still the binding one");
+  assert.equal(one.jobLimits.memoryGB, 8);
+  assert.deepEqual(selectModel(node1).jobLimits, one.jobLimits, "and no slots argument means one slot");
+
+  const four = selectModel(node1, { slots: 4 });
+  assert.equal(four.jobLimits.cpus, 6, "four slots: 32 x 0.75 / 4");
+  assert.equal(four.jobLimits.memoryGB, 8, "RAM is not the constraint on this node: the per-build ceiling holds");
+  assert.equal(4 * four.jobLimits.cpus, 24, "24 threads to the builds");
+  assert.ok(32 - 4 * four.jobLimits.cpus >= 8, "and 8 left for the model server, the scanner and the host");
+  assert.equal(four.warnings.filter((w) => /more than this machine/.test(w)).length, 0, "this node holds four slots");
+  assert.ok(
+    four.reasons.some((r) => /4 build slots:.*6 CPU and 8 GB.*24 of 32 threads/.test(r)),
+    `the division is stated, not implied: ${four.reasons.join(" | ")}`,
+  );
+
+  // Every slot count the installer accepts, on this node and on a small one: the builds never take every thread,
+  // and the documented per-build bounds still hold.
+  for (const machine of [node1, hw({ gpus: [{ vramGB: 24 }], ram: 48, threads: 8 })]) {
+    const threads = machine.cpu!.logicalProcessors!;
+    for (let slots = 1; slots <= 16; slots++) {
+      const r = selectModel(machine, { slots });
+      assert.ok(r.jobLimits.cpus >= 2 && r.jobLimits.cpus <= 8, `${threads}t x ${slots}: cpus ${r.jobLimits.cpus}`);
+      assert.ok(r.jobLimits.memoryGB >= 4 && r.jobLimits.memoryGB <= 8, `${threads}t x ${slots}: memory ${r.jobLimits.memoryGB}`);
+      if (slots * r.jobLimits.cpus > threads * 0.75) {
+        assert.ok(
+          r.warnings.some((w) => /more than this machine comfortably holds/.test(w)),
+          `${threads}t x ${slots} overcommits and has to say so: ${r.warnings.join(" | ")}`,
+        );
+      }
+    }
+  }
+
+  // The floors (2 CPUs, 4 GB) can overrule the division. A build that thin is not worth starting silently.
+  const crowded = selectModel(hw({ gpus: [{ vramGB: 24 }], ram: 48, threads: 8 }), { slots: 8 });
+  assert.equal(crowded.jobLimits.cpus, 2, "the floor, not 0");
+  assert.ok(
+    crowded.warnings.some((w) => /8 slots is more than this machine comfortably holds/.test(w)),
+    crowded.warnings.join(" | "),
+  );
+
+  // Concurrent sandboxes need concurrent disk quota, so the free-disk estimate grows with the slots.
+  const tight = selectModel(hw({ gpus: [{ vramGB: 24 }], ram: 95, threads: 32, freeGB: 60 }), { slots: 4 });
+  assert.ok(tight.blockers.some((b) => /4 concurrent build sandboxes/.test(b)), tight.blockers.join(" | "));
+});
+
+test("[AIB-SLOTS] the installer passes its -Slots to the sizing, and a bad one is refused rather than assumed", () => {
+  const dir = tmp("aib-slots-");
+  const file = path.join(dir, "node1.json");
+  writeFileSync(file, JSON.stringify(hw({ gpus: [{ vramGB: 31.8 }], ram: 95.1, threads: 32 })));
+  const run = (...args: string[]) => spawnSync(process.execPath, ["--no-warnings", path.join(WIN, "select-model.ts"), file, ...args], { encoding: "utf8" });
+
+  assert.equal(JSON.parse(run().stdout).jobLimits.cpus, 8, "no argument: one slot, as before");
+  assert.equal(JSON.parse(run("4").stdout).jobLimits.cpus, 6, "four slots reach the sizing through the CLI");
+  for (const bad of ["0", "-1", "four", ""]) {
+    const r = run(bad);
+    assert.equal(r.status, 2, `${JSON.stringify(bad)} should be refused, got ${r.status}: ${r.stdout}`);
+    assert.match(r.stderr, /slots must be a whole number/, r.stderr);
+  }
+
+  // The installer has to actually pass it, or the sizing above is dead code.
+  const installer = readText(path.join(WIN, "Install-CrestmontRunner.ps1"));
+  assert.match(
+    installer,
+    /select-model\.ts \/in\/hardware\.json "\$Slots"/,
+    "Install-CrestmontRunner.ps1 must hand select-model.ts the -Slots it is installing with",
+  );
+});
+
 test("[AIB-RUNNER] compose + proxy policy: no published ports, internal networks, paid AI hosts denied, installs reach only the npm registry", () => {
   const compose = readText(path.join(WIN, "docker-compose.yml"));
   assert.doesNotMatch(compose, /^\s+ports:/m, "no published ports");
