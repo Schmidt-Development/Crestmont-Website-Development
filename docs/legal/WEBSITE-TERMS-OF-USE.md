@@ -1,30 +1,30 @@
 # Website Terms of Use
 
-> **DRAFT v3 — NOT LEGAL ADVICE — NOT APPROVED FOR USE.** Prepared for review by a licensed attorney. Placeholders in [BRACKETS] must be completed. Items marked **[FOUNDER DECISION]** need a business decision; items marked **[COUNSEL]** need legal analysis. Do not publish, send to customers, or accept payments under this text until counsel has approved it and a new agreement version is recorded in the platform.
+> **DRAFT v4 — NOT LEGAL ADVICE — NOT ATTORNEY-REVIEWED — NOT AUTHORIZED FOR PUBLICATION.** Status, recorded separately (see `docs/legal/README.md` §1): **Founder business approval** — given for the commercial terms (legal questionnaire and decisions FD-01 to FD-47, 2026-11); **drafting** — complete for Founder review, except the items marked below; **independent legal review** — not performed; **attorney-reviewed** — no (`attorney_reviewed` stays `0`); **publication** — not authorized, and requires a separate recorded decision and a new agreement version in the Platform. Items marked **[CONFIRM]** need a fact or value that is not in the available record. Items marked **[COUNSEL]** are open legal questions: the Founder's approval of the commercial terms does not answer them, and they must be resolved before publication. Items marked **[VERIFY]** need operational confirmation.
 
-**Version:** Draft v3 (prepared 2026-10-28) · **Supersedes (on approval):** published draft `terms` (agreement kind `terms_of_service`) as it applies to use of the website and Portal. Commercial terms in that draft move to the Master Services Agreement. **[FOUNDER DECISION / engineering: Keep the `terms_of_service` kind for this document and add a new `master_services_agreement` kind to the checkout and Quote acceptance sets. See README §4.]**
+**Version:** Draft v4 (revised 2026-11-07; supersedes Draft v3 of 2026-10-28) · **Supersedes (on publication):** published draft `terms` (agreement kind `terms_of_service`) as it applies to use of the website and Portal. Commercial terms in that draft move to the Master Services Agreement. **[Engineering, after a publication decision: keep the `terms_of_service` kind for this document and add a new `master_services_agreement` kind to the checkout and Quote acceptance sets. See README §4.]**
 
 ---
 
 ## 1. About These Terms
 
-1.1 These Terms of Use ("**Terms**") govern your use of crestmontwebsitedevelopment.com and the customer portal (together, the "**Platform**"). The Platform is operated by [LEGAL ENTITY NAME], a [ENTITY TYPE AND STATE] ("**Crestmont**", "**we**").
+1.1 These Terms of Use ("**Terms**") govern your use of crestmontwebsitedevelopment.com and the customer portal (together, the "**Platform**"). The Platform is operated by Talent Revenue Systems LLC, trading as Crestmont Website Development ("**Crestmont**", "**we**").
 
-1.2 By using the Platform or creating an account, you agree to these Terms, the Privacy Policy and the Acceptable Use Policy ("**AUP**"). If you use the Platform for an organisation, you confirm that you are authorised to act for it.
+1.2 By using the Platform or creating an account, you agree to these Terms, the Privacy Policy and the Acceptable Use Policy ("**AUP**"). If you use the Platform for another person or an organisation, you confirm that you are authorised to act for them.
 
 1.3 **These Terms do not cover purchased Services.** Packages, Quotes, Maintenance Plans and related Services are governed by the Master Services Agreement ("**MSA**") and its Data Processing Addendum. If these Terms conflict with the MSA, the MSA prevails for purchased Services. Defined terms (**Customer**, **Services**, **Customer Content**, **Personal Data**, **AI Features**, **AI Receptionist**, **Security Incident**) have the meanings given in the MSA.
 
 ## 2. Eligibility
 
-You must be at least 18 years old and able to form a binding contract. The Platform is intended for business use and is not directed to children under 13.
+You must be at least 18 years old and able to form a binding contract. Individuals, sole proprietors, startups and established businesses and organisations may use the Platform and buy Services. Business registration or proof of business ownership is not required. If you act for another person or an organisation, you must have authority to bind them. The Platform is not directed to children under 13.
 
 ## 3. Accounts
 
 3.1 You must give accurate registration information, verify your email address and keep it current.
 
-3.2 You are responsible for keeping your credentials secure and for activity under your account. We strongly recommend enabling two-factor authentication. It is mandatory for Crestmont staff.
+3.2 You are responsible for keeping your credentials secure and for activity under your account. Use a strong password that you do not use for other services. The Platform does not currently offer two-factor authentication.
 
-3.3 Tell us promptly at [NOTICE EMAIL] about any unauthorised use. Customer administrators control which colleagues can access their organisation's Portal and must remove access promptly when someone leaves.
+3.3 Tell us promptly at support@crestmontwebsitedevelopment.com about any unauthorised use. Customer administrators control which colleagues can access their organisation's Portal and must remove access promptly when someone leaves.
 
 3.4 After repeated failed sign-in attempts we may require additional verification or temporarily limit sign-in attempts, and we may limit request rates to protect the Platform.
 
@@ -40,17 +40,17 @@ You must comply with the AUP, which forms part of these Terms. In particular, yo
 
 5.3 You confirm that you have the right to submit the content and that it does not violate law or the AUP.
 
-5.4 **Files are not yet scanned for malware.** Uploaded files are labelled "not yet scanned". Upload only files from trusted sources, and take care when downloading files shared with you.
+5.4 **Files may not have been scanned for malware.** Files are scanned only when a scanning service is connected, and each file shows its scan status. Upload only files from trusted sources, and take care when downloading files shared with you, especially files labelled "not yet scanned".
 
 ## 6. Our Intellectual Property
 
-The Platform, its design, text, graphics, software and the Crestmont name and marks belong to Crestmont or its licensors. You may view and use the Platform for its intended purpose. You may not copy, scrape, reverse-engineer or create derivative works from it except as the law allows. Portfolio examples are shown with our clients' permission and are not licensed to you.
+The Platform, its design, text, graphics, software and the Crestmont name and marks belong to Crestmont or its licensors. You may view and use the Platform for its intended purpose. You may not copy, scrape, reverse-engineer or create derivative works from it except as the law allows. Portfolio examples are shown with the permission of the businesses' owners and are not licensed to you.
 
 ## 7. Information on the Platform
 
 7.1 Prices, package descriptions and policies on the Platform are provided for information. They become binding only when they form part of an accepted Order under the MSA.
 
-7.2 Content may contain errors and may change. AI-generated responses on the Platform (for example, from the AI Receptionist once live) are informational. They cannot make offers, accept contracts, grant refunds or change prices.
+7.2 Content may contain errors and may change. Responses from automated or AI-assisted assistants and voice agents on the Platform or our phone lines are informational. They cannot make offers, accept contracts, grant refunds or change prices.
 
 ## 8. Third-Party Links and Services
 
@@ -62,7 +62,7 @@ The Platform is provided "as is" and "as available". To the fullest extent permi
 
 ## 10. Limitation of Liability
 
-To the fullest extent permitted by law, Crestmont is not liable for indirect, incidental, special, consequential or punitive damages arising from your use of the Platform. Our total liability for claims relating to the Platform, as distinct from purchased Services, is limited to [TERMS LIABILITY CAP]. **[FOUNDER DECISION: for example $100, or amounts you paid us in the prior 12 months, whichever is greater.]** Nothing in these Terms limits liability that cannot be limited by law. Liability for purchased Services is governed solely by the MSA.
+To the fullest extent permitted by law, Crestmont is not liable for indirect, incidental, special, consequential or punitive damages arising from your use of the Platform. Our total liability for claims relating to the Platform, as distinct from purchased Services, is limited to [CONFIRM: TERMS LIABILITY CAP]. **[CONFIRM: Founder decision FD-01 sets the MSA cap (amounts paid under the affected Order), not this one. The earlier draft proposed $100 or the amounts paid in the prior 12 months, whichever is greater.]** Nothing in these Terms limits liability that cannot be limited by law. Liability for purchased Services is governed solely by the MSA.
 
 ## 11. Indemnity
 
@@ -78,10 +78,10 @@ You will indemnify Crestmont against third-party claims arising from your conten
 
 ## 13. Governing Law and Disputes
 
-These Terms are governed by the laws of [GOVERNING LAW STATE]. Disputes are resolved in the same way as under MSA Section 18 **[FOUNDER DECISION]**, in [VENUE COUNTY], [GOVERNING LAW STATE]. **[COUNSEL: whether to align with the MSA or keep a simpler courts-only clause for visitors.]**
+These Terms are governed by the laws of the State of Michigan. Disputes are resolved in the same way as under MSA Section 18: non-binding mediation first, then the state or federal courts in [CONFIRM: VENUE COUNTY], Michigan. Nothing in this Section limits rights that consumers cannot waive. **[COUNSEL: whether to align with the MSA or keep a simpler courts-only clause for visitors.]**
 
 ## 14. Changes and Contact
 
 We may update these Terms by posting a new version with an effective date. Every version is stored in the Platform and cannot be altered afterwards. Material changes are emailed to account holders. Continuing to use the Platform after the effective date means you accept the update. **[COUNSEL: whether continued use is sufficient, or whether re-acceptance at next sign-in should be required.]**
 
-Contact: [LEGAL ENTITY NAME], [REGISTERED ADDRESS], [NOTICE EMAIL].
+Contact: Talent Revenue Systems LLC (Crestmont Website Development), legal@crestmontwebsitedevelopment.com.

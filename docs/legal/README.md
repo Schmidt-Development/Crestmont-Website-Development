@@ -1,29 +1,43 @@
-# Crestmont Legal Document Suite — Draft v3
+# Crestmont Legal Document Suite — Draft v4
 
-> **DRAFT v3 — NOT LEGAL ADVICE — NOT APPROVED FOR USE.** Prepared for review by a licensed attorney. Placeholders in [BRACKETS] must be completed. Items marked **[FOUNDER DECISION]** need a business decision; items marked **[COUNSEL]** need legal analysis. Do not publish, send to customers, or accept payments under this text until counsel has approved it and a new agreement version is recorded in the platform.
+> **DRAFT v4 — NOT LEGAL ADVICE — NOT ATTORNEY-REVIEWED — NOT AUTHORIZED FOR PUBLICATION.** The Founder has approved the commercial terms. That approval does not mean an attorney has reviewed these documents, that the open legal questions below are answered, or that publication is authorized. Do not publish these documents, send them to customers or accept payments under them until a separate publication decision is recorded and a new agreement version is stored in the Platform.
 
-Prepared 2026-10-28. These files are review drafts. They are **not** rendered by the Platform. The published drafts in `src/content/legal.ts`, which are versioned in `migrations/0011_agreements_pricing.sql` and `migrations/0030_legal_drafts_2.sql`, remain live with their "Draft — pending attorney review" banner until counsel approves replacements. `attorney_reviewed` stays `0` until a real review is recorded (LEGAL-004).
+Revised 2026-11-07 from Draft v3 (2026-10-28). These files are review drafts and are **not** rendered by the Platform. The published drafts in `src/content/legal.ts` remain live with their "Draft — pending attorney review" banner until a publication decision replaces them. Those drafts are versioned in `migrations/0011_agreements_pricing.sql` and `migrations/0030_legal_drafts_2.sql`. `attorney_reviewed` stays `0` until a qualified attorney's review is actually recorded (LEGAL-004). This revision changed no code, migrations or agreement-version records.
 
-## 1. Documents
+## 1. Status
 
-Status of every document: **Draft v3 — awaiting Founder decisions and attorney review.**
+Five statuses are tracked separately. One never implies another.
 
-| File | Purpose | Platform slug / agreement kind | Supersedes (published draft) |
+| Status | Meaning | Current state (all documents) |
+|---|---|---|
+| **Founder business approval** | The Founder has approved the commercial terms | **Given.** Legal questionnaire (118 decisions: 111 approved as proposed, plus the seven final decisions 2.9, 2.10, 2.11, 3.6, 3.7, 5.2 and 7.12) and decisions FD-01 to FD-47 (`docs/closeout/FOUNDER-DECISIONS-2026-11.md`) |
+| **Drafting completion** | The text reflects the approved terms and the verified facts | **Complete for Founder review**, except the **[CONFIRM]** and **[VERIFY]** items in §6 |
+| **Independent legal review** | Someone qualified has analysed the open legal questions | **Not performed.** The Founder has not made hiring an attorney a blanket prerequisite (decision 7.12). The **[COUNSEL]** questions in §7 still need an answer before publication |
+| **Attorney-reviewed** | A licensed attorney reviewed this text and that review is recorded | **No.** `attorney_reviewed = 0` |
+| **Publication authorization** | A recorded decision to publish a specific version | **Not given** |
+
+Markers used in the documents: **[CONFIRM]** marks a fact or value missing from the available record; **[VERIFY]** marks an operational fact to confirm; **[COUNSEL]** marks an open legal question.
+
+## 2. Documents
+
+| File | Purpose | Platform slug / agreement kind | Supersedes on publication |
 |---|---|---|---|
 | `MASTER-SERVICES-AGREEMENT.md` | The customer contract for all purchased Services. Schedules: A Custom Website Development; B Maintenance & Hosting Plans; C AI Features & AI Receptionist; D Service Levels & Support; E Refunds & Cancellation | New kind proposed: `master_services_agreement` | `development-agreement`, `custom-development-agreement`, `maintenance-agreement` (Schedule B), `support` (Schedule D), `refunds` and `cancellation` (Schedule E); commercial parts of `terms` |
-| `DATA-PROCESSING-ADDENDUM.md` | Processor terms for Customer Data; Subprocessor list; security measures | `data-processing` / `data_processing_addendum` | `data-processing` (2026-10-draft-2) |
-| `PRIVACY-POLICY.md` | Crestmont-as-controller notice for visitors, enquirers and Portal users; covers cookies and calls | `privacy` / `privacy_policy` | `privacy` (2026-10-draft-2) |
+| `DATA-PROCESSING-ADDENDUM.md` | Processor terms for Customer Data; Subprocessor list (Annex 2); security measures (Annex 3) | `data-processing` / `data_processing_addendum` | `data-processing` (2026-10-draft-2) |
+| `PRIVACY-POLICY.md` | Crestmont-as-controller notice for visitors, enquirers, callers, prospective customers and Portal users; covers cookies and calls | `privacy` / `privacy_policy` | `privacy` (2026-10-draft-2) |
 | `WEBSITE-TERMS-OF-USE.md` | Use of the website and Portal (not purchased Services) | `terms` / `terms_of_service` | Site-use parts of `terms` (2026-10-draft-1) |
 | `ACCEPTABLE-USE-POLICY.md` | Prohibited content and conduct, AI misuse, telemarketing, security testing, enforcement | `acceptable-use` / `acceptable_use_policy` | `acceptable-use` (2026-10-draft-1) |
+| `ACCESSIBILITY-STATEMENT.md` | **Review copy:** proposed replacement text for the `accessibility` page | `accessibility` (rendered from `src/content/legal.ts`, unchanged) | Current `accessibility` text |
+| `BUSINESS-DISCLOSURES.md` | **Review copy:** proposed replacement text for the `disclosures` page | `disclosures` (rendered from `src/content/legal.ts`, unchanged) | Current `disclosures` text |
 
-**Not changed by this suite:** `accessibility` (accessibility statement) and `disclosures` (business disclosures). Disclosures must be updated with [LEGAL ENTITY NAME] and [REGISTERED ADDRESS] when those are known.
+`RESEARCH-NOTES-2026-10.md` is background research for Draft v3 and is not changed by this revision. Where it conflicts with the decisions in §5, the decisions prevail.
 
-## 2. Terminology (used identically in every document)
+## 3. Terminology (used identically in every document)
 
 | Term | Meaning (full definition in MSA §1) |
 |---|---|
-| Crestmont | [LEGAL ENTITY NAME], trading as Crestmont Website Development |
-| Customer | The business named in an Order |
+| Crestmont | Talent Revenue Systems LLC, trading as Crestmont Website Development |
+| Customer | The individual, business or organisation named in an Order as the purchaser. Business registration is not required (decision 5.2) |
 | Services | Development, hosting, maintenance, support, AI Features and related services under an Order |
 | Deliverables | Work product created specifically for Customer under an Order |
 | Customer Content | Materials Customer provides or uploads |
@@ -32,85 +46,148 @@ Status of every document: **Draft v3 — awaiting Founder decisions and attorney
 | Statement of Work (SOW) | The scope, line items and assumptions in an accepted Quote |
 | Change Order | A written change to scope, price or timeline that Customer approves in the Portal |
 | Launch Approval | Customer's recorded Portal approval to deploy to production |
-| Maintenance Plan | Monthly hosting and maintenance subscription (Essential, Professional or Executive) |
-| AI Features | Functions that use AI to generate, summarise, classify or route content, including automated first builds |
-| AI Receptionist | AI voice agent answering inbound calls (not yet live) |
+| Maintenance Plan | Monthly hosting and maintenance subscription: Essential $99, Professional $199 or Executive $299 |
+| AI Features | Functions that use AI to generate, summarise, classify or route content, including AI-assisted development work |
+| AI Receptionist | AI voice agent answering inbound calls. For Customer lines it is not yet available (FD-45) |
 | Subprocessor | Third party processing Customer Data (DPA Annex 2) |
 | Personal Data | Information relating to an identified or identifiable individual, including "personal information" under applicable law |
 | Security Incident | A confirmed breach of security affecting Customer Data |
 
-## 3. Documents considered and not drafted separately
+## 4. Documents considered and not drafted separately
 
 | Document | Where it lives instead | Reason |
 |---|---|---|
 | Cookie policy | Privacy Policy §6–7 | Only strictly necessary cookies and one first-party attribution cookie (`cm_attr`) are used. There are no third-party analytics or advertising cookies, so no consent banner is needed. **[COUNSEL to confirm]** |
-| Business continuity / disaster recovery statement | MSA Schedule D.8 | The RPO/RTO figures are proposals in `docs/BACKUP-RECOVERY.md`, not commitments. One schedule avoids promising them twice. |
+| Business continuity statement | MSA Schedule D.8 | Recovery objectives stay internal until proven (FD-33), so no RPO/RTO figures are published. |
 | Security addendum | DPA Annex 3 | The measures are the same, and keeping one list stops the two from drifting apart. |
-| Subscription / auto-renewal terms | MSA Schedule B.4–B.7 | Maintenance Plans are the only subscriptions. |
+| Subscription / auto-renewal terms | MSA Schedule B.4–B.7 | Maintenance Plans are the only subscriptions. They are monthly only. |
 | Support policy and SLA | MSA Schedule D | Response targets are tied to plan entitlements. |
-| Refund and cancellation policies | MSA Schedule E | These policies must follow the Platform's single refund decision process. **[FOUNDER DECISION]** Whether to keep short public summary pages at `/legal/refunds` and `/legal/cancellation` generated from Schedule E. |
-| AI usage policy | MSA Schedule C, Privacy §4, AUP §5 | AI commitments are contractual (Schedule C) or notices (Privacy). |
-| Vulnerability disclosure policy | AUP §3(b) (placeholder) | A short standalone page plus `security.txt` is recommended later. It is listed as a Founder decision. |
+| Refund and cancellation policies | MSA Schedule E | Refunds follow one process: the Founder decides, and mandatory refunds are never denied (FD-03). Optional: short public summary pages at `/legal/refunds` and `/legal/cancellation` generated from Schedule E. |
+| AI usage policy | MSA Schedule C, Privacy §4 and §8, AUP §5 | AI commitments are contractual (Schedule C) or notices (Privacy). |
+| Vulnerability disclosure policy | AUP §3(b) | Goes live with `security.txt` once a security mailbox is verified (FD-41). |
 | DMCA / copyright policy | AUP §6.3 (counsel question) | Depends on whether Crestmont registers a DMCA agent for hosted sites. |
 | SCCs / international transfer addendum | DPA §11 (counsel question) | Not needed unless non-U.S. Customer Data is accepted. |
-| Staff/contractor NDA | DPA §4.2 (Founder decision) | Internal document, outside this customer-facing suite. |
+| Staff/contractor confidentiality agreement | DPA §4.2 | Required before anyone other than the Founder has access (FD-43); it is an internal document outside this customer-facing suite. |
 
-## 4. Implementation notes (for engineering after approval)
+## 5. Founder decisions incorporated
+
+**Source limitation.** The questionnaire itself, with the exact wording of each approved proposal, is not in the repository or in the context of this revision. The 111 approved provisions are therefore preserved by keeping the existing Draft v3 text wherever it was accurate. Values are taken only from the recorded decisions FD-01 to FD-47 and the confirmed business facts. Where a value appears in neither source, it is marked **[CONFIRM]** rather than guessed (§6). If a questionnaire value differs from an FD value used below, the questionnaire's wording should be checked and the text corrected.
+
+### 5.1 The seven final decisions
+
+| Decision | Where | What changed |
+|---|---|---|
+| 2.9 Current website workflow | MSA §1.12, Sched. A.2A, A.2B, A.6, E.7 | The customer-facing workflow is: agreed front-end design → back-end build → testing → Launch Approval → deployment. Supplied designs are not guaranteed to convert. "Automated first builds" is removed. No internal tool is a dependency for delivery. |
+| 2.10 Technology kept confidential | MSA §4.3, §11.1, Sched. A.2A, C.1, D.4 | Provider and model names are removed. Technology-neutral wording is used. Disclosures that stay are Third-Party Components (§10.4) and Subprocessors (DPA Annex 2). |
+| 2.11 AI calling and recording | MSA Sched. C.5, C.6, C.7; Privacy §8; AUP §4(c), §5(b) | No automatic "you are speaking with AI" announcement unless the law requires it. Agents never claim to be human, and answer truthfully when asked. Disclosures, consent and recording notices the law requires always apply. Silence is not consent. The live agents' behaviour is not changed (§8). |
+| 3.6 Internal systems kept private | Privacy §2, §3A, §4, §8 | Prospect research, automated calling and call analysis are described by what they do, without system names. AI-assisted processing is stated, not denied. |
+| 3.7 Customer-specific vendor information | Privacy §5; DPA Annex 2; MSA §11.1 | The Privacy Policy lists recipient categories, and names are available on request. DPA Annex 2 still names every Subprocessor of Customer Data, as the law and the DPA require. Annex 2 was corrected: Google mail forwarding was added; providers not processing Customer Data were moved to a "not currently engaged" note. |
+| 5.2 Open purchasing | MSA §1.2, §2.1, §2.2; Terms §1.2, §2; Privacy §12 | Business-only restrictions are removed. Only capacity (18+, able to contract) and authority to bind someone else remain. A non-waivable-rights clause and consumer-law questions are added. |
+| 7.12 Approval without mandatory attorney engagement | Every banner; README §1 | The five statuses are separated. No document claims attorney review, and the open legal requirements are listed in §7. |
+
+### 5.2 Recorded decisions applied to the text
+
+| FD | Applied in |
+|---|---|
+| 01 Liability cap = amounts paid under the affected Order | MSA §15.2; DPA §12 (no separate data cap). The Website Terms cap stays **[CONFIRM]** because FD-01 covers the MSA only |
+| 02 Mediation, then Michigan courts | MSA §18.2, §19 (Michigan law); Terms §13 |
+| 03 Founder-only discretionary refunds; support cannot decline | MSA Sched. E.2, E.4 |
+| 04 No proration; plans and entitlements established | MSA Sched. E.5, B.1–B.2 (approved wording from the catalog, 2026-11-04) |
+| 05 Benefits not certified until tested | MSA Sched. B.2 (†), D.4 |
+| 06 99.5% availability target, no restoration deadline | MSA Sched. D.4 |
+| 07 No downtime credits | MSA Sched. D.6 |
+| 08 Staffed hours Mon–Fri 9–5 ET; no 24/7 implication | MSA Sched. D.2, B.8; AUP §7 |
+| 09 48-hour incident notice | DPA §8.1 |
+| 10 90-day warranty | MSA §14.1 |
+| 11 Net 7; upfront and 50/25/25 unchanged | MSA §4.3 (§3.1, §4.2 unchanged) |
+| 12 No late fees or interest | MSA §4.4 |
+| 13 Portfolio only with recorded opt-in | MSA §10.6; Terms §6 |
+| 14 / 15 Five business days per review; silence never approval | MSA §7.2, §7.5 |
+| 16 Founder payment exception | MSA §8.3 |
+| 17 30 days to report handoff issues; warranty kept | MSA §8.4 |
+| 18 / 19 Resume without automatic fee; never auto-cancel | MSA §9.3, §9.4 |
+| 20 No Crestmont termination for convenience | MSA §17.2; Sched. E.4 table removed |
+| 21 Customer owns domains; suspension without deletion | MSA §11.2, Sched. B.7 |
+| 22 / 36 60-day export window | MSA §11.5; DPA §9.1 |
+| 23 No insurance claimed | MSA §15.4 removed |
+| 24 Quotes valid 30 days | MSA §3.3 |
+| 25 30 days' notice of price increases | MSA Sched. B.6 |
+| 26 / 27 Required minimum plan; billing from launch | MSA Sched. A.9, B.2A |
+| 33 Recovery numbers internal | MSA Sched. D.8 |
+| 35 30 days' notice of Subprocessor changes | DPA §6.3 |
+| 37 Backups 35 days daily, 12 months monthly | DPA §9.3; Privacy §9 (not yet in operation) |
+| 38 Raw IPs 90 days, security events 180 days (provisional) | Privacy §9 |
+| 40 High-risk customers reviewed individually | AUP §2 |
+| 41 Security contact / security.txt | AUP §3(b) |
+| 42 Opt-in marketing | Privacy §3 |
+| 43 Signed confidentiality before access | DPA §4.2 |
+| 45 Customer AI Receptionist "Coming soon" | MSA Sched. C.5; DPA Annex 2 |
+| C-1/2 Seven-day failed-payment suspension, no deletion | MSA Sched. B.7 |
+| Founder directive 2026-11-06 (MFA removed) | MSA §6.1(f); Terms §3.2; Privacy §2, §13; DPA §4.1, Annex 3 (factual corrections) |
+
+Corrections beyond the decisions are listed in the change summary of this revision. Examples: the intake comes before payment (MSA §3.4, A.3); the malware-scanning status is stated accurately; read-access logging is limited (DPA §4.1); and unperformed prepaid Services are refunded when an Order ends for force majeure (MSA Sched. E.4A).
+
+## 6. Open items: facts and values not in the available record
+
+| Document and clause | Item | Type | Affects |
+|---|---|---|---|
+| MSA §1.1; Business Disclosures | State of organisation of Talent Revenue Systems LLC | Fact | Publication |
+| Business Disclosures; Privacy §3 | Postal address for CAN-SPAM, assumed-name filing, payment-processor merchant details | Legal requirement / fact | Publication; promotional email |
+| MSA §4.6, §7.3, §12.5, §17.3, §18.1, §20 | Dispute days, default custom rounds, confidentiality years, cure days, negotiation days, force-majeure days (likely set in the questionnaire, wording unavailable) | Value | Publication |
+| MSA §18.2; Terms §13 | Venue county in Michigan | Value | Publication |
+| MSA §11.5 | Whether transition help beyond the export is billable at the overage rate | Value (optional) | No |
+| MSA Sched. D.2, D.3, D.5 | Holidays; urgent, high and low response targets; maintenance window and notice | Value | Publication |
+| Terms §10 | Website Terms liability cap | Value | Publication |
+| Privacy §9, §10.1, §11 | Retention for enquiries and prospect data; response days; email-request verification method | Value | Publication |
+| Privacy §2 | Prospect-data sources in use | Fact | Publication |
+| AUP §3(b), §7 | Security mailbox and disclosure policy (FD-41); abuse acknowledgement target | Fact / value | No |
+| DPA §4.2 | Confidentiality agreement text (FD-43) | Document | Before any non-Founder access |
+| MSA Sched. B.2 (†), D.4; DPA §9.3, Annex 3 | Backups, restore tests and monitoring in operation | Operational verification | Live Maintenance Plan sales |
+| DPA §9.1 | Organisation-level export (only per-user export exists) | Operational verification | Termination handling |
+| DPA Annex 2 | Third-party AI in the current workflow; Google mailbox account type and terms; processing locations | Operational verification | Live customer transactions |
+| Privacy §4; DPA §3.4 | Provider no-training terms | Operational verification | Publication |
+| Privacy §3 | Marketing consent records (FD-42 not implemented) | Operational verification | Promotional email |
+| Accessibility | "Works without JavaScript" claim | Operational verification | Publication |
+
+## 7. Legal questions to resolve before publication (consolidated)
+
+Highest priority first. These apply whoever answers them. The Founder's approval of the commercial terms does not answer them.
+
+1. **AI-voice calls (TCPA).** AI-generated voices are "artificial or prerecorded voice" (FCC 2024). Telemarketing calls with such voices to wireless or residential numbers need prior express *written* consent. Confirm whether a callback requested orally on a call qualifies; it may not. Also confirm the identification and opt-out duties under 47 CFR 64.1200(b), and the Do-Not-Call rules. Privacy §3A, §8; MSA Sched. C.7; AUP §4.
+2. **Recording and real-time processing.** All-party-consent states; Michigan's eavesdropping statute; whether a voice vendor's real-time processing is an interception needing consent even when nothing is stored; whether an AI agent or its vendor is a "party". MSA Sched. C.6; Privacy §8.
+3. **AI-identity disclosure.** Which federal or state laws require an affirmative disclosure at the start of a call, without being asked (state bot and AI-disclosure laws), for Crestmont's own lines and for Customer lines. MSA Sched. C.5; Privacy §8.
+4. **Consumer buyers (decision 5.2).** Provisions that need consumer variants: liability cap and exclusions, disclaimers, dispute resolution and venue, unilateral amendment, refunds, and state consumer-protection statutes including Michigan's. Also E-SIGN consumer consent for electronic records. MSA §2.2, §14.6, §15, §18, §19, §23.2, §24.1.
+5. **Recurring billing.** State automatic-renewal laws for business and consumer subscribers; the FTC's ROSCA and negative-option requirements; confirmation and reminder emails. MSA Sched. B.4–B.6.
+6. **Privacy laws.** Applicability of state privacy laws and their thresholds; service-provider contract terms; automated-decision and profiling rules for lead research and qualification; notice at collection for prospect data gathered from public sources; GPC handling. DPA §1.2, §3.3; Privacy §4, §7, §10.2.
+7. **Breach notification.** Applicable state laws, and whether the DPA's 48-hour notice meets the shortest Customer-side deadline. DPA §8.1; Privacy §14.
+8. **Subprocessor terms.** Flow-down wording ("no less protective") against standard provider DPAs, and whether a consumer mail account can be used for Customer Data at all. DPA §6.2, Annex 2.
+9. **Liability and indemnity.** Enforceability of the cap, exclusions and indemnity scope. MSA §15–16.
+10. **Governing law, venue and mediation.** Including jury waiver. MSA §18–19; Terms §13.
+11. **IP.** Assignment mechanics, AI-output copyrightability, and open-source and stock licences. MSA §10.2–10.5.
+12. **Taxes.** Sales tax on development, hosting and subscriptions. MSA §4.5.
+13. **Disclaimers.** Conspicuousness of the disclaimers. MSA §14.6; Terms §9.
+14. **ADA / accessibility risk allocation.** MSA §14.5.
+15. **Rights after a partial refund.** Rights in Deliverables after a partial refund. MSA Sched. E.7.
+16. **Audit rights and international transfers.** DPA §10.2, §11; Privacy §15.
+17. **Sensitive data in Customer forms.** DPA Annex 1.
+18. **DMCA agent and takedown process.** AUP §6.3.
+19. **Amendment.** Amendment by posting versus re-acceptance. MSA §23.2; Terms §14.
+20. **Notices.** Whether email alone suffices for legal notices, given that no postal address is published. MSA §21.2.
+21. **Cookie banner.** Confirm that no cookie banner is needed. Privacy §6.
+
+## 8. Operating practices that may conflict with a mandatory requirement
+
+These notes describe the documents only. This revision changed no system.
+
+1. **Scheduled AI callbacks** (on at launch) dial prospects with an AI voice on the strength of a request made during a call. If that request is not prior express written consent, these telemarketing calls may breach the TCPA (§7 item 1). The documents do not call this practice compliant.
+2. **Recording consent on Crestmont's own line.** The Platform keeps transcripts and recordings only after consent is recorded. However, the published receptionist prompt does not name the consent function (staging audit, 2026-11-07), so it is unverified whether callers are asked. The voice provider also processes audio in real time either way (§7 item 2).
+3. **AI-identity disclosure.** Per decision 2.11, the agents do not announce that they are AI unless the law requires it. Whether any applicable law requires that for these calls is open (§7 item 3). No document states that disclosure is never required.
+4. **Security description.** Multi-factor authentication was removed on 2026-11-06. The documents now say so; earlier drafts and the published `data-processing` draft still describe MFA as required.
+5. **Promotional email** must not be sent until consent records (FD-42) and a CAN-SPAM postal address exist.
+6. **Maintenance Plan entitlements marked †**, such as backups and monitoring, must not be sold as available until they are confirmed in operation.
+
+## 9. Implementation notes (engineering, after a publication decision; not part of this revision)
 
 1. Add an agreement kind `master_services_agreement` and add it to `ACCEPTANCE_SETS` (`src/services/agreements.ts`) for `package_checkout`, `quote_acceptance` and `maintenance_checkout`, replacing the kinds it supersedes. Today `refund_policy` is accepted at package checkout but **not** at quote acceptance, and `cancellation_policy` is accepted only at maintenance checkout.
-2. Render the approved text through `src/content/legal.ts`, and add a new version migration (`scripts/agreement-versions.ts`). Versions are immutable.
-3. Keep `DRAFT_BANNER` until counsel approval is recorded.
-
-## 5. Founder decisions (consolidated)
-
-1. Liability cap option — MSA §15.2; DPA §12; Terms §10
-2. Dispute resolution (mediation + courts / arbitration / courts only) — MSA §18.2; Terms §13
-3. Refund percentages and windows — MSA Sched. E.4; Maintenance proration — E.5
-4. Maintenance Plan entitlements (each value) — MSA Sched. B.2
-5. Uptime target and service credits — MSA Sched. D.4, D.6
-6. Support hours, response targets, maintenance windows — MSA Sched. D.2–D.5
-7. Security Incident notification window — DPA §8.1
-8. Warranty period — MSA §14.1
-9. Late fees and payment terms — MSA §4.3–4.4
-10. Portfolio consent model — MSA §10.6
-11. Deemed approval (recommended: none) — MSA §7.5; review period — §7.2
-12. Owner payment exception before launch — MSA §8.3; handoff acceptance window — §8.4
-13. Closing long-paused projects; restart lead time — MSA §9.3–9.4
-14. Crestmont termination for convenience — MSA §17.2
-15. Domain registrar ownership model — MSA §11.2; transition window — §11.5; DPA §9.1
-16. Hosting included after launch or plan required — MSA Sched. A.9
-17. Insurance (E&O, cyber) — MSA §15.4
-18. Quote validity — MSA §3.3
-19. Renewal reminders and price-change notice — MSA Sched. B.6
-20. Subprocessor notice period; off-site backup provider — DPA §6.3, Annex 2
-21. Backup and retention periods; enquiry retention — DPA §9.3; Privacy §9
-22. Key-person continuity — MSA Sched. D.8
-23. High-risk business categories — AUP §2; vulnerability disclosure policy — AUP §3(b)
-24. Marketing email — Privacy §3
-25. Staff confidentiality agreement — DPA §4.2
-
-## 6. Questions for counsel (consolidated)
-
-1. Entity details, governing law and venue (Michigan is the likely choice, to be confirmed) — MSA §1.1, §19
-2. Business-only status; consumer buyers; E-SIGN/UETA adequacy of checkbox acceptance — MSA §2.1, §24.1
-3. Enforceability of the liability cap, exclusions and indemnity scope — MSA §15–16
-4. Arbitration and class waiver or jury waiver — MSA §18.2
-5. Automatic-renewal laws (state and FTC) for business subscribers — MSA Sched. B.6
-6. Call-recording consent (Michigan and all-party states); AI as a "party"; TCPA treatment of AI voice; state bot-disclosure laws — MSA Sched. C.6–C.7; Privacy §8
-7. Applicability of state privacy laws and thresholds; service-provider contract terms — DPA §1.2, §3.3; Privacy §10.2
-8. International transfers / non-U.S. Customers — DPA §11; Privacy §15
-9. Breach notification law(s) and the DPA window — DPA §8.1; Privacy §14
-10. Sales tax on development, hosting and subscriptions — MSA §4.5
-11. IP assignment mechanics; copyrightability of AI output; open-source and stock licences — MSA §10.2–10.5
-12. Late-fee limits — MSA §4.4
-13. Disclaimer conspicuousness — MSA §14.6; Terms §9
-14. ADA / accessibility risk allocation — MSA §14.5
-15. Support-level refund declines without owner review — MSA Sched. E.2
-16. Rights in Deliverables after a partial refund — MSA Sched. E.7
-17. Documentation-only audit right — DPA §10.2
-18. Subprocessor flow-down wording — DPA §6.2
-19. Sensitive data in Customer forms — DPA Annex 1
-20. GPC handling of campaign parameters — Privacy §7; automated-decision rules for lead qualification — Privacy §4
-21. DMCA agent and takedown process — AUP §6.3
-22. Amendment by posting versus re-acceptance — MSA §23.2; Terms §14
-23. Email sufficiency for legal notices — MSA §21.2
+2. Render the approved text, including the two review copies, through `src/content/legal.ts`, and add a new version migration (`scripts/agreement-versions.ts`). Versions are immutable.
+3. Replace `DRAFT_BANNER` with a status line that matches the recorded status (§1). It must never say "attorney-reviewed" unless that review is recorded.
