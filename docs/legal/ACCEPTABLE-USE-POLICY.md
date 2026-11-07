@@ -27,7 +27,7 @@ You may not use the Services or Platform to create, host, publish or transmit co
 
 You may not:
 (a) access accounts, data or systems without authorisation, or share credentials;
-(b) probe, scan, penetration-test or load-test the Platform or any hosted website **without Crestmont's prior written permission**. This includes vulnerability scanning, fuzzing and denial-of-service testing. Good-faith security reports are welcome at legal@crestmontwebsitedevelopment.com. **[CONFIRM: a vulnerability-disclosure policy and security.txt file go live once a dedicated security mailbox is set up and verified (Founder decision FD-41). Decide whether to include a safe-harbour statement.]**
+(b) probe, scan, penetration-test or load-test the Platform or any hosted website **without Crestmont's prior written permission**. This includes vulnerability scanning, fuzzing and denial-of-service testing. Good-faith security reports are welcome at legal@crestmontwebsitedevelopment.com.
 (c) bypass rate limits, access controls, tenant isolation or malware-scan warnings;
 (d) upload files you know or suspect to be malicious (Portal files may not have been scanned for malware);
 (e) use the Services in a way that degrades them for others, or exceed plan resource limits deliberately; or
@@ -61,4 +61,4 @@ You may not use AI Features or the AI Receptionist to:
 
 ## 7. Reporting
 
-Report abuse, infringement or security concerns to legal@crestmontwebsitedevelopment.com. Include the URL, a description of the problem and your contact details. We acknowledge reports within [CONFIRM: ABUSE RESPONSE TARGET] during staffed hours (Monday to Friday, 9:00 a.m. to 5:00 p.m. Eastern Time).
+Report abuse, infringement or security concerns to legal@crestmontwebsitedevelopment.com. Include the URL, a description of the problem and your contact details. We aim to acknowledge reports within 1 business day during staffed hours (Monday to Friday, 9:00 a.m. to 5:00 p.m. Eastern Time).

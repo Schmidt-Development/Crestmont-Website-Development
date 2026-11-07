@@ -62,7 +62,7 @@ The Platform is provided "as is" and "as available". To the fullest extent permi
 
 ## 10. Limitation of Liability
 
-To the fullest extent permitted by law, Crestmont is not liable for indirect, incidental, special, consequential or punitive damages arising from your use of the Platform. Our total liability for claims relating to the Platform, as distinct from purchased Services, is limited to [CONFIRM: TERMS LIABILITY CAP]. **[CONFIRM: Founder decision FD-01 sets the MSA cap (amounts paid under the affected Order), not this one. The earlier draft proposed $100 or the amounts paid in the prior 12 months, whichever is greater.]** Nothing in these Terms limits liability that cannot be limited by law. Liability for purchased Services is governed solely by the MSA.
+To the fullest extent permitted by law, Crestmont is not liable for indirect, incidental, special, consequential or punitive damages arising from your use of the Platform. Our total liability for claims relating to the Platform, as distinct from purchased Services, is limited to the amounts you paid to Crestmont for the affected website services during the 12 months before the claim. This is subject to applicable law and to any rights that cannot be waived. Nothing in these Terms limits liability that cannot be limited by law. Liability for purchased Services is governed solely by the MSA.
 
 ## 11. Indemnity
 
@@ -78,10 +78,10 @@ You will indemnify Crestmont against third-party claims arising from your conten
 
 ## 13. Governing Law and Disputes
 
-These Terms are governed by the laws of the State of Michigan. Disputes are resolved in the same way as under MSA Section 18: non-binding mediation first, then the state or federal courts in [CONFIRM: VENUE COUNTY], Michigan. Nothing in this Section limits rights that consumers cannot waive. **[COUNSEL: whether to align with the MSA or keep a simpler courts-only clause for visitors.]**
+These Terms are governed by the laws of the State of Michigan. Disputes are resolved in the same way as under MSA Section 18: non-binding mediation first, then the state courts in Ingham County, Michigan, or the federal court for the district that includes Ingham County, subject to any mandatory venue rule of applicable law. Nothing in this Section limits rights that consumers cannot waive. **[COUNSEL: whether to align with the MSA or keep a simpler courts-only clause for visitors.]**
 
 ## 14. Changes and Contact
 
 We may update these Terms by posting a new version with an effective date. Every version is stored in the Platform and cannot be altered afterwards. Material changes are emailed to account holders. Continuing to use the Platform after the effective date means you accept the update. **[COUNSEL: whether continued use is sufficient, or whether re-acceptance at next sign-in should be required.]**
 
-Contact: Talent Revenue Systems LLC (Crestmont Website Development), legal@crestmontwebsitedevelopment.com.
+Contact: Talent Revenue Systems LLC (Crestmont Website Development), 1409 Lake Lansing Rd, Lansing, MI 48912, legal@crestmontwebsitedevelopment.com.

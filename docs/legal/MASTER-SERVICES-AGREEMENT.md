@@ -10,7 +10,7 @@
 
 Capitalised terms have the meanings below. The same terms are used in the Data Processing Addendum ("**DPA**"), Privacy Policy, Website Terms of Use and Acceptable Use Policy ("**AUP**").
 
-1.1 **"Crestmont"** means Talent Revenue Systems LLC, a limited liability company organised under the laws of [CONFIRM: STATE OF ORGANISATION], trading as Crestmont Website Development (crestmontwebsitedevelopment.com).
+1.1 **"Crestmont"** means Talent Revenue Systems LLC, a Michigan limited liability company, trading as Crestmont Website Development (crestmontwebsitedevelopment.com).
 
 1.2 **"Customer"** means the individual, business or other organisation named in an Order as the purchaser, and its permitted successors.
 
@@ -100,7 +100,7 @@ Each milestone is invoiced once. Any rounding difference falls in the final mile
 
 4.5 **Taxes.** Fees exclude sales, use, value-added and similar taxes. Customer pays applicable taxes. These are shown on the invoice using the tax configuration recorded by Crestmont. Crestmont pays taxes on its own income. **[COUNSEL: Taxability of website development, hosting and maintenance subscriptions in Michigan and in Customers' states. Nexus. Whether a resale or exemption certificate process is needed.]**
 
-4.6 **Disputed invoices.** Customer must notify Crestmont of any good-faith dispute in writing within [CONFIRM: DISPUTE DAYS] days of the invoice date and pay any undisputed amount. The parties will work to resolve the dispute under Section 18.1. Customer agrees to raise billing concerns with Crestmont before starting a payment-card chargeback, without limiting any rights Customer has under card-network rules.
+4.6 **Disputed invoices.** Customer must notify Crestmont of any good-faith dispute in writing within 30 days of the invoice date and pay any undisputed amount. The parties will then try to resolve the dispute during the 30-day period in Section 18.1. Customer agrees to raise billing concerns with Crestmont before starting a payment-card chargeback, without limiting any rights Customer has under card-network rules.
 
 4.7 **Third-party costs.** Domain registration, premium plugins, fonts, stock media, paid APIs and other third-party fees are not included unless the Order says so. Crestmont will not incur a third-party cost on Customer's behalf without Customer's prior approval.
 
@@ -139,7 +139,7 @@ Each milestone is invoiced once. Any rounding difference falls in the final mile
 
 7.2 **Review.** Crestmont presents work for Customer review in the Portal. Customer will either approve it or submit one consolidated list of revision requests per round within five (5) business days of the review request. The deadline ends at the close of the fifth business day, Eastern Time, and is shown in the Portal and in the request email.
 
-7.3 **Revision rounds.** Each package includes the revision rounds in Section 3.1 (Starter 2, Business 3, Premium 4). Custom Orders include the rounds stated in the SOW, or [CONFIRM: DEFAULT CUSTOM ROUNDS] if none are stated. Every round submitted is counted. A "revision" is a change to the delivered work within the existing scope. New pages, features or integrations are out of scope.
+7.3 **Revision rounds.** Each package includes the revision rounds in Section 3.1 (Starter 2, Business 3, Premium 4). Custom Orders include the revision rounds stated in the accepted Quote or SOW. Every round submitted is counted. A "revision" is a change to the delivered work within the existing scope. New pages, features or integrations are out of scope.
 
 7.4 **Defects are not revisions.** Correcting work that does not match the accepted scope does not use a revision round.
 
@@ -202,7 +202,7 @@ Each milestone is invoiced once. Any rounding difference falls in the final mile
 
 11.4 **Account access handover.** At handoff, and on termination for any reason after full payment, Crestmont will transfer or confirm Customer's administrative access to the domain, the hosting configuration Customer is entitled to, the source code repository for the Deliverables, and third-party accounts set up for Customer.
 
-11.5 **Transition assistance.** On termination of a Maintenance Plan, Crestmont will, if Customer asks within 60 days after termination, provide an export of the website files and database content it hosts for Customer, in a commonly used format. The website stays online for any period for which the plan's fees have been paid. **[CONFIRM: whether assistance beyond the export is billable at the plan's overage rate (Schedule B.2), with Customer's prior approval.]**
+11.5 **Transition assistance.** On termination of a Maintenance Plan, Crestmont will, if Customer asks within 60 days after termination, provide an export of the website files and database content it hosts for Customer, in a commonly used format. The website stays online for any period for which the plan's fees have been paid. Crestmont also gives reasonable transition assistance for the domain and hosting without an additional Crestmont fee. This includes transferring or confirming access under Section 11.4, explaining the hosting configuration, and answering reasonable questions from Customer's new provider. It does not include new development or redesign work, third-party charges (for example registrar transfer or renewal fees, or the new provider's fees), or steps that are technically impossible, such as moving Crestmont's own infrastructure or Crestmont Materials beyond the licence in Section 10.3.
 
 ---
 
@@ -210,13 +210,13 @@ Each milestone is invoiced once. Any rounding difference falls in the final mile
 
 12.1 **Definition.** "**Confidential Information**" means non-public information disclosed by one party to the other that is marked confidential or that a reasonable person would understand to be confidential. This includes credentials, pricing in Quotes, and unpublished designs.
 
-12.2 **Obligations.** The recipient will use Confidential Information only to perform or receive the Services. It will protect that information with at least reasonable care, and disclose it only to personnel and Subprocessors who need to know it and are bound by similar obligations.
+12.2 **Obligations.** The recipient will use Confidential Information only to perform or receive the Services, and will protect it with at least reasonable care. It will not disclose Confidential Information except: (a) to its personnel and Subprocessors who need to know it to perform or receive the Services and are bound by similar obligations; (b) with the disclosing party's prior authorisation; or (c) as Section 12.4 permits.
 
 12.3 **Exclusions.** Information is not Confidential Information if it is or becomes public without the recipient's fault, was known to the recipient without restriction, is independently developed, or is rightfully received from a third party.
 
-12.4 **Compelled disclosure.** The recipient may disclose information if required by law. Where lawful, it will give prompt notice and reasonable help to seek protection.
+12.4 **Compelled disclosure.** The recipient may disclose Confidential Information when legally compelled to do so, for example by a valid subpoena, a court order or other applicable law. It will disclose only what is required. Where lawful, it will give prompt notice and reasonable help to seek protection.
 
-12.5 **Duration.** These obligations last during the Agreement and for [CONFIRM: CONFIDENTIALITY YEARS] years afterwards. Credentials and trade secrets remain protected for as long as they stay confidential.
+12.5 **Duration.** These obligations last during the Agreement and continue afterwards, without time limit, for as long as the information remains confidential. Information that a party must keep under applicable law or its record-keeping obligations (for example Acceptance Records, financial records and the audit log) may be kept, and stays protected under this Section while it is kept.
 
 ---
 
@@ -274,7 +274,7 @@ Each milestone is invoiced once. Any rounding difference falls in the final mile
 
 17.2 **Termination for convenience.** Customer may terminate an Order for convenience at any time by notice in the Portal or to legal@crestmontwebsitedevelopment.com. Crestmont does not terminate Orders for convenience. Fees already paid are then handled under Schedule E.
 
-17.3 **Termination for cause.** Either party may terminate an Order or this Agreement if the other party materially breaches it and does not cure the breach within [CONFIRM: CURE DAYS] days of written notice, or immediately if the other party becomes insolvent. Crestmont may suspend Services immediately for a serious AUP breach as described in the AUP.
+17.3 **Termination for cause.** Either party may terminate an Order or this Agreement if the other party materially breaches it and does not cure the breach within 15 days after written notice given under Section 21.2, or immediately if the other party becomes insolvent. Crestmont may suspend Services immediately for a serious AUP breach as described in the AUP.
 
 17.4 **Effect.** On termination:
 (a) Customer pays for work performed and approved milestones up to the termination date, together with approved non-cancellable third-party costs. Refunds are handled under Schedule E;
@@ -288,9 +288,9 @@ Each milestone is invoiced once. Any rounding difference falls in the final mile
 
 ## 18. Dispute Resolution
 
-18.1 **Informal negotiation.** Before starting formal proceedings, a party will give written notice of the dispute. Senior representatives will then try in good faith to resolve it for [CONFIRM: NEGOTIATION DAYS] days.
+18.1 **Informal negotiation.** Before starting formal proceedings, a party will give written notice of the dispute. Senior representatives will then try in good faith to resolve it for 30 days after the notice. This one 30-day period is the good-faith resolution period for every dispute, including an invoice dispute under Section 4.6. No further negotiation period is added before mediation under Section 18.2.
 
-18.2 **Formal resolution.** If the dispute is not resolved, the parties will try non-binding mediation before starting court proceedings. If mediation does not resolve it, the dispute will be resolved by the state or federal courts in [CONFIRM: VENUE COUNTY], Michigan, and each party submits to their jurisdiction. **[COUNSEL: Mediation provider, timing and cost allocation; whether a jury-trial waiver is appropriate; venue and mediation-first requirements for consumer Customers (Section 2.2).]**
+18.2 **Formal resolution.** If the dispute is not resolved, the parties will try non-binding mediation before starting court proceedings. If mediation does not resolve it, the dispute will be resolved by the state courts in Ingham County, Michigan, or the federal court for the district that includes Ingham County, and each party submits to their jurisdiction, subject to Section 2.2 and any mandatory venue rule of applicable law. **[COUNSEL: Mediation provider, timing and cost allocation; whether a jury-trial waiver is appropriate; venue and mediation-first requirements for consumer Customers (Section 2.2).]**
 
 18.3 **Injunctive relief.** Either party may seek injunctive relief in a court of competent jurisdiction to protect its Confidential Information or intellectual property.
 
@@ -304,7 +304,7 @@ This Agreement is governed by the laws of the State of Michigan, without regard 
 
 ## 20. Force Majeure
 
-Neither party is liable for delay or failure caused by events beyond its reasonable control. Such events include natural disasters, epidemics, war, terrorism, labour disputes, government action, utility or internet failures, and outages of third-party infrastructure (including hosting, payment, email, telephony and AI providers) that are not caused by the affected party. The affected party will give prompt notice and use reasonable efforts to resume performance. This Section does not excuse payment obligations. If a force majeure event continues for more than [CONFIRM: FM DAYS] days, either party may terminate the affected Order, and Schedule E applies (including Schedule E.4A).
+Neither party is liable for delay or failure caused by events beyond its reasonable control. Such events include natural disasters, epidemics, war, terrorism, labour disputes, government action, utility or internet failures, and outages of third-party infrastructure (including hosting, payment, email, telephony and AI providers) that are not caused by the affected party. The affected party will give prompt notice and use reasonable efforts to resume performance. This Section does not excuse payment obligations. If a force majeure event continues for more than 30 days, either party may terminate the affected Order, and Schedule E applies (including Schedule E.4A).
 
 ---
 
@@ -312,7 +312,7 @@ Neither party is liable for delay or failure caused by events beyond its reasona
 
 21.1 **Operational notices.** Routine notices, such as approvals, invoices, reminders and project updates, are given through the Portal and by email to the Customer's account administrator.
 
-21.2 **Legal notices.** Notices of breach, termination, indemnity claims or disputes must be in writing and sent to Crestmont at legal@crestmontwebsitedevelopment.com, and to Customer at the email address of its account administrator in the Portal (and its postal address, if Customer has given one). Email notices take effect when sent, unless a delivery failure is received. **[COUNSEL: Whether email alone suffices for termination and dispute notices. Crestmont operates online and publishes no postal address.]**
+21.2 **Legal notices.** Notices of breach, termination, indemnity claims or disputes must be in writing. They are sent to Crestmont by email to legal@crestmontwebsitedevelopment.com, and may also be sent by post or courier to Talent Revenue Systems LLC, 1409 Lake Lansing Rd, Lansing, MI 48912 (Crestmont's business mailing address). They are sent to Customer at the email address of its account administrator in the Portal, and to its postal address if Customer has given one. Email notices take effect when sent, unless a delivery failure is received. Notices by post or courier take effect on delivery. Where applicable law requires a particular method, for example for service of legal process, that method applies.
 
 ---
 
@@ -452,20 +452,22 @@ C.10 **Changes to AI providers.** New AI Subprocessors are added only under the 
 
 D.1 **Channels.** Customers can submit support tickets at any time in the Portal and receive an automated acknowledgement with a ticket reference. Automated acknowledgements are not a staff response.
 
-D.2 **Staffed hours.** Support is staffed Monday to Friday, 9:00 a.m. to 5:00 p.m. Eastern Time [CONFIRM: any observed holidays, or delete]. Crestmont does not offer 24/7 human support. Automated systems, including AI agents, may answer enquiries outside staffed hours. An automated answer is not a staff response.
+D.2 **Staffed hours.** Support is staffed Monday to Friday, 9:00 a.m. to 5:00 p.m. Eastern Time. U.S. federal holidays that fall on a weekday are not automatically excluded. Crestmont does not offer 24/7 human support. Automated systems, including AI agents, may answer enquiries outside staffed hours. An automated answer is not a staff response.
 
-D.3 **Response targets.** Initial response targets are goals, not guarantees of resolution time:
+D.3 **Response targets.** Initial response targets are counted in staffed hours and business days. They are goals for a first response, not guarantees of resolution time:
 
 | Priority | Definition | Initial response target |
 |---|---|---|
-| Urgent | Production site down or Security Incident | [CONFIRM: URGENT TARGET] staffed hours |
-| High | Major feature broken, no workaround | [CONFIRM: HIGH TARGET] |
-| Normal | Other defects and questions | per plan (Schedule B.2) |
-| Low | Requests and changes | [CONFIRM: LOW TARGET] |
+| Urgent | Production site down or Security Incident | 4 staffed hours |
+| High | Major feature broken, no workaround | 1 business day |
+| Normal | Other defects and questions | 2 business days |
+| Low | Requests and changes | 2 business days |
+
+If Customer's Maintenance Plan (Schedule B.2) states a faster initial response target, the faster target applies instead. For example, an Executive plan has 4 staffed hours for every priority, and a Professional plan has 1 business day for Normal and Low requests. Nothing in this table reduces a plan entitlement.
 
 D.4 **Availability target.** For production websites hosted under a Maintenance Plan, Crestmont targets monthly availability of 99.5%, measured by its uptime monitoring (†, Schedule B.2). This is a target, not a guarantee, and there is no guaranteed time to restore service. Crestmont depends on its infrastructure provider's availability and has no automated failover of its own.
 
-D.5 **Maintenance windows.** Planned maintenance is performed, where practical, during [CONFIRM: MAINTENANCE WINDOW] with [CONFIRM: MAINTENANCE NOTICE] notice for planned work expected to cause downtime. Emergency security maintenance may be performed at any time.
+D.5 **Maintenance windows.** Planned maintenance is performed outside staffed hours where practical. Crestmont gives at least 24 hours' notice, when practical, of planned work expected to cause downtime. Emergency security maintenance may be performed at any time without advance notice.
 
 D.6 **No service credits.** Crestmont does not give service credits or automatic refunds for missing the availability target.
 

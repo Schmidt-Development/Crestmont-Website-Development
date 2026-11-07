@@ -38,7 +38,7 @@
 
 4.1 Crestmont limits access to Customer Data to personnel who need it to perform the Services. Each person uses an individual account with role-based permissions. Security-relevant and business actions are recorded in the audit log. Not every view of a record is logged.
 
-4.2 Personnel with access are bound by written confidentiality obligations. Crestmont requires a signed confidentiality agreement before anyone other than the Founder is given access to Customer Data. **[CONFIRM: the confidentiality agreement text (Founder decision FD-43) is not yet prepared. Confirm that no one other than the Founder has access to Customer Data until it is signed.]**
+4.2 Personnel with access are bound by written confidentiality obligations. Crestmont requires a signed confidentiality agreement before anyone other than the Founder is given access to Customer Data. **[VERIFY: the confidentiality agreement text (Founder decision FD-43) is not yet prepared. Until it is signed, no one other than the Founder may be given access to Customer Data.]**
 
 ## 5. Security
 

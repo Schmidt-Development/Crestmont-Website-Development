@@ -8,7 +8,7 @@
 
 ## 1. Who We Are
 
-This policy explains how Talent Revenue Systems LLC, trading as Crestmont Website Development ("**Crestmont**", "**we**", "**us**"), handles Personal Data collected through crestmontwebsitedevelopment.com, the customer portal (the "**Portal**"), telephone calls, our sales activities and our Services. We operate online. Privacy questions can be sent to legal@crestmontwebsitedevelopment.com.
+This policy explains how Talent Revenue Systems LLC, trading as Crestmont Website Development ("**Crestmont**", "**we**", "**us**"), handles Personal Data collected through crestmontwebsitedevelopment.com, the customer portal (the "**Portal**"), telephone calls, our sales activities and our Services. We operate online. Our business mailing address is 1409 Lake Lansing Rd, Lansing, MI 48912. Privacy questions can be sent to legal@crestmontwebsitedevelopment.com.
 
 Defined terms (**Customer**, **Services**, **Customer Data**, **Personal Data**, **AI Features**, **AI Receptionist**, **Subprocessor**, **Security Incident**) have the same meaning as in our Master Services Agreement.
 
@@ -25,11 +25,11 @@ Defined terms (**Customer**, **Services**, **Customer Data**, **Personal Data**,
 | Agreement records | Which document versions you accepted, when, from which IP address and browser | Our systems |
 | Call data | Phone number, call time, duration and outcome; the details you give us during a call so that we can act on them (for example an appointment, a callback request or a request not to be called); and, **only where the consent or notice that the law requires has been given**, a recording, a transcript and an automated summary or analysis of the call (Section 8) | You; our systems; our telephony and voice providers |
 | Appointment data | Appointment or callback time, topic, and the contact details needed to keep it | You |
-| Prospective-customer data | Business name, business contact details (such as the name and role of a contact person, a work phone number and email address), business address, website and other information that a business publishes about itself | Publicly available sources and open business datasets; our own research |
+| Prospective-customer data | Business name, business contact details (such as the name and role of a contact person, a work phone number and email address), business address, website and other information that a business publishes about itself | Publicly available sources: the Overture Maps open dataset, the Common Crawl web archive, and the business's own public website, which we check directly |
 | Technical and security data | IP address, browser type, failed sign-in attempts, rate-limit events, audit logs | Our systems |
 | Attribution data | Campaign parameters in the link you followed and the referring page (Section 7) | Your browser |
 
-We do not knowingly collect sensitive data such as government ID numbers, health information or precise geolocation. **[CONFIRM: the sources of prospective-customer data in current use, and whether any of them is a paid data provider.]**
+We do not knowingly collect sensitive data such as government ID numbers, health information or precise geolocation. **[VERIFY: the research worker also contains adapters for Foursquare Open Source Places and OpenStreetMap, which are off by default. Confirm that they stay off in production, or add them here before they are used.]**
 
 ## 3. How We Use Personal Data
 
@@ -46,11 +46,11 @@ We do not knowingly collect sensitive data such as government ID numbers, health
 | Crediting enquiries to the campaign that brought you | Legitimate interests (Section 7) |
 | Tax, accounting and legal compliance | Legal obligation |
 
-**Marketing email.** We send promotional email only to people who have opted in to receive it, and every promotional email includes a way to unsubscribe. Information that you ask us to send, such as package details after a call, is sent because you asked for it. **[VERIFY: no promotional email may be sent until consent records exist in the Platform (Founder decision FD-42 is not yet implemented). CAN-SPAM requires a valid postal address in commercial email (Business Disclosures).]** **[COUNSEL: The legal-basis column is relevant only if non-U.S. law applies. Keep it or remove it.]**
+**Marketing email.** We send promotional email only to people who have given the consent the law requires. Every promotional email identifies Crestmont as the sender, includes our postal address and offers a working way to unsubscribe. Information that you ask us to send, such as package details after a call, is sent because you asked for it. **[VERIFY: promotional campaigns must not be enabled until consent records, unsubscribe handling and sender identification are confirmed working. The Platform has unsubscribe and suppression handling, but no record of marketing consent exists yet (Founder decision FD-42).]** **[COUNSEL: The legal-basis column is relevant only if non-U.S. law applies. Keep it or remove it.]**
 
 ### 3A. Finding and contacting potential customers
 
-We look for businesses that may need a website, using information that businesses publish about themselves and open business datasets. We keep the business contact details we find in our customer-relationship records. We call a person only as the law allows. Today we place automated or AI-voice calls only to people who have asked us to call them back, at the time they asked for. We do not currently make unsolicited sales calls with automated or AI voice agents. If that changes, we will do so only with the consent the law requires, and we will update this policy first. You can ask us at any time to stop contacting you or to delete your details (Section 11). We keep a record of a request not to be called so that we can honour it.
+We look for businesses that may need a website, using information that businesses publish about themselves, the Overture Maps and Common Crawl open datasets, and the businesses' own public websites. We keep the business contact details we find in our customer-relationship records. We call a person only as the law allows. Today we place automated or AI-voice calls only to people who have asked us to call them back, at the time they asked for. We do not currently make unsolicited sales calls with automated or AI voice agents. If that changes, we will do so only with the consent the law requires, and we will update this policy first. You can ask us at any time to stop contacting you or to delete your details (Section 11). We keep a record of a request not to be called so that we can honour it.
 
 ## 4. Automated and AI Processing
 
@@ -124,13 +124,15 @@ We keep Personal Data only as long as needed for the purposes above. Our retenti
 | Financial records, agreement Acceptance Records, privacy-request records, audit log | Kept for legal, tax and evidentiary purposes (typically 7 years for financial records; the audit log is append-only) |
 | Account, project and ticket data | For the life of the customer relationship, then on request (Section 10) |
 | Backups | 35 days (daily) and 12 months (monthly), encrypted (Founder decision FD-37)* |
-| Enquiries that never become projects, and prospective-customer data | [CONFIRM: retention period] |
+| Enquiries that never become projects, and prospective-customer data | 24 months after the last meaningful interaction, unless the law requires us to keep it longer† |
 
-\* **These periods are not yet switched on in our systems.** Until a period is switched on, the data is kept until it is deleted on request. **[COUNSEL: confirm each period, including whether any law requires keeping security logs longer.]** **[CONFIRM: a retention period for enquiries that never become projects and for prospective-customer data. The current published draft promises deletion "after a reasonable period", but the Platform has no job that does this.]**
+\* **These periods are not yet switched on in our systems.** Until a period is switched on, the data is kept until it is deleted on request. **[COUNSEL: confirm each period, including whether any law requires keeping security logs longer.]**
+
+† This is our retention policy. **We have not yet automated deletion on this schedule.** Until we do, records older than 24 months may still be held, and you can ask us to delete yours at any time (Section 11). **[VERIFY: no retention job deletes enquiries or prospect records after 24 months.]**
 
 ## 10. Your Rights
 
-**10.1 Everyone.** Whatever your location, you may ask us to access, correct, delete or provide a copy of your Personal Data. We will respond within [CONFIRM: RESPONSE DAYS] days.
+**10.1 Everyone.** Whatever your location, you may ask us to access, correct, delete or provide a copy of your Personal Data. We will respond within 30 days, or sooner if the law requires.
 
 **10.2 U.S. state privacy laws.** Residents of certain states (for example California, Colorado, Connecticut, Virginia, Oregon, Texas and others) may have statutory rights to know, access, correct, delete, port, and opt out of sale, sharing, targeted advertising and certain profiling, and to appeal our decision. These laws apply to businesses that meet thresholds such as revenue or the number of consumers whose data they process. **[COUNSEL: Determine whether Crestmont currently meets any state threshold; Michigan has no comprehensive consumer privacy statute as of drafting, which should be confirmed. Decide whether to offer these rights voluntarily to everyone (recommended for simplicity) and whether a California "notice at collection" is required.]**
 
@@ -143,7 +145,7 @@ We keep Personal Data only as long as needed for the purposes above. Our retenti
 
 **Deletion.** Staff process deletion requests. Completion anonymises your account (name, email and credentials), removes your memberships and notifications, anonymises linked contact records and signs you out everywhere. We keep financial, agreement and audit records where the law requires; these then refer to an anonymised identifier. The account owner of Crestmont itself cannot be deleted through this process.
 
-**Verification.** For self-service requests, signing in to your account verifies you. For email requests, we verify your identity by [CONFIRM: VERIFICATION METHOD, e.g. confirming control of the account email]. You may use an authorised agent with written permission. **[COUNSEL: verification standard and agent process.]**
+**Verification.** For self-service requests, signing in to your account verifies you. For email requests, we verify your identity in a reasonable way that is proportionate to the nature and sensitivity of the request. For example, we may confirm that you control the email address linked to the data, and we may ask for more for requests to delete data or to receive sensitive data. You may use an authorised agent with written permission. **[COUNSEL: authorised-agent requirements, if a state privacy law applies.]**
 
 **Appeals.** If we deny a request, we tell you why. You may appeal by emailing legal@crestmontwebsitedevelopment.com with "Privacy appeal" in the subject line.
 
@@ -169,4 +171,4 @@ We will post updates on this page with a new effective date. Material changes ar
 
 ## 17. Contact
 
-Talent Revenue Systems LLC (Crestmont Website Development) · legal@crestmontwebsitedevelopment.com
+Talent Revenue Systems LLC (Crestmont Website Development) · 1409 Lake Lansing Rd, Lansing, MI 48912 · legal@crestmontwebsitedevelopment.com
