@@ -29,3 +29,12 @@ test("[SEC-003] scanner secret probe derives the key exactly as deploy-staging d
     assert.doesNotMatch(run(padded.trim(), env), /surrounding whitespace|trimmed token derives/, "a clean token reports one key");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("[SEC-003] the probe workflow tests the value the deploy installs: the staging FILE_SCANNER_SECRET when set, else the derived key", async () => {
+  const { readFileSync } = await import("node:fs");
+  const probe = readFileSync(".github/workflows/scanner-secret-probe.yml", "utf8"), deploy = readFileSync(".github/workflows/deploy-staging.yml", "utf8");
+  assert.match(deploy, /SCANNER_SECRET: \$\{\{ secrets\.FILE_SCANNER_SECRET \}\}[\s\S]*if \[ -z "\$SCANNER_SECRET" \]; then SCANNER_SECRET=\$\(node --no-warnings scripts\/staging-secrets\.ts derive scanner\)/, "the deploy prefers the GitHub secret");
+  assert.match(probe, /FILE_SCANNER_SECRET: \$\{\{ secrets\.FILE_SCANNER_SECRET \}\}/);
+  assert.match(probe, /if \[ -n "\$FILE_SCANNER_SECRET" \]; then[\s\S]*--probe-provided "\$STAGING_URL"[\s\S]*else[\s\S]*--probe "\$STAGING_URL"/);
+  assert.doesNotMatch(probe, /echo[^\n]*\$FILE_SCANNER_SECRET/, "never echoed");
+});
