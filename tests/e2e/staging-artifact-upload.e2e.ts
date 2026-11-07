@@ -75,6 +75,15 @@ function artifactZip(): Buffer {
 const EICAR = ["X5O!P%@AP[4\\PZX54(P^)7CC)7}$", "EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"].join("");
 
 const DASH = "/staff/builds/frontends";
+
+/**
+ * The upload form's own submit.
+ *
+ * Every staff page carries a sign-out form in its header (src/ui/layout.ts), so `button[type=submit]` matches that
+ * one first: measured on the deployed site, the run pressed Sign out three times and reported "landed on / (You
+ * are signed out.)" as though the upload had failed. Scope every submit to the form it belongs to.
+ */
+const SUBMIT = `form[action$="${DASH}/new"] button[type=submit]`;
 let projectUrl = "";
 
 test("[AB-UI-01] an authorized staff user sees the upload control on the dashboard", { skip: unset }, async () => {
@@ -98,7 +107,7 @@ test("[AB-UI-02] a first test project is created and a valid ZIP is accepted, th
   if (await newRadio.count()) await newRadio.check();
   await o.fill('input[name=name]', `Artifact upload check ${RUN}`);
   await o.setInputFiles('input[name=artifact]', { name: "frontend.zip", mimeType: "application/zip", buffer: artifactZip() });
-  await Promise.all([o.waitForNavigation(), o.click('button[type=submit]')]);
+  await Promise.all([o.waitForNavigation(), o.click(SUBMIT)]);
 
   const path = new URL(o.url()).pathname;
   assert.match(path, new RegExp(`^${DASH}/prj_`), `landed on ${o.url()} (${await alerts(o)})`);
@@ -156,7 +165,7 @@ test("[AB-UI-05] an invalid file is refused with a reason, and nothing is create
   if (await newRadio.count()) await newRadio.check();
   await o.fill('input[name=name]', `Should not exist ${RUN}`);
   await o.setInputFiles('input[name=artifact]', { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("not a zip") });
-  await Promise.all([o.waitForNavigation().catch(() => {}), o.click('button[type=submit]')]);
+  await Promise.all([o.waitForNavigation().catch(() => {}), o.click(SUBMIT)]);
 
   const shown = (await o.locator("body").innerText()).slice(0, 600);
   assert.match(shown, /zip|not allowed|do not match/i, `the refusal says why: ${shown}`);
@@ -176,7 +185,7 @@ test("[AB-UI-06] EICAR is accepted for scanning and then quarantined, not delive
     name: "infected.zip", mimeType: "application/zip",
     buffer: makeZip([{ path: "eicar.com", body: Buffer.from(EICAR, "latin1") }]),
   });
-  await Promise.all([o.waitForNavigation(), o.click('button[type=submit]')]);
+  await Promise.all([o.waitForNavigation(), o.click(SUBMIT)]);
   const infectedUrl = o.url();
   assert.match(new URL(infectedUrl).pathname, new RegExp(`^${DASH}/prj_`), `landed on ${infectedUrl}`);
 
@@ -197,11 +206,12 @@ test("[AB-UI-06] EICAR is accepted for scanning and then quarantined, not delive
 test("[AB-UI-07] a customer cannot reach the upload screen or post to it", { skip: unset }, async () => {
   const c = await signedIn("customer_admin");
   await c.goto(`${BASE}${DASH}/new`);
-  const path = new URL(c.url()).pathname;
-  const body = await c.locator("body").innerText();
-  assert.ok(
-    path !== `${DASH}/new` || /not found|no permission|forbidden/i.test(body),
-    `a customer was shown the upload screen: ${body.slice(0, 300)}`,
-  );
-  assert.doesNotMatch(body, /Upload and scan/i, "and is not offered the form");
+  const body = (await c.locator("body").innerText()).slice(0, 400);
+
+  // What matters is that the form is not there, not how the refusal is worded. Measured: a customer is given the
+  // public marketing shell at that path, which contains none of the words a refusal page would -- so asserting on
+  // "not found" or "no permission" tested the wording and not the behaviour.
+  assert.equal(await c.locator('input[type=file][name=artifact]').count(), 0, `a customer was shown the file field: ${body}`);
+  assert.equal(await c.locator(SUBMIT).count(), 0, `a customer was shown the upload form: ${body}`);
+  assert.doesNotMatch(body, /Upload and scan/i, "and is not offered it in any other shape");
 });
