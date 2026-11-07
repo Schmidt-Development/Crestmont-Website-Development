@@ -11,9 +11,11 @@ import { createTestApp, createStaff } from "./support/app.ts";
 import * as DL from "../src/services/design-locked.ts";
 import * as AA from "../src/services/artifact-assets.ts";
 import { sha256Hex } from "../src/lib/crypto.ts";
+import { EGRESS_HOSTS, guardFetch } from "../src/lib/egress.ts";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new Array(64).fill(7)]);
 const WOFF2 = new Uint8Array([0x77, 0x4f, 0x46, 0x32, ...new Array(64).fill(3)]);
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, ...new Array(64).fill(5)]);
 const CSS = new TextEncoder().encode("@font-face{font-family:Rowe;src:url(https://fonts.gstatic.com/a.woff2)}");
 
 /** A fetch that answers from a script, records what it was asked, and never touches the network. */
@@ -282,4 +284,75 @@ test("[AST-07] a design missing a visual dependency cannot be approved", async (
     const approved = await DL.approveBaseline(t.db, baseline.id, { approvedBy: staff.id, note: "fonts packaged" });
     assert.equal(approved.status, "approved");
   } finally { t.close(); }
+});
+
+test("[AST-08] the deployed egress allowlist does not block a validated asset, and is not widened to do it", async () => {
+  // THE DEFECT THESE TESTS MISSED. Every check above passes a fake fetch, so none of them went through the thing
+  // the deployed Worker actually installs: `guardFetch`, the central outbound allowlist (ASVS V12.6 / F-11).
+  // On staging, Law Firm 02's Google Fonts stylesheet and three photographs came back as
+  //   "Outbound request to fonts.googleapis.com blocked by the egress allowlist"
+  // and the design was measured in a fallback face with empty image boxes. The tests were green throughout.
+  //
+  // So this one drives the resolver through the real guard. It is the regression that would have caught it.
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const { artifact } = await artifactFor(t, staff.id, "Assets through the guard");
+    const inner = fakeFetch({
+      "https://fonts.googleapis.com/css2?family=Fraunces": { type: "text/css", body: CSS },
+      "https://images.unsplash.com/photo-1?auto=format": { type: "image/jpeg", body: JPEG },
+    });
+    const guarded = guardFetch(inner.impl);
+
+    // The allowlist still blocks what it always blocked: nothing here registers a host permanently.
+    await assert.rejects(() => guarded("https://fonts.googleapis.com/css2?family=Fraunces"), /blocked by the egress allowlist/);
+
+    const r = await AA.resolveAssets(t.db, t.storage, {
+      artifactId: artifact.id, fetchImpl: guarded,
+      requests: [
+        { url: "https://fonts.googleapis.com/css2?family=Fraunces", kind: "stylesheet", referencedBy: "index.html" },
+        { url: "https://images.unsplash.com/photo-1?auto=format", kind: "image", referencedBy: "index.html" },
+      ],
+    });
+    assert.deepEqual(r.assets.map((a) => a.status), ["pinned", "pinned"], JSON.stringify(r.assets.map((a) => a.why)));
+    assert.equal(r.refusedVisual, 0);
+
+    // And the exception closed behind it: the host is blocked again once the request is done.
+    await assert.rejects(() => guarded("https://fonts.googleapis.com/css2?family=Fraunces"), /blocked by the egress allowlist/);
+    assert.ok(!EGRESS_HOSTS.includes("fonts.googleapis.com"), "the standing allowlist was not widened");
+  } finally { t.close(); }
+});
+
+test("[AST-09] an uploaded artifact cannot aim the platform at a paid model or at its own providers", () => {
+  // The scoped exception means a URL out of a customer's file decides which host the platform fetches from, so
+  // the answer to "which hosts may that never be" has to be explicit. Two groups: the paid inference APIs,
+  // because "no paid AI service is called" is evidence this platform maintains; and the platform's own provider
+  // hosts, because that is where its money, its mail and its customer records are.
+  for (const denied of [
+    "https://api.anthropic.com/v1/messages",
+    "https://api.openai.com/v1/chat/completions",
+    "https://generativelanguage.googleapis.com/v1/models",
+    "https://bedrock-runtime.us-east-1.amazonaws.com/model/x",
+    "https://api.stripe.com/v1/charges",
+    "https://api.resend.com/emails",
+    "https://api.retellai.com/v2/call",
+    "https://api.github.com/user",
+    "https://sub.api.anthropic.com/x",
+  ]) {
+    const r = AA.checkUrl(denied);
+    assert.equal(r.ok, false, `${denied} must be refused`);
+    assert.match("why" in r ? r.why : "", /not a host an uploaded artifact may cause/, denied);
+  }
+
+  // And the ordinary dependencies of an ordinary website still pass. fonts.googleapis.com is the one the runner's
+  // own proxy denies -- correctly, because the RUNNER has no business there -- and the platform fetching a
+  // stylesheet on an owner's behalf is a different act.
+  for (const allowed of [
+    "https://fonts.googleapis.com/css2?family=Fraunces",
+    "https://fonts.gstatic.com/s/a/b.woff2",
+    "https://images.unsplash.com/photo-1",
+    "https://cdn.jsdelivr.net/npm/x/style.css",
+  ]) {
+    assert.ok(AA.checkUrl(allowed).ok, `${allowed} must be allowed`);
+  }
 });

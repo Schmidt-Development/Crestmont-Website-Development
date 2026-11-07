@@ -26,6 +26,7 @@ import { newId, nowIso } from "../lib/db.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import { audit } from "./security.ts";
+import { allowEgressHost, untrustedHostAllowed } from "../lib/egress.ts";
 
 export type AssetKind = "image" | "font" | "stylesheet" | "other";
 
@@ -89,6 +90,8 @@ export function checkUrl(raw: string): { ok: true; url: URL } | { ok: false; why
   if (PRIVATE_NAME.test(host)) return { ok: false, why: `"${host}" is a private or internal name` };
   if (PRIVATE_V4.test(host)) return { ok: false, why: `"${host}" is a private address` };
   if (host === "metadata.google.internal" || host.endsWith(".internal")) return { ok: false, why: `"${host}" is an internal name` };
+  // A URL out of an uploaded file must never reach a paid inference API or one of the platform's own providers.
+  if (!untrustedHostAllowed(host)) return { ok: false, why: `"${host}" is not a host an uploaded artifact may cause the platform to fetch from` };
 
   return { ok: true, url: u };
 }
@@ -249,6 +252,12 @@ async function fetchOne(
     const checked = checkUrl(target);
     if (!checked.ok) return { ok: false, why: hop === 0 ? checked.why : `a redirect led to a URL that cannot be fetched: ${checked.why}` };
 
+    // The deployed Worker wraps global fetch with a host allowlist (ASVS V12.6 / F-11), and a customer's font CDN
+    // is not on it -- which is why four of the Founder's law firm dependencies came back as
+    // "Outbound request to fonts.googleapis.com blocked by the egress allowlist". The allowlist is not widened:
+    // this registers THIS ONE validated host for the duration of THIS ONE request and releases it immediately,
+    // which is the same mechanism the environment probe already uses for an Owner-configured URL.
+    const release = allowEgressHost(checked.url.hostname);
     let res: Response;
     try {
       res = await fetchImpl(checked.url.toString(), {
@@ -262,6 +271,8 @@ async function fetchOne(
       });
     } catch (e) {
       return { ok: false, why: `the request failed: ${String((e as Error)?.message ?? e).slice(0, 160)}` };
+    } finally {
+      release();
     }
 
     if (res.status >= 300 && res.status < 400) {

@@ -353,11 +353,17 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
     // service re-reads the scan verdict and refuses anything but the project's latest rejected artifact.
     const latestArtifactId = artifacts[0]?.id ?? null;
     const retryOf = (a: DL.FrontendArtifact): SafeHtml => {
-      if (a.status !== "rejected" || a.id !== latestArtifactId || !mayApprove) return html``;
+      if (a.id !== latestArtifactId || !mayApprove) return html``;
+      // Rejected, or imported with a measurement that is missing visual dependencies: both are measurements worth
+      // redoing, and the second is the one Law Firm 02 needed after its font and photographs were refused.
+      const incomplete = a.status === "imported" && missingAssets.length > 0;
+      if (a.status !== "rejected" && !incomplete) return html``;
       return html`<form method="post" action="${BASE}/${projectId}/artifacts/${a.id}/retry-import" style="margin:.4rem 0 0">
         ${csrf(ctx)}
-        ${button("Import again", { variant: "ghost", size: "sm" })}
-        <span class="faint">The same archive, scanned again as clean before anything is unpacked.</span>
+        ${button(incomplete ? "Measure again with its assets" : "Import again", { variant: "ghost", size: "sm" })}
+        <span class="faint">${incomplete
+          ? "The same archive, measured again now that its external assets can be acquired."
+          : "The same archive, scanned again as clean before anything is unpacked."}</span>
       </form>`;
     };
 
