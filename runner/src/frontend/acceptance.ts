@@ -50,6 +50,17 @@ export interface AcceptancePlan {
     unauthenticated?: number;
     requestExample?: Record<string, unknown>;
   }[];
+  /** Acceptance criteria the contract made executable (AcceptanceProbe), carrying the id they are reported under. */
+  probes: {
+    id: string;
+    text: string;
+    as: "anonymous" | "customer" | "other-customer";
+    method: string;
+    path: string;
+    body?: Record<string, unknown>;
+    expect: number;
+    repeat: boolean;
+  }[];
 }
 
 const isContract = (a: ApiRequirement | ApiContract): a is ApiContract =>
@@ -88,7 +99,17 @@ export function acceptancePlan(repo: string, manifest: IntegrationManifest & Man
     auth: a.auth ?? "public",
     ...(isContract(a) ? { success: a.success, invalid: a.invalid, unauthenticated: a.unauthenticated, requestExample: a.requestExample } : {}),
   }));
-  return { start: startCommand(repo, manifest), port, endpoints };
+  // The criteria that carry a probe, flattened with the id `coverageChecks` would have used for them, so an executed
+  // result and an undetermined one are the same criterion under the same name and never both appear.
+  const probes = (manifest.operations ?? []).flatMap((op) =>
+    (op.acceptanceProbes ?? []).map((pr) => ({
+      id: `${op.id} :: acceptance[${pr.criterion}]`,
+      text: op.acceptance[pr.criterion] ?? "",
+      as: pr.as, method: (pr.method ?? "GET").toUpperCase(), path: pr.path,
+      body: pr.body, expect: pr.expect, repeat: pr.repeat === true,
+    })),
+  );
+  return { start: startCommand(repo, manifest), port, endpoints, probes };
 }
 
 /**
@@ -220,6 +241,7 @@ if (!up) {
   };
 
   let session = "";
+  let otherSession = "";
   if (!reg || !reg.requestExample || !login || !login.requestExample) {
     add("auth:session", false,
       "the contract declares no register/login endpoint with a requestExample, so the driver could not obtain a session and no authenticated behaviour was exercised", true);
@@ -229,6 +251,8 @@ if (!up) {
       made.status === (reg.success ?? 201) ? "registered an account of the driver's own (" + made.status + ")"
         : "declared " + (reg.success ?? 201) + " for a valid registration, answered " + made.status);
     await post(concrete(reg.path), fill(reg.requestExample, other), "");
+    const got2 = await post(concrete(login.path), fill(login.requestExample, other), "");
+    otherSession = (got2.cookie || "").split(",").map((c) => c.split(";")[0].trim()).filter(Boolean).join("; ");
 
     const got = await post(concrete(login.path), fill(login.requestExample, who), "");
     const raw = (got.cookie || "").split(",").map((c) => c.split(";")[0].trim()).filter(Boolean).join("; ");
@@ -274,6 +298,35 @@ if (!up) {
           status === 403 ? "a customer session is refused with 403"
             : "a staff endpoint answered " + status + " to a customer session" + (status === 200 ? " — a customer can read staff data" : ""));
       }
+    }
+
+    // ---- the criteria the contract made executable (AcceptanceProbe) ----
+    //
+    // One request each, from the session the contract named, judged against the status it declared. The criterion
+    // text travels with the result, so the record reads as the criterion rather than as a route. Nothing is
+    // inferred: a probe whose session could not be obtained is UNDETERMINED, exactly as an unprobed criterion is.
+    const call = async (method, p, bodyObj, cookie) => {
+      try {
+        const res = await fetch(base + p, {
+          method, signal: AbortSignal.timeout(10000),
+          headers: { ...(bodyObj ? { "content-type": "application/json" } : {}), ...(cookie ? { cookie } : {}) },
+          ...(bodyObj ? { body: JSON.stringify(bodyObj) } : {}),
+        });
+        return res.status;
+      } catch { return 0; }
+    };
+    for (const pr of plan.probes || []) {
+      const cookie = pr.as === "customer" ? session : pr.as === "other-customer" ? otherSession : "";
+      if (pr.as !== "anonymous" && !cookie) {
+        add(pr.id, false, "no " + pr.as + " session was obtained, so this was not checked: " + pr.text, true);
+        continue;
+      }
+      const me = pr.as === "other-customer" ? other : who;
+      const body = pr.body ? fill(pr.body, me) : undefined;
+      let status = await call(pr.method, concrete(pr.path), body, cookie);
+      if (pr.repeat) status = await call(pr.method, concrete(pr.path), body, cookie);
+      add(pr.id, status === pr.expect,
+        (status === pr.expect ? "answered " : "declared " + pr.expect + ", answered ") + status + " :: " + pr.text);
     }
 
     // Does the session survive the application restarting? A session held only in memory is not a session.
@@ -358,15 +411,18 @@ export function readAcceptanceOutput(stdout: string): AcceptanceCheck[] {
  * person reading the build record should be able to see WHICH criteria were not established, because that is the
  * list the six-artifact campaign has to work through.
  */
-export function coverageChecks(manifest: { operations: { id: string; acceptance: string[] }[] }): AcceptanceCheck[] {
-  return manifest.operations.flatMap((op) =>
-    op.acceptance.map((text, i) => ({
+export function coverageChecks(manifest: { operations: { id: string; acceptance: string[]; acceptanceProbes?: { criterion: number }[] }[] }): AcceptanceCheck[] {
+  return manifest.operations.flatMap((op) => {
+    // A criterion with a probe is executed by the driver and reported there, pass or fail. Reporting it here as well
+    // would both double-count it and let a criterion appear as undetermined in the same run that proved it.
+    const probed = new Set((op.acceptanceProbes ?? []).map((p) => p.criterion));
+    return op.acceptance.flatMap((text, i) => probed.has(i) ? [] : [{
       id: `${op.id} :: acceptance[${i}]`,
       ok: false,
       undetermined: true,
       detail: `not established by any executed check: ${text}`,
-    })),
-  );
+    }]);
+  });
 }
 
 /** The full check list, written beside the plan so a later run can be compared with this one. */
