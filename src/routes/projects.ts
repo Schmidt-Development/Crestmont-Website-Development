@@ -28,7 +28,8 @@ import { audit } from "../services/security.ts";
 import { disabledOwnerFlag } from "../services/offboarding.ts";
 import { can, isOwner } from "../domain/authz.ts";
 import { PROJECT_STATUSES, PROJECT_TRANSITIONS, type ProjectStatus } from "../domain/project.ts";
-import { PACKAGES, type PackageId } from "../domain/catalog.ts";
+import { PACKAGES, MAINTENANCE_PLANS, MAINTENANCE_ORDER, type PackageId } from "../domain/catalog.ts";
+import { recordQuoteMaintenancePlan } from "../services/maintenance-lifecycle.ts";
 
 const PAUSABLE: ProjectStatus[] = ["awaiting_onboarding", "scope_review", "design", "development", "internal_qa", "customer_review", "revisions", "final_approval"];
 const TABS = ["overview", "plan", "revisions", "approvals", "messages", "files", "handoff", "costs", "activity"] as const;
@@ -539,6 +540,11 @@ ${coord ? html`<form method="post" action="/staff/projects/${proj.id}/change-ord
       const gate = await launchEligibility(db, proj.id);
       content = html`<section class="card card--gold"><h2 class="card__title">Customer release readiness</h2><p class="muted">Customer website launch chain (§28). Separate from Crestmont's own platform launch.</p>
 <p data-launch-status><strong>Launch status:</strong> ${badge(gate.eligible ? "pass" : "blocked", gate.status)}</p>
+${!gate.planId && can(ctx.actor!, "pricing.change") && (await db.prepare(`SELECT 1 FROM orders o JOIN projects p ON p.order_id = o.id WHERE p.id = ? AND o.kind = 'quote' AND o.maintenance_plan_id IS NULL`).bind(proj.id).first())
+  ? html`<form method="post" action="/staff/projects/${proj.id}/maintenance-plan" class="row" style="align-items:flex-end;gap:.75rem;flex-wrap:wrap" data-record-maintenance-plan>${csrf(ctx)}
+${select({ name: "plan", label: "Maintenance plan from the accepted quote", options: MAINTENANCE_ORDER.map((id) => ({ value: id, label: MAINTENANCE_PLANS[id].name })), required: true })}
+${button("Record maintenance plan", { variant: "secondary" })}<p class="faint" style="flex-basis:100%">This project came from a custom quote, so its plan is recorded here once, from that quote. The customer then signs the maintenance agreement and activates the subscription before launch.</p></form>`
+  : ""}
 ${table(rr.checks, [{ header: "Check", cell: (c) => c.label }, { header: "Result", cell: (c) => badge(c.ok ? "pass" : "fail", c.ok ? "Pass" : "Missing") }, { header: "Detail", cell: (c) => c.detail }])}
 <p>${rr.ready ? badge("pass", "Ready to deploy") : badge("blocked", `Blocked: ${rr.checks.filter((c) => !c.ok).length} check(s) outstanding`)}</p>
 ${can(ctx.actor!, "release.payment_exception") ? await paymentExceptionPanel(ctx, proj.id) : ""}</section>
@@ -716,6 +722,16 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
   r.post("/staff/projects/:id/deployments", async (ctx, p) => {
     const f = await ctx.form();
     return act(ctx, p.id, "approvals", async () => { await P.recordDeployment(ctx, ctx.actor!, p.id, str(f, "url"), str(f, "commit_sha") || null); return "Deployment recorded."; });
+  });
+  // Custom work: the Owner records the maintenance plan of the accepted quote (services/maintenance-lifecycle.ts).
+  r.post("/staff/projects/:id/maintenance-plan", async (ctx, p) => {
+    const f = await ctx.form();
+    return act(ctx, p.id, "approvals", async () => {
+      // act() has already required a staff session; the plan itself is the Owner's decision.
+      if (!can(ctx.actor!, "pricing.change")) throw new HttpError(403, "Only the Owner records a customer's maintenance plan.");
+      const a = await recordQuoteMaintenancePlan(ctx.db, ctx, { projectId: p.id, planId: str(f, "plan"), actorUserId: ctx.user!.id });
+      return a ? "Maintenance plan recorded. The customer now sees the agreement and subscription steps in their portal." : "Maintenance plan recorded. The customer's steps open when the website is ready for their review.";
+    });
   });
   r.post("/staff/projects/:id/handoff", async (ctx, p) => {
     const f = await ctx.form();

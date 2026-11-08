@@ -365,6 +365,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/projects/:id/invoices": staff(coord, P("project"), act("invoice.milestone_issued")),
   "POST /staff/projects/:id/payment-exception": staff(rolesWith("release.payment_exception"), P("project"), act("release.payment_exception_granted")),
   "POST /staff/projects/:id/deployments": staff(coord, P("project"), act("deployment.recorded")),
+  "POST /staff/projects/:id/maintenance-plan": staff(rolesWith("pricing.change"), P("project"), act("maintenance.plan_recorded")),
   "POST /staff/projects/:id/handoff": staff(coord, P("project"), act("handoff.saved")),
   "POST /staff/projects/:id/costs": staff(coord, P("project"), act("project_cost.recorded")),
   "POST /staff/projects/:id/change-orders": staff(coord, P("project"), act("change_order.proposed")),

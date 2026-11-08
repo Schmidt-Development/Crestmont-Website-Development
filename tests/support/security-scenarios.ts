@@ -301,6 +301,15 @@ export function auditScenarios(w: World): Scenario[] {
     // FD-16: tenant A's project is on the milestone schedule with unpaid milestones; the Founder authorizes an exception.
     { key: "POST /staff/projects/:id/payment-exception", path: () => P(w, "POST /staff/projects/:id/payment-exception"),
       fields: () => ({ intent: "grant", reason: "Matrix: customer agreed in writing to pay the remaining milestones within 7 days of launch" }) },
+    // Custom work: the Owner records the maintenance plan of an accepted quote on a project at customer review.
+    { key: "POST /staff/projects/:id/maintenance-plan", path: () => `/staff/projects/${x.quotePlanProject}/maintenance-plan`, fields: () => ({ plan: "professional" }),
+      setup: async () => {
+        const oid = newId("ord"), pid = newId("prj"), at = nowIso();
+        await w.db.prepare(`INSERT INTO orders (id, organization_id, total_cents, status, kind, created_at) VALUES (?,?, 400000, 'paid', 'quote', ?)`).bind(oid, a.orgId, at).run();
+        await w.db.prepare(`INSERT INTO projects (id, organization_id, order_id, name, status, revision_allowance, payment_schedule, created_at, updated_at) VALUES (?,?,?, 'Matrix custom portal', 'customer_review', 2, 'upfront', ?, ?)`)
+          .bind(pid, a.orgId, oid, at, at).run();
+        x.quotePlanProject = pid;
+      } },
     // Deployment is recorded on tenant B's (upfront, paid) project once its release chain is complete (fixture shortcut: rows inserted directly).
     { key: "POST /staff/projects/:id/deployments", path: () => P(w, "POST /staff/projects/:id/deployments", w.b), fields: () => ({ url: "https://b.matrix.example", commit_sha: "abc1234" }),
       setup: async () => {
