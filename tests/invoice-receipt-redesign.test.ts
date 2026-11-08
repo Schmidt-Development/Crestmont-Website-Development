@@ -64,7 +64,10 @@ function assertNoClipping(bytes: Uint8Array, label: string) {
     assert.ok(r.y >= 30 && r.y <= 792 - 24, `${label}: "${r.text.slice(0, 40)}" is on the page vertically (y=${r.y})`);
   }
 }
-const visibleHtml = (h: string) => h.replace(/<script[\s\S]*?<\/script>/g, " ").replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+/** The text a person sees on the page (test helper, not a sanitizer): scripts and styles dropped (any case), tags removed,
+ * then the three entities our renderer emits decoded, &amp; last so nothing is unescaped twice. */
+const visibleHtml = (h: string) => h.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, " ").replace(/<[^>]*>/g, " ")
+  .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
 
 // ───────────── fixtures ─────────────
 
