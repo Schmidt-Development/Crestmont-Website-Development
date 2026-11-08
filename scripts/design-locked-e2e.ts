@@ -308,6 +308,27 @@ async function main(): Promise<number> {
     baseUrl: BASE, secret: RUNNER_SECRET, runnerId: cfg.runnerId, fetchImpl: appFetch, logger,
     worker: { id: worker.id, key: worker.enrollmentKey },
   });
+
+  // ONE resolver for the import AND the build, which is the whole point of pinning.
+  //
+  // The platform fetches a permitted asset once, during ingestion, and stores the bytes. Everything afterwards
+  // asks for those same bytes: the measurement that becomes the approved baseline, Model B's workspace, and the
+  // visual gate that compares the two. Giving the import a resolver and the BUILD none is what produced a visual
+  // failure that named its own cause -- approved b2dd67f23666 against measured 5eaa292fbefd, which is this very
+  // artifact's fingerprint WITHOUT its fonts and photographs. The gate was comparing unlike with unlike and
+  // blaming the model for it.
+  const resolveArtifactAssets = async (refs: readonly { url: string; kind: string; referencedBy?: string | null }[]) => {
+    const out: { url: string; kind: string; status: string; why?: string | null; base64?: string | null; localPath?: string | null; contentType?: string | null }[] = [];
+    for (let i = 0; i < refs.length; i += 10) {
+      const answer = await client.resolveFrontendAssets({
+        artifactId: artifact.id,
+        assets: refs.slice(i, i + 10).map((r) => ({ url: r.url, kind: r.kind, referencedBy: r.referencedBy })),
+      });
+      if (!answer) break;
+      out.push(...(answer.assets as typeof out));
+    }
+    return out as never;
+  };
   const pre = await JobSandbox.preflight(cfg.jobSandbox, executor);
   if (pre.length) { check("SANDBOX-READY", "undetermined", `the sandbox is not usable: ${pre.join("; ")}`); return finish(1); }
   check("SANDBOX-READY", "pass", `sandbox image ${cfg.jobSandbox.image} is usable`);
@@ -319,18 +340,7 @@ async function main(): Promise<number> {
     imported = await importFrontend({
       archive, source: "customer-upload", repo: importWs.repo, sandbox: importSandbox,
       // The same resolver runner/src/job.ts gives the real build, pointed at this artifact.
-      resolveAssets: async (refs) => {
-        const out: { url: string; kind: string; status: string; why?: string | null; base64?: string | null; localPath?: string | null; contentType?: string | null }[] = [];
-        for (let i = 0; i < refs.length; i += 10) {
-          const answer = await client.resolveFrontendAssets({
-            artifactId: artifact.id,
-            assets: refs.slice(i, i + 10).map((r) => ({ url: r.url, kind: r.kind, referencedBy: r.referencedBy })),
-          });
-          if (!answer) break;
-          out.push(...(answer.assets as typeof out));
-        }
-        return out as never;
-      },
+      resolveAssets: resolveArtifactAssets,
       approvedBy: owner.id,
       // The real scan verdict from above, not an assumption: an 'upload' source requires a clean scan.
       scan: { status: "clean", scannedAt: new Date().toISOString(), engine: cycle.engine ?? "ClamAV", fileId: artifact.file_id },
@@ -507,6 +517,9 @@ async function main(): Promise<number> {
       // The real signed delivery, exactly as runner/src/job.ts does it: the artifact comes back over the
       // control-plane channel and the runner checks its hash before opening it.
       fetchArtifact: () => client.approvedArtifact(claimed.job!),
+      // The assets the APPROVED design was measured with, restored from the platform's own records so the
+      // build renders the identical bytes and the visual gate compares like with like.
+      resolveAssets: resolveArtifactAssets,
       manifest,
       maxTurns: MAX_TURNS,
       maxWallMs: MAX_MINUTES * 60_000,
