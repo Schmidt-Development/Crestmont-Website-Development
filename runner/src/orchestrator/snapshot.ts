@@ -43,7 +43,17 @@ function walk(root: string, dir: string, depth: number, out: string[]): void {
  * Returns relative, forward-slash paths: the platform stores them as the preview's own URLs, so a page's
  * `href="assets/site.css"` has to resolve the same way it does on the real site.
  */
-export function collectSnapshot(repo: string): Snapshot {
+/**
+ * `siteRoot` names where the rendered site actually is, relative to the repo.
+ *
+ * It defaults to "public", which is where the retired autonomous starter put it. A DESIGN-LOCKED build does not
+ * use that starter: the Founder's artifact is served from the build output -- the repo root for a static document,
+ * `dist` for a bundled project -- so with the default this found nothing and the revision was stored with an
+ * empty file list. The platform refuses that ("files must be a non-empty array"), which is why a design-locked
+ * build has never had a stored website snapshot, and why delivery reported "no finished build with a stored
+ * website snapshot was found" at the start of this work.
+ */
+export function collectSnapshot(repo: string, siteRoot = "public"): Snapshot {
   const files: SnapshotFile[] = [];
   const skipped: string[] = [];
   let bytes = 0;
@@ -59,7 +69,7 @@ export function collectSnapshot(repo: string): Snapshot {
     files.push({ path: rel, base64: buf.toString("base64") });
   };
 
-  const pub = path.join(repo, "public");
+  const pub = siteRoot === "" || siteRoot === "." ? repo : path.join(repo, siteRoot);
   if (existsSync(pub)) {
     const found: string[] = [];
     walk(pub, pub, 0, found);

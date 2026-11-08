@@ -596,7 +596,11 @@ async function main(): Promise<number> {
     return finish(1);
   }
 
-  const snap = collectSnapshot(buildWs.repo);
+  // The site is where the BUILD serves it from, not where the retired starter used to put it: the repo root for
+  // a static document, dist for a bundled project. With the default this collected nothing and the platform
+  // refused the revision as an empty file list.
+  const siteRoot = dl.outputRoot ?? "";
+  const snap = collectSnapshot(buildWs.repo, siteRoot);
   const storedRev = await client.storeRevision(claimed.job, {
     cycle: dl.cycles.length, phase: "final", commit: null, isBest: true, files: snap.files,
   });

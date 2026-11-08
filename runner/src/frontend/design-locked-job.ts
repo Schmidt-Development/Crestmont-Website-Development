@@ -109,6 +109,12 @@ export interface DesignLockedResult {
   report: ImportReport | null;
   cycles: CycleRecord[];
   problems: string[];
+  /**
+   * Where the finished site is served from, relative to the repo: "" for a static document at the root, "dist"
+   * for a bundled project. The stored revision is collected from here, and nothing else knew it -- the snapshot
+   * defaulted to the retired starter's "public" and therefore collected nothing from a design-locked build.
+   */
+  outputRoot: string | null;
   /** Everything a person needs to see on the dashboard, in words. */
   summary: string;
 }
@@ -239,7 +245,7 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
   const problems: string[] = [];
   const cycles: CycleRecord[] = [];
   const out: DesignLockedResult = {
-    ok: false, failedAt: null, artifact: null, baseline: null, report: null, cycles, problems, summary: "",
+    ok: false, failedAt: null, artifact: null, baseline: null, report: null, cycles, problems, outputRoot: null, summary: "",
   };
   const note = (message: string) => d.tracker.note({ kind: "step", message });
   const importOut = d.importOut ?? IMPORT_OUT;
@@ -318,6 +324,7 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     return finish(out);
   }
   note(`built; serving ${built.outputRoot || "the project root"}; the imported source is unchanged`);
+  out.outputRoot = built.outputRoot;
 
   // ── 4. measure ────────────────────────────────────────────────────────────────────────────────────────────
   const measured = await d.sandbox.argv(["node", IMPORT_SCRIPT, "--root", built.outputRoot || ".", "--out", importOut], undefined, "frontend-import");
