@@ -513,7 +513,31 @@ step("[PORTAL-006] customer reviews the design, uses the included revision round
 
 // ───────────── 16–19. Final approval, payments, QA, deployment ─────────────
 
-step("[PM-006] release readiness panel gates deployment: customer launch approval, every milestone payment (signed webhook fixtures), internal QA, then deployment is recorded only when all 7 checks pass", async () => {
+/**
+ * The launch gate's customer steps (Founder directive 2026-11-08; src/services/launch-gate.ts): the customer has signed
+ * the maintenance agreement and Stripe has confirmed the first subscription payment. Written the way the agreement
+ * acceptance and the signed customer.subscription / invoice.paid webhooks write them; that webhook path is proven
+ * end to end in tests/launch-gate.test.ts. TEST DATA.
+ */
+function satisfyLaunchGate(projectId: string) {
+  const now = new Date().toISOString();
+  const p = srv.db.prepare(`SELECT organization_id, order_id FROM projects WHERE id = ?`).get(projectId) as { organization_id: string; order_id: string | null };
+  let act = srv.db.prepare(`SELECT id, plan_id FROM maintenance_activations WHERE project_id = ?`).get(projectId) as { id: string; plan_id: string } | undefined;
+  if (!act) {
+    srv.db.prepare(`INSERT INTO maintenance_activations (id, organization_id, project_id, order_id, plan_id, status, trigger, opened_at, created_at, updated_at) VALUES (?,?,?,?, 'essential', 'due', 'ready_for_review', ?, ?, ?)`)
+      .run(`mact_e2e_${RUN}`, p.organization_id, projectId, p.order_id, now, now, now);
+    act = { id: `mact_e2e_${RUN}`, plan_id: "essential" };
+  }
+  srv.db.prepare(`INSERT OR IGNORE INTO agreements (id, kind, version, body_sha256, attorney_reviewed, effective_at, title, body_text, created_at) VALUES ('agr_e2e_maintenance', 'maintenance_agreement', 'e2e-fixture', ?, 0, ?, 'Maintenance Agreement', 'E2E fixture', ?)`).run("0".repeat(64), now, now);
+  const signer = (srv.db.prepare(`SELECT user_id FROM memberships WHERE organization_id = ? ORDER BY created_at LIMIT 1`).get(p.organization_id) as { user_id: string }).user_id;
+  srv.db.prepare(`INSERT INTO agreement_acceptances (id, agreement_id, user_id, organization_id, ip, accepted_at, context_type, context_id, user_agent) VALUES (?, 'agr_e2e_maintenance', ?, ?, NULL, ?, 'maintenance_agreement', ?, NULL)`).run(`acc_e2e_${RUN}`, signer, p.organization_id, now, projectId);
+  srv.db.prepare(`INSERT INTO subscriptions (id, organization_id, product_id, stripe_subscription_id, status, created_at, updated_at) VALUES (?,?,?,?, 'active', ?, ?)`).run(`sub_e2e_${RUN}`, p.organization_id, act.plan_id, `sub_test_e2e_${RUN}`, now, now);
+  srv.db.prepare(`UPDATE maintenance_activations SET status = 'active', subscription_id = ?, activated_at = ?, updated_at = ? WHERE id = ?`).run(`sub_e2e_${RUN}`, now, now, act.id);
+  srv.db.prepare(`INSERT INTO subscription_initial_payments (stripe_subscription_id, stripe_invoice_id, stripe_payment_intent_id, amount_cents, paid_at, event_id, created_at) VALUES (?,?,?, 9900, ?, ?, ?)`)
+    .run(`sub_test_e2e_${RUN}`, `in_test_e2e_${RUN}`, `pi_test_e2e_${RUN}`, now, `evt_test_e2e_${RUN}`, now);
+}
+
+step("[PM-006] release readiness panel gates deployment: customer launch approval, every milestone payment (signed webhook fixtures), the maintenance launch gate, internal QA, then deployment is recorded only when all 8 checks pass", async () => {
   const p = pm.page, c = customer.page;
   const approvalsTab = `${srv.base}/staff/projects/${projectId}?tab=approvals`;
   await p.goto(approvalsTab);
@@ -552,6 +576,10 @@ step("[PM-006] release readiness panel gates deployment: customer launch approva
   await stripePaid(new URL(c.url()).pathname.split("/").pop()!, contact.email);
   await p.goto(approvalsTab);
   assert.match(await text(p, ".card--gold"), /6\. Required payment verification\s+Pass\s+All required invoices paid/);
+  assert.match(await text(p, ".card--gold"), /7\. Maintenance agreement signed and first subscription payment verified\s+Missing/, "the launch gate still holds");
+  satisfyLaunchGate(projectId);
+  await p.goto(approvalsTab);
+  assert.match(await text(p, ".card--gold"), /7\. Maintenance agreement signed and first subscription payment verified\s+Pass/);
 
   // Internal QA chain.
   for (const kind of ["engineering_complete", "internal_qa", "security_accessibility", "deployment_authorized"]) {
@@ -561,7 +589,7 @@ step("[PM-006] release readiness panel gates deployment: customer launch approva
     assert.match(await text(p, ".toast"), /Approval recorded/);
   }
   panel = await text(p, ".card--gold");
-  for (const n of [1, 2, 3, 4, 5, 6, 7]) assert.match(panel, new RegExp(`${n}\\. [^\\n]+\\s+Pass`, "i"), `check ${n} passes`);
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) assert.match(panel, new RegExp(`${n}\\. [^\\n]+\\s+Pass`, "i"), `check ${n} passes`);
   assert.match(panel, /Ready to deploy/);
 
   await p.goto(`${srv.base}/staff/projects/${projectId}`);

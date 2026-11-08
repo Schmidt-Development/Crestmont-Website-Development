@@ -155,9 +155,14 @@ export function pageHead(title: string, actions?: SafeHtml, sub?: string): SafeH
   return html`<div class="page-head"><div>${sub ? html`<div class="eyebrow">${sub}</div>` : ""}<h1>${title}</h1></div>${actions ? html`<div class="actions">${actions}</div>` : ""}</div>`;
 }
 
-export function barChart(rows: { label: string; value: number; display: string }[]): SafeHtml {
+/**
+ * Horizontal bars. Each row is two lines -- label and value on top, the bar underneath -- so a long label wraps inside
+ * the card and a large value (e.g. "36,756") is never squeezed or pushed past the edge, at any width (Phase 2.2).
+ * `sub` is an optional secondary figure (e.g. "12 converted") shown beside the value.
+ */
+export function barChart(rows: { label: string; value: number; display: string; sub?: string }[]): SafeHtml {
   const max = Math.max(1, ...rows.map((r) => r.value));
-  return html`<div class="bar-chart" role="list">${rows.map((r) => html`<div class="bar-chart__row" role="listitem"><span>${r.label}</span><span class="bar-chart__bar"><span style="width:${(r.value / max) * 100}%"></span></span><span class="num">${r.display}</span></div>`)}</div>`;
+  return html`<div class="bar-chart" role="list">${rows.map((r) => html`<div class="bar-chart__row" role="listitem"><div class="bar-chart__head"><span class="bar-chart__label">${r.label}</span><span class="bar-chart__value num">${r.display}${r.sub ? html` <span class="bar-chart__sub">${r.sub}</span>` : ""}</span></div><span class="bar-chart__bar" aria-hidden="true"><span style="width:${Math.max(0, Math.min(100, (r.value / max) * 100))}%"></span></span></div>`)}</div>`;
 }
 
 export const nl2br = (s: string | null | undefined): SafeHtml => join((s ?? "").split("\n").map((line) => html`${line}`), "<br>");
