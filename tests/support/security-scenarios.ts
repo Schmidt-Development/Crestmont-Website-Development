@@ -77,6 +77,19 @@ const owner = (w: World) => w.staff.owner;
 const one = async <T>(w: World, sql: string, ...b: unknown[]) => (await w.db.prepare(sql).bind(...b).first<T>())!;
 const P = (w: World, key: string, t: Tenant = w.a) => pathFor(w, { method: key.split(" ")[0], pattern: key.split(" ")[1], key, spec: ROUTE_INVENTORY[key] }, t);
 
+/** Tenant A's project back to exactly its seeded delivery (AI-build version 1), live or superseded, shown or not. */
+async function resetDeliveryA(w: World, o: { visible: boolean; superseded?: boolean }): Promise<void> {
+  const at = new Date().toISOString();
+  await w.db.prepare(`UPDATE website_deliveries SET superseded_by = NULL, restored_from = NULL WHERE project_id = ?`).bind(w.a.ids.project).run();
+  await w.db.prepare(`DELETE FROM website_deliveries WHERE project_id = ? AND id <> ?`).bind(w.a.ids.project, w.ids.websiteDelivery).run();
+  await w.db.prepare(`UPDATE website_deliveries SET version = 1, superseded_at = ?, superseded_by = NULL, archived_at = NULL, archived_by = NULL,
+      visible_at = ?, visible_by = ?, status = ?, customer_reviewed_at = NULL, customer_decision = NULL, customer_note = NULL, updated_at = ?
+    WHERE id = ?`)
+    .bind(o.superseded ? at : null, o.visible ? at : null, o.visible ? w.staff.owner.id : null,
+      o.superseded ? "superseded" : o.visible ? "customer_visible" : "assigned", at, w.ids.websiteDelivery).run();
+  await w.db.prepare(`UPDATE projects SET status = CASE WHEN status = 'cancelled' THEN 'development' ELSE status END WHERE id = ?`).bind(w.a.ids.project).run();
+}
+
 /** Fake Anthropic responses for the AI scenarios (no network). */
 export function withFakeAi(w: World): () => void {
   const real = globalThis.fetch;
@@ -562,10 +575,10 @@ export function auditScenarios(w: World): Scenario[] {
         await w.db.prepare(`UPDATE website_deliveries SET superseded_at = NULL, superseded_by = NULL,
             visible_at = ?, visible_by = ?, status = 'customer_visible' WHERE id = ?`)
           .bind(at, w.staff.owner.id, w.ids.websiteDelivery).run();
-        await w.db.prepare(`INSERT INTO website_deliveries (id, project_id, organization_id, job_id, source_project_id,
-            revision_attempt, revision_cycle, status, assigned_by, assigned_at, superseded_at, created_at)
-          VALUES ('wdl_matrixpast00000000000001', ?, ?, ?, ?, 1, 0, 'superseded', ?, ?, ?, ?)`)
-          .bind(w.a.ids.project, w.a.ids.org, w.ids.buildJob, w.a.ids.project, w.staff.owner.id, at, at, at).run();
+        await w.db.prepare(`INSERT INTO website_deliveries (id, project_id, organization_id, source, version, job_id, source_project_id,
+            revision_attempt, revision_cycle, status, assigned_by, assigned_at, superseded_at, created_at, updated_at)
+          VALUES ('wdl_matrixpast00000000000001', ?, ?, 'ai_build', 99, ?, ?, 1, 0, 'superseded', ?, ?, ?, ?, ?)`)
+          .bind(w.a.ids.project, w.a.ids.org, w.ids.buildJob, w.a.ids.project, w.staff.owner.id, at, at, at, at).run();
       },
     },
     {
@@ -590,6 +603,24 @@ export function auditScenarios(w: World): Scenario[] {
         await w.db.prepare(`DELETE FROM website_deliveries WHERE id = 'wdl_matrixpast00000000000001'`).run();
       },
     },
+    // Website Delivery tab. Each resets tenant A's project to the single seeded delivery (an AI-build version 1) in
+    // the state the action needs, because these share one world and run in order.
+    {
+      key: "POST /staff/website-delivery",
+      fields: (w) => ({ organizationId: w.a.ids.org!, projectId: w.a.ids.project!, websiteName: "Matrix hosted website",
+        websiteUrl: "https://matrix-a.pages.dev/", assignedTo: w.staff.owner.id, note: "matrix internal note", intent: "share" }),
+      setup: async (w) => { await resetDeliveryA(w, { visible: true }); },
+    },
+    { key: "POST /staff/website-delivery/:id/edit", fields: () => ({ websiteName: "Matrix website (renamed)", note: "matrix edit" }),
+      setup: async (w) => { await resetDeliveryA(w, { visible: true }); } },
+    { key: "POST /staff/website-delivery/:id/share", fields: () => ({}),
+      setup: async (w) => { await resetDeliveryA(w, { visible: false }); } },
+    { key: "POST /staff/website-delivery/:id/replace", fields: () => ({ websiteUrl: "https://matrix-a-v2.pages.dev/", websiteName: "Matrix website v2", intent: "draft" }),
+      setup: async (w) => { await resetDeliveryA(w, { visible: true }); } },
+    { key: "POST /staff/website-delivery/:id/archive", fields: () => ({}),
+      setup: async (w) => { await resetDeliveryA(w, { visible: true }); } },
+    { key: "POST /staff/website-delivery/:id/restore", fields: () => ({ share: "no" }),
+      setup: async (w) => { await resetDeliveryA(w, { visible: true, superseded: true }); } },
     {
       key: "POST /staff/builds/frontends/:projectId/artifacts/:artifactId/retry-import",
       // Offering a rejected artifact for import again. The service re-reads the scan verdict from `files`, so the

@@ -553,6 +553,16 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/builds/:id/deliver": staff(rolesWith("builds.manage"), { id: "buildJob" }, act("website_delivery.assigned")),
   "POST /staff/builds/:id/deliver/:deliveryId/visible": staff(rolesWith("builds.manage"), { id: "buildJob", deliveryId: "websiteDelivery" }, act("website_delivery.made_visible")),
   "POST /staff/projects/:projectId/deliver/rollback": staff(rolesWith("builds.manage"), { projectId: "project" }, act("website_delivery.rolled_back")),
+  // Website Delivery tab: hosted websites on existing customer projects (independent of the AI builders).
+  "GET /staff/website-delivery": staff(rolesWith("website_delivery.manage")),
+  "GET /staff/website-delivery/new": staff(rolesWith("website_delivery.manage")),
+  "POST /staff/website-delivery": staff(rolesWith("website_delivery.manage"), undefined, act("website_delivery.created")),
+  "GET /staff/website-delivery/:id": staff(rolesWith("website_delivery.manage"), { id: "websiteDelivery" }),
+  "POST /staff/website-delivery/:id/edit": staff(rolesWith("website_delivery.manage"), { id: "websiteDelivery" }, act("website_delivery.updated")),
+  "POST /staff/website-delivery/:id/share": staff(rolesWith("website_delivery.manage"), { id: "websiteDelivery" }, act("website_delivery.made_visible")),
+  "POST /staff/website-delivery/:id/replace": staff(rolesWith("website_delivery.manage"), { id: "websiteDelivery" }, act("website_delivery.replaced")),
+  "POST /staff/website-delivery/:id/archive": staff(rolesWith("website_delivery.manage"), { id: "websiteDelivery" }, act("website_delivery.archived")),
+  "POST /staff/website-delivery/:id/restore": staff(rolesWith("website_delivery.manage"), { id: "websiteDelivery" }, act("website_delivery.rolled_back")),
   "POST /staff/builds/frontends/:projectId/artifacts/:artifactId/retry-import": staff(rolesWith("builds.configure"), { projectId: "project", artifactId: "frontendArtifact" }, act("frontend_artifact.import_retried")),
   // Starting a backend job goes through the platform's own queueing path, which decides eligibility; this route
   // only asks it to. Audited by the build record's own events rather than a separate audit row.

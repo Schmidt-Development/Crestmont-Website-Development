@@ -341,11 +341,11 @@ async function buildStaffRecords(w: World) {
     [ids.websiteDelivery, w.a, ids.buildJob] as const,
     [w.b.ids.websiteDelivery, w.b, w.b.ids.buildJob] as const,
   ]) {
-    await db.prepare(`INSERT INTO website_deliveries (id, project_id, organization_id, job_id, source_project_id,
-        revision_attempt, revision_cycle, status, assigned_by, assigned_at, visible_at, visible_by, created_at)
-      VALUES (?,?,?,?,?,1,0,'customer_visible',?,?,?,?,?)`)
+    await db.prepare(`INSERT INTO website_deliveries (id, project_id, organization_id, source, version, job_id, source_project_id,
+        revision_attempt, revision_cycle, status, assigned_by, assigned_at, visible_at, visible_by, created_at, updated_at)
+      VALUES (?,?,?,'ai_build',1,?,?,1,0,'customer_visible',?,?,?,?,?,?)`)
       .bind(deliveryId, tenant.ids.project!, tenant.ids.org!, jobId, tenant.ids.project!,
-        w.staff.owner.id, nowIso(), nowIso(), w.staff.owner.id, nowIso()).run();
+        w.staff.owner.id, nowIso(), nowIso(), w.staff.owner.id, nowIso(), nowIso()).run();
   }
 
   // A genuine preview capability for each tenant's own revision, so the matrix and the fuzzers exercise the real

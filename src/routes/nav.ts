@@ -45,6 +45,8 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
     ] },
     { label: "Delivery", items: [
       { href: "/staff/projects", label: "Projects", perm: "delivery.access" },
+      // Hosted websites handed to existing customer projects. Its own tab, independent of the AI builders.
+      { href: "/staff/website-delivery", label: "Website Delivery", perm: "website_delivery.manage" },
       { href: "/staff/tasks", label: "Tasks", perm: "delivery.access" },
       { href: "/staff/employees", label: "Employees", perm: "employee.manage" },
     ] },
