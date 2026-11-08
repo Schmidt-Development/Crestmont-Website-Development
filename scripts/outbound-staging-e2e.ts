@@ -11,7 +11,7 @@
 //   node --no-warnings scripts/outbound-staging-e2e.ts
 // Exit 1 only for an engineering failure (FAIL). Missing external configuration is BLOCKED (exit 0) and named exactly.
 import { writeFileSync, mkdirSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import { wranglerOps } from "./staging-access.ts";
 import { signRetell } from "../src/adapters/retell.ts";
 import { deriveSchedulerKey, sign } from "./trigger-scheduler.ts";
@@ -75,19 +75,23 @@ const call = (callId: string, salesId: string, extra: Record<string, unknown> = 
 const fn = (callId: string, salesId: string, name: string, args: Record<string, unknown>) => ({ name, call: call(callId, salesId), args });
 
 /**
- * A fictional 614-555-01xx number not used by an open sales call, not on the do-not-call list and not already a CRM
- * contact: the pool has only 100 numbers, and earlier runs leave DNC entries (the DNC check) and contacts behind, which the
- * intake engine would correctly match (duplicate prevention) or refuse (suppression).
+ * A fictional 555-01xx number not used by an open sales call, not on the do-not-call list and not already a CRM
+ * contact. 555-0100..0199 is reserved for fiction in every North American area code, so the pool spans several area
+ * codes (800 numbers): earlier runs leave DNC entries (the DNC check) and contacts behind, which the intake engine would
+ * correctly match (duplicate prevention) or refuse (suppression), and a single area code's 100 numbers ran out.
  */
+const FICTIONAL_AREA_CODES = ["614", "312", "617", "206", "303", "512", "404", "702"];
+const FICTIONAL_GLOB = "'+1[0-9][0-9][0-9]55501[0-9][0-9]'";
 const usedPhones = new Set<string>();
 async function freePhone(): Promise<string> {
-  const taken = new Set((await q<{ p: string }>(`SELECT phone_e164 AS p FROM voice_dnc WHERE phone_e164 LIKE '+16145550%' UNION SELECT phone_e164 FROM sales_calls WHERE phone_e164 LIKE '+16145550%' AND status IN ('queued','dialing','in_progress') UNION SELECT phone FROM contacts WHERE phone LIKE '+16145550%'`)).map((r) => r.p));
-  const start = parseInt(randomBytes(1).toString("hex"), 16) % 100;
-  for (let i = 0; i < 100; i++) {
-    const p = `+1614555${String(100 + ((start + i) % 100)).padStart(4, "0")}`;
+  const taken = new Set((await q<{ p: string }>(`SELECT phone_e164 AS p FROM voice_dnc WHERE phone_e164 GLOB ${FICTIONAL_GLOB} UNION SELECT phone_e164 FROM sales_calls WHERE phone_e164 GLOB ${FICTIONAL_GLOB} AND status IN ('queued','dialing','in_progress') UNION SELECT phone FROM contacts WHERE phone GLOB ${FICTIONAL_GLOB}`)).map((r) => r.p));
+  const pool = FICTIONAL_AREA_CODES.flatMap((ac) => Array.from({ length: 100 }, (_, n) => `+1${ac}55501${String(n).padStart(2, "0")}`));
+  const start = randomInt(pool.length); // uniform start, so parallel runs rarely pick the same number
+  for (let i = 0; i < pool.length; i++) {
+    const p = pool[start + i < pool.length ? start + i : start + i - pool.length];
     if (!taken.has(p) && !usedPhones.has(p)) { usedPhones.add(p); return p; }
   }
-  throw new Blocked("every fictional 614-555-01xx number is used by earlier E2E data; erase old synthetic contacts on staging");
+  throw new Blocked(`every fictional 555-01xx number in area codes ${FICTIONAL_AREA_CODES.join(", ")} is used by earlier E2E data; erase old synthetic contacts on staging`);
 }
 
 /** Earlier runs that stopped mid-way leave synthetic sales calls open; they would block a new one for the same number. */
