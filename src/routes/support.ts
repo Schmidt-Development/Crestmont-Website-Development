@@ -2,7 +2,9 @@
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatDateTime, label, type SafeHtml } from "../lib/html.ts";
-import { HttpError, download, htmlResponse, redirect, str } from "../app/http.ts";
+import { HttpError, download, htmlResponse, jsonResponse, redirect, str } from "../app/http.ts";
+import { draftStatus, isDraftJobId, type DraftStatus } from "../services/ai-drafts.ts";
+import { draftControls, draftJobField, wantsJson } from "../ui/ai-draft.ts";
 import { toCsv } from "../services/finance.ts";
 import { audit } from "../services/security.ts";
 import { requireCustomerOrg, requireStaff } from "../app/app.ts";
@@ -86,8 +88,12 @@ async function staffTicketPage(ctx: AppContext, id: string, errors: string[] = [
   const agents = canManage ? await sup.supportAgents(ctx.db) : [];
   const settings = await sup.getSupportSettings(ctx);
   const timing = sup.responseTiming(t, settings.firstResponseTargetHours, ctx.now());
-  const draftId = draftOverride?.jobId ?? ctx.url.searchParams.get("draft");
-  const draft = draftOverride ? { id: draftOverride.jobId, output_ref: draftOverride.text, provider: "", model: "", created_at: "" } : await sup.pendingDraft(ctx.db, t.id, draftId && /^ai_[0-9a-f]{24}$/.test(draftId) ? draftId : null);
+  // The draft shown in the reply field: the text being re-shown after a refused send, or the job named by ?draft= (the
+  // no-JavaScript path: a pending job shows its progress, a ready one fills the field, a failed one offers a retry).
+  const draftParam = ctx.url.searchParams.get("draft");
+  const draftState: DraftStatus | null = canManage ? (draftOverride ? { jobId: draftOverride.jobId, state: "ready", draft: draftOverride.text, error: null }
+    : isDraftJobId(draftParam) ? await draftStatus(ctx.db, sup.ticketDraftSubject(t), draftParam) : null) : null;
+  const draft = draftState?.state === "ready" ? { id: draftState.jobId, output_ref: draftState.draft ?? "" } : null;
   const sensitive = sup.isSensitive(t, draft?.output_ref ?? "");
   const nextStates = sup.TICKET_TRANSITIONS[t.status];
   const timingText = timing.state === "no_target" ? "No first-response target configured"
@@ -99,18 +105,16 @@ async function staffTicketPage(ctx: AppContext, id: string, errors: string[] = [
   return staffPage(ctx, t.subject, html`${pageHead(t.subject, linkButton("Queue", "/staff/support", "ghost", "sm"), `Ticket ${t.id} · ${org?.name ?? ""}`)}${(flag ? alert("warn", html`<strong>Owner disabled.</strong> ${flag.name}'s account was disabled; ${flag.status === "ended" ? "their assignment was ended, so this needs a new owner." : "this is waiting in the offboarding queue for a new owner."}`) : "")}
 ${formErrors(errors)}
 <div class="grid grid-2" style="align-items:start"><section class="stack">${thread(msgs, "staff")}
-${canManage ? html`<form class="card stack" method="post" action="/staff/support/${t.id}/reply" enctype="multipart/form-data" id="reply">${csrf(ctx)}
+${canManage ? html`${draftControls(ctx, { startAction: `/staff/support/${t.id}/draft`, statusBase: `/staff/support/${t.id}/draft/`, target: "#reply", status: draftState, discardAction: `/staff/support/${t.id}/draft/discard` })}
+<form class="card stack" method="post" action="/staff/support/${t.id}/reply" enctype="multipart/form-data" id="reply">${csrf(ctx)}
 <h2 style="font-size:1.4rem">Reply to customer</h2>
-${draft ? html`${alert(sensitive ? "warn" : "info", sensitive
-      ? "AI-assisted draft for a sensitive ticket (billing, refund or account). Edit it as needed. It will only be sent if you tick the approval box and press Send — it is never sent automatically."
-      : "AI-assisted draft. Review and edit before sending — nothing is sent until you press Send.")}<input type="hidden" name="ai_job_id" value="${draft.id}">` : ""}
+${draft && !sensitive ? alert("info", "AI-assisted draft. Review and edit before sending — nothing is sent until you press Send.") : ""}${draftJobField(draftState)}
 ${textarea({ name: "body", label: "Message (visible to the customer)", value: draft?.output_ref ?? "", rows: 8, maxlength: 10000, required: true })}
-${draft && sensitive ? checkbox("approve_sensitive", "I have reviewed this AI-assisted reply and approve sending it.") : ""}
+<div class="ai-draft-sensitive stack" data-ai-draft-sensitive${draft && sensitive ? "" : html` hidden`}>${alert("warn", "AI-assisted draft for a sensitive ticket (billing, refund or account). Edit it as needed. It will only be sent if you tick the approval box and press Send — it is never sent automatically.")}
+${checkbox("approve_sensitive", "I have reviewed this AI-assisted reply and approve sending it.")}</div>
 ${ctx.storage ? fileInput("attachment", "Attach a file (optional)") : ""}
 ${select({ name: "then_status", label: "After sending, set status to", options: [{ value: "keep", label: "Default (awaiting customer)" }, ...["pending_customer", "resolved"].filter((s) => s === "pending_customer" || nextStates.includes(s as sup.TicketStatus)).map((s) => ({ value: s, label: label(s) }))] })}
-<div class="form-actions">${button("Send reply")}</div></form>
-<div class="row">${draft ? actionForm(ctx, `/staff/support/${t.id}/draft/discard`, "Discard AI draft", { hidden: { ai_job_id: draft.id } }) : actionForm(ctx, `/staff/support/${t.id}/draft`, "AI draft reply")}
-<span class="faint">AI drafts are suggestions only and are never sent automatically.</span></div>` : ""}
+<div class="form-actions">${button("Send reply")}</div></form>` : ""}
 ${canNote ? html`<form class="card stack" method="post" action="/staff/support/${t.id}/note">${csrf(ctx)}
 ${textarea({ name: "body", label: "Internal note (staff only — never shown to the customer)", rows: 3, maxlength: 10000, required: true })}
 <div class="form-actions">${button("Add internal note", { variant: "secondary" })}</div></form>` : ""}
@@ -333,10 +337,23 @@ ${input({ name: "target_hours", label: "First-response target (hours)", type: "n
     await sup.staffReply(ctx, t, { id: ctx.user!.id }, { body: str(f, "body"), aiJobId: str(f, "ai_job_id") || null, approveSensitive: f.get("approve_sensitive") === "1", thenStatus: str(f, "then_status") || "keep", file });
     return "Reply sent to the customer.";
   }));
+  // AI draft reply (shared drafting service, services/ai-drafts.ts). With `Accept: application/json` (app.js) the
+  // state is answered as JSON and the page polls the status route; without JavaScript it redirects to ?draft=.
+  const ticketDraftJson = (t: sup.TicketRow, s: DraftStatus) =>
+    ({ ...s, sensitive: s.state === "ready" ? sup.isSensitive(t, s.draft ?? "") : false, statusUrl: `/staff/support/${t.id}/draft/${s.jobId}` });
   r.post("/staff/support/:id/draft", mutate("ticket.manage", async (ctx, t) => {
     const res = await sup.draftReply(ctx, t, ctx.user!.id);
-    if (res.status === "failed") return redirect(ctx, `/staff/support/${t.id}`, { kind: "error", text: `AI draft unavailable: ${res.error ?? "the provider returned an error"}. Nothing was sent.` });
-    return redirect(ctx, `/staff/support/${t.id}?draft=${res.jobId}#reply`, { kind: "info", text: res.status === "queued" ? "Draft requested from the self-hosted model; reload this page in a minute to review it. Nothing has been sent." : "AI draft ready for review. Nothing has been sent." });
+    if (wantsJson(ctx)) return jsonResponse(ctx, 200, ticketDraftJson(t, res));
+    if (res.state === "failed") return redirect(ctx, `/staff/support/${t.id}`, { kind: "error", text: `AI draft unavailable: ${res.error} Nothing was sent.` });
+    return redirect(ctx, `/staff/support/${t.id}?draft=${res.jobId}#reply`, { kind: "info", text: res.state === "pending" ? "Drafting has started. The draft will appear in the reply box as soon as it is ready. Nothing has been sent." : "AI draft ready for review. Nothing has been sent." });
   }));
+  r.get("/staff/support/:id/draft/:jobId", async (ctx, p) => {
+    requireStaff(ctx, "ticket.manage");
+    const t = await sup.getTicket(ctx.db, p.id);
+    if (!t) throw new HttpError(404, "Ticket not found.");
+    const s = await draftStatus(ctx.db, sup.ticketDraftSubject(t), p.jobId);
+    if (!s) throw new HttpError(404, "No such AI draft for this ticket.");
+    return jsonResponse(ctx, 200, ticketDraftJson(t, s));
+  });
   r.post("/staff/support/:id/draft/discard", mutate("ticket.manage", async (ctx, t, f) => { await sup.discardDraft(ctx.db, t, str(f, "ai_job_id"), ctx.user!.id); return "AI draft discarded."; }));
 }

@@ -25,7 +25,7 @@ export type StaffRole = (typeof STAFF_ROLES)[number];
 export type ResourceKind =
   | "org" | "project" | "file" | "file2" | "shareLink" | "shareToken" | "changeOrder" | "ticket" | "invoice" | "paidInvoice" | "payment"
   | "session" | "revision" | "milestone" | "task" | "task2" | "assignment" | "refund" | "message" | "approvalRequest" | "customerInvitation"
-  | "lead" | "leadTask" | "aiJob" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
+  | "lead" | "leadTask" | "aiJob" | "ticketDraft" | "conversationDraft" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
   | "designReference" | "designBaseline" | "frontendArtifact" | "buildRevision" | "buildRevisionFile" | "buildPreviewToken"
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
@@ -342,6 +342,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/conversations": staff(rolesWith("customers.read")),
   "GET /staff/conversations/:orgId": staff(rolesWith("customers.read"), { orgId: "org" }, act("conversation.viewed")),
   "POST /staff/conversations/:orgId": staff(rolesWith("customers.read"), { orgId: "org" }, act("message.posted")),
+  // AI draft reply for the general conversation (same permission as the page): start (or join the pending job) and its JSON status.
+  "POST /staff/conversations/:orgId/draft": staff(rolesWith("customers.read"), { orgId: "org" }, act("conversation.ai_draft_requested")),
+  "GET /staff/conversations/:orgId/draft/:jobId": staff(rolesWith("customers.read"), { orgId: "org", jobId: "conversationDraft" }),
   "POST /staff/notifications/read": staff(STAFF_ROLES, undefined, exempt("marks the caller's own notifications as read")),
   "GET /staff/projects": staff(delivery),
   "GET /staff/projects/export.csv": staff(delivery, undefined, act("project.exported")),
@@ -404,6 +407,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/support/:id/note": staff(rolesWith("ticket.internal_note"), P("ticket"), act("ticket.internal_note")),
   "POST /staff/support/:id/reply": staff(rolesWith("ticket.manage"), P("ticket"), act("ticket.staff_reply")),
   "POST /staff/support/:id/draft": staff(rolesWith("ticket.manage"), P("ticket"), act("ticket.ai_draft_requested")),
+  "GET /staff/support/:id/draft/:jobId": staff(rolesWith("ticket.manage"), { id: "ticket", jobId: "ticketDraft" }),
   "POST /staff/support/:id/draft/discard": staff(rolesWith("ticket.manage"), P("ticket"), act("ai.draft_rejected")),
 
   // ── Billing, refunds and finance (src/routes/finance.ts, legal.ts, hooks.ts, owner.ts) ──
