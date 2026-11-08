@@ -151,7 +151,13 @@ test("[ACC-05] the driver source itself only ever reports what it measured", () 
   // It obtains its OWN credentials rather than carrying any, and the contract never holds a secret.
   assert.match(DRIVER_SOURCE, /const unique = "acc-" \+ Date\.now\(\)/, "credentials are generated per run");
   assert.match(DRIVER_SOURCE, /replaceAll\("\{\{email\}\}"/, "the contract states a body shape, not a credential");
-  assert.match(DRIVER_SOURCE, /the contract declares no register\/login endpoint with a requestExample/, "no example means undetermined, not skipped");
+  assert.match(DRIVER_SOURCE, /the contract requires authentication but declares no register\/login endpoint/,
+    "a contract that requires authentication and does not say how is undetermined, not skipped");
+  // But a site with nothing to sign in to is not an unknown. It used to be reported as one, and because
+  // undetermined is never a pass, a brochure site with one public form could never pass the functional gate.
+  assert.match(DRIVER_SOURCE, /if \(!plan\.authExpected\)/, "applicability is read from the contract");
+  assert.match(DRIVER_SOURCE, /add\("auth:not-applicable", true/,
+    "no authenticated surface means there is nothing to authenticate, not something unverified");
 
   // The properties that matter most, each asserted to be measured rather than assumed.
   assert.match(DRIVER_SOURCE, /auth:cookie-flags/, "HttpOnly and SameSite are checked on the real cookie");
@@ -203,7 +209,12 @@ test("[ACC-07] the driver executes probes from the session the contract named, a
   assert.match(DRIVER_SOURCE, /pr\.as === "customer" \? session : pr\.as === "other-customer" \? otherSession : ""/,
     "each probe runs from the session it declared");
   assert.match(DRIVER_SOURCE, /no " \+ pr\.as \+ " session was obtained/, "and is undetermined when that session is missing");
-  assert.match(DRIVER_SOURCE, /status === pr\.expect/, "judged against the declared status and nothing else");
+  // Judged against what the contract declared and nothing the driver decided for itself: the status, and -- for
+  // a criterion about what the page shows -- the text the contract said must or must not appear.
+  assert.match(DRIVER_SOURCE, /res\.status !== pr\.expect/, "the declared status is still the first thing judged");
+  assert.match(DRIVER_SOURCE, /for \(const want of pr\.expectBodyContains \|\| \[\]\)/,
+    "and a criterion about what the page shows is executed against the response, not left unverified");
+  assert.match(DRIVER_SOURCE, /the response does not contain/, "a content failure says what was missing");
   assert.ok(!/probes[\s\S]*ok: true/.test(DRIVER_SOURCE), "no probe result is assumed");
 });
 
@@ -254,4 +265,87 @@ test("[ACC-09] an application that ignores PORT is told exactly that", () => {
     "an application listening on the wrong port must be told that, not 'did not answer'");
   assert.match(DRIVER_SOURCE, /EADDRINUSE/,
     "and a port held by something else must be named as an environment problem, not the application's");
+});
+
+test("[ACC-10] a criterion about what the page shows is executed, not left undetermined", async () => {
+  // The criterion that blocked bld_278d69e4e40bf1 after everything else passed: "The index page still renders the
+  // form#quote with its Name input and Send button unchanged after a submission." Nothing about it is ambiguous
+  // and nothing about it was checkable, because a probe could only assert a status code. One undetermined
+  // criterion is never a pass, so the functional gate could not close on a site that worked.
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const repo = mkdtempSync(path.join(tmpdir(), "acc-body-"));
+
+  writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "a", scripts: { serve: "node server.mjs" } }));
+  writeFileSync(path.join(repo, "server.mjs"), [
+    'import { createServer } from "node:http";',
+    'createServer((q, s) => {',
+    '  s.writeHead(200, { "content-type": "text/html" });',
+    // The form is still there after a submission, and no stack trace is leaked. Both are probed below.
+    '  s.end(q.url === "/api/quote" ? "<p>Thank you</p><form id=quote><input name=name><button>Send</button></form>" : "<form id=quote><input name=name><button>Send</button></form>");',
+    '}).listen(Number(process.env.PORT), "127.0.0.1");',
+  ].join("\n"));
+
+  const op = {
+    id: "store-quote-name", page: "index", element: "form#quote", kind: "form-submit",
+    behaviour: "Store a quote request.", expectChange: "content",
+    acceptance: ["the request is stored", "the page still renders form#quote with its Name input and Send button"],
+    acceptanceProbes: [{
+      criterion: 1, as: "anonymous", method: "POST", path: "/api/quote", expect: 200,
+      expectBodyContains: ['<form id=quote', 'name=name', "<button>Send</button>"],
+      expectBodyAbsent: ["Traceback", "at Object.<anonymous>"],
+    }],
+  };
+  const plan = acceptancePlan(repo, manifest({
+    operations: [op], apis: [{ method: "POST", path: "/api/quote", auth: "public", success: 200 }],
+    projectConfig: { allowedNewScripts: ["serve"] },
+  } as never));
+  assert.equal(plan.probes.length, 1, "the contract made the criterion executable");
+  assert.deepEqual(plan.probes[0].expectBodyContains, ['<form id=quote', 'name=name', "<button>Send</button>"],
+    "and the plan carries what must be shown, not just the status");
+
+  writeAcceptanceDriver(repo, plan);
+  const { stdout } = await promisify(execFile)(process.execPath, ["--no-warnings", DRIVER], { cwd: repo, timeout: 90_000 })
+    .catch((e: { stdout?: string }) => ({ stdout: e.stdout ?? "" }));
+  const checks = readAcceptanceOutput(stdout);
+  const probed = checks.find((c) => c.id === "store-quote-name :: acceptance[1]");
+  assert.ok(probed, `the criterion was not reported at all: ${stdout.slice(0, 500)}`);
+  assert.equal(probed.ok, true, `the criterion was established and should have passed: ${probed.detail}`);
+  assert.equal(probed.undetermined ?? false, false, "it was executed, so it is not an unknown");
+
+  // And it is not reported a second time as unverified by the coverage list.
+  assert.equal(coverageChecks({ operations: [op] } as never).length, 1,
+    "only the criterion with no probe is still counted as unverified");
+});
+
+test("[ACC-11] a content probe that is not satisfied fails, and says what was missing", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const repo = mkdtempSync(path.join(tmpdir(), "acc-body-bad-"));
+  writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "a", scripts: { serve: "node server.mjs" } }));
+  // Answers 200 and loses the form: exactly the regression the criterion exists to catch.
+  writeFileSync(path.join(repo, "server.mjs"), [
+    'import { createServer } from "node:http";',
+    'createServer((_q, s) => { s.writeHead(200, { "content-type": "text/html" }); s.end("<p>Thank you</p>"); })',
+    '  .listen(Number(process.env.PORT), "127.0.0.1");',
+  ].join("\n"));
+
+  const plan = acceptancePlan(repo, manifest({
+    operations: [{
+      id: "store-quote-name", page: "index", element: "form#quote", kind: "form-submit",
+      behaviour: "Store a quote request.", expectChange: "content",
+      acceptance: ["the page still renders form#quote"],
+      acceptanceProbes: [{ criterion: 0, as: "anonymous", method: "POST", path: "/api/quote", expect: 200, expectBodyContains: ['<form id=quote'] }],
+    }],
+    apis: [{ method: "POST", path: "/api/quote", auth: "public", success: 200 }],
+    projectConfig: { allowedNewScripts: ["serve"] },
+  } as never));
+  writeAcceptanceDriver(repo, plan);
+  const { stdout } = await promisify(execFile)(process.execPath, ["--no-warnings", DRIVER], { cwd: repo, timeout: 90_000 })
+    .catch((e: { stdout?: string }) => ({ stdout: e.stdout ?? "" }));
+  const probed = readAcceptanceOutput(stdout).find((c) => c.id === "store-quote-name :: acceptance[0]");
+  assert.ok(probed, stdout.slice(0, 400));
+  assert.equal(probed.ok, false, "a 200 that lost the form is not a pass");
+  assert.match(probed.detail, /does not contain/, probed.detail);
+  assert.match(probed.detail, /form id=quote/, "and names what was missing");
 });

@@ -901,9 +901,22 @@ export function validateContractDraft(
 
   // ── verifiability ──
   for (const op of manifest.operations) {
-    if (PROBEABLE.includes(op.kind) && !(op.acceptanceProbes ?? []).length) {
-      problems.push(`no-probe [${op.id}]: a ${op.kind} operation is served over HTTP, so at least one of its acceptance criteria must carry an acceptanceProbe naming a declared api path and the status it must get. Without one the criterion is reported UNDETERMINED, which fails the functional gate.`);
+    if (!PROBEABLE.includes(op.kind)) continue;
+    // EVERY criterion, not just one of them.
+    //
+    // This used to require "at least one probe per operation", while the functional gate reports every criterion
+    // WITHOUT a probe as UNDETERMINED. An operation with five criteria and one probe therefore validated cleanly
+    // and then left four permanent unknowns, and undetermined is never a pass -- so the gate could not close, no
+    // repair could close it, and the build stopped having been told only that nothing changed. Four real staging
+    // builds ended that way. The two bars have to be the same bar.
+    const probed = new Set((op.acceptanceProbes ?? []).map((p) => p.criterion));
+    const unprobed = op.acceptance.map((_t, i) => i).filter((i) => !probed.has(i));
+    if (unprobed.length) {
+      problems.push(
+        `no-probe [${op.id}]: a ${op.kind} operation is served over HTTP, so EVERY one of its acceptance criteria needs an acceptanceProbe naming a declared api path and the status it must get. ${unprobed.length} of ${op.acceptance.length} has none: ${unprobed.map((i) => `acceptance[${i}]`).join(", ")}. A criterion about what the page shows is probeable with expectBodyContains / expectBodyAbsent. A property no request can observe is not an acceptance criterion: record it under missing instead. Without a probe the criterion is reported UNDETERMINED, and UNDETERMINED fails the functional gate for good.`,
+      );
     }
+    // An out-of-range probe is already refused as probe-criterion, further up: one rule, one message.
   }
   const persists = manifest.operations.some((op) => PERSISTING.includes(op.kind));
   if (persists && !manifest.persistence?.technology) {

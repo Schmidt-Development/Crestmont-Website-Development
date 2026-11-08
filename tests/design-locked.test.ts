@@ -2295,3 +2295,54 @@ test("[DLC-11] an approved design with no contract is not queued, and the report
 });
 
 
+
+test("[DLC-12] every acceptance criterion needs a probe, not just one of them", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const { made, artifact, baseline } = await approvedMeasurement(t, staff.id, "Partly provable");
+    const base = manifestFor(artifact.sha256, baseline.fingerprint);
+    const op = base.operations[0];
+    const probe = (op.acceptanceProbes ?? [])[0];
+    assert.ok(probe, "the fixture contract probes its criterion, so this test can vary only the probing");
+
+    // The shape four real staging builds had: criteria written, SOME of them probed. This validated cleanly
+    // under the old "at least one probe" rule and then left the rest permanently UNDETERMINED, which is never a
+    // pass -- so the functional gate could not close and no repair cycle could make it close.
+    const partly = await DL.recordContract(t.db, made.projectId, {
+      ...base,
+      operations: [{
+        ...op,
+        acceptance: ["the request is accepted", "the page still renders its form", "a second submission is refused"],
+        acceptanceProbes: [{ ...probe, criterion: 0 }],
+      }],
+    }, { recordedBy: staff.id });
+    assert.equal(partly.ok, false, JSON.stringify(partly));
+    const why = "problems" in partly ? partly.problems.join(" ") : "";
+    assert.match(why, /no-probe/, why);
+    assert.match(why, /acceptance\[1\], acceptance\[2\]/, "and it names which criteria nothing would check");
+    assert.match(why, /expectBodyContains/, "and tells Model A how a criterion about the page is made executable");
+
+    // A probe pointing past the end of the list establishes nothing, and used to be accepted silently.
+    const past = await DL.recordContract(t.db, made.projectId, {
+      ...base,
+      operations: [{ ...op, acceptance: ["the request is accepted"], acceptanceProbes: [{ ...probe, criterion: 7 }] }],
+    }, { recordedBy: staff.id });
+    assert.equal(past.ok, false, JSON.stringify(past));
+    assert.match("problems" in past ? past.problems.join(" ") : "", /probe-criterion/, JSON.stringify(past));
+
+    // And a contract that probes every criterion is accepted, so the bar is reachable rather than merely higher.
+    const all = await DL.recordContract(t.db, made.projectId, {
+      ...base,
+      operations: [{
+        ...op,
+        acceptance: ["the request is accepted", "the page still renders its form"],
+        acceptanceProbes: [
+          { ...probe, criterion: 0 },
+          { ...probe, criterion: 1, expectBodyContains: ["<form"] },
+        ],
+      }],
+    }, { recordedBy: staff.id });
+    assert.equal(all.ok, true, JSON.stringify(all));
+  } finally { t.close(); }
+});

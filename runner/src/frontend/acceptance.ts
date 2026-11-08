@@ -47,6 +47,15 @@ export interface AcceptancePlan {
   /** argv that starts the application, as found in the project's own scripts. */
   start: string[] | null;
   port: number;
+  /**
+   * Does this contract have an authenticated surface at all?
+   *
+   * A brochure site with one quote form has no accounts. The driver used to report `auth:session` as
+   * UNDETERMINED whenever it could not find a register/login endpoint, which on such a site is not an
+   * unknown -- it is a site with nothing to log in to -- and it blocked the functional gate permanently,
+   * because undetermined is never a pass.
+   */
+  authExpected: boolean;
   endpoints: {
     method: string;
     path: string;
@@ -65,6 +74,8 @@ export interface AcceptancePlan {
     path: string;
     body?: Record<string, unknown>;
     expect: number;
+    expectBodyContains?: string[];
+    expectBodyAbsent?: string[];
     repeat: boolean;
   }[];
 }
@@ -113,9 +124,13 @@ export function acceptancePlan(repo: string, manifest: IntegrationManifest & Man
       text: op.acceptance[pr.criterion] ?? "",
       as: pr.as, method: (pr.method ?? "GET").toUpperCase(), path: pr.path,
       body: pr.body, expect: pr.expect, repeat: pr.repeat === true,
+      expectBodyContains: pr.expectBodyContains, expectBodyAbsent: pr.expectBodyAbsent,
     })),
   );
-  return { start: startCommand(repo, manifest), port, endpoints, probes };
+  // An authenticated surface is one the contract itself declares: an endpoint that needs more than the public,
+  // or an explicit auth requirement. Nothing is inferred from the absence of a login route.
+  const authExpected = endpoints.some((e) => e.auth !== "public") || manifest.auth?.required === true;
+  return { start: startCommand(repo, manifest), port, endpoints, probes, authExpected };
 }
 
 /**
@@ -283,8 +298,12 @@ if (!up) {
   let session = "";
   let otherSession = "";
   if (!reg || !reg.requestExample || !login || !login.requestExample) {
+  if (!plan.authExpected) {
+    add("auth:not-applicable", true, "the contract declares no authenticated surface -- every declared endpoint is public and no authentication is required -- so there is nothing to sign in to and no authenticated behaviour to exercise");
+  } else {
     add("auth:session", false,
-      "the contract declares no register/login endpoint with a requestExample, so the driver could not obtain a session and no authenticated behaviour was exercised", true);
+      "the contract requires authentication but declares no register/login endpoint with a requestExample, so the driver could not obtain a session and no authenticated behaviour was exercised", true);
+  }
   } else {
     const made = await post(concrete(reg.path), fill(reg.requestExample, who), "");
     add("auth:register", made.status === (reg.success ?? 201),
@@ -345,29 +364,6 @@ if (!up) {
     // One request each, from the session the contract named, judged against the status it declared. The criterion
     // text travels with the result, so the record reads as the criterion rather than as a route. Nothing is
     // inferred: a probe whose session could not be obtained is UNDETERMINED, exactly as an unprobed criterion is.
-    const call = async (method, p, bodyObj, cookie) => {
-      try {
-        const res = await fetch(base + p, {
-          method, signal: AbortSignal.timeout(10000),
-          headers: { ...(bodyObj ? { "content-type": "application/json" } : {}), ...(cookie ? { cookie } : {}) },
-          ...(bodyObj ? { body: JSON.stringify(bodyObj) } : {}),
-        });
-        return res.status;
-      } catch { return 0; }
-    };
-    for (const pr of plan.probes || []) {
-      const cookie = pr.as === "customer" ? session : pr.as === "other-customer" ? otherSession : "";
-      if (pr.as !== "anonymous" && !cookie) {
-        add(pr.id, false, "no " + pr.as + " session was obtained, so this was not checked: " + pr.text, true);
-        continue;
-      }
-      const me = pr.as === "other-customer" ? other : who;
-      const body = pr.body ? fill(pr.body, me) : undefined;
-      let status = await call(pr.method, concrete(pr.path), body, cookie);
-      if (pr.repeat) status = await call(pr.method, concrete(pr.path), body, cookie);
-      add(pr.id, status === pr.expect,
-        (status === pr.expect ? "answered " : "declared " + pr.expect + ", answered ") + status + " :: " + pr.text);
-    }
 
     // Does the session survive the application restarting? A session held only in memory is not a session.
     //
@@ -409,6 +405,50 @@ if (!up) {
           : "after a restart the session answered " + after + ", so sessions do not survive one");
     }
     await stopTree(again);
+  }
+
+  // THE CONTRACT'S OWN PROBES, outside the authentication block on purpose.
+  //
+  // These used to live inside the branch that runs only once a session has been obtained, so on a site with no
+  // login endpoint -- a brochure site with one public form, which is most of them -- they never ran at all. They
+  // were not reported as failures and not reported as unknowns: coverageChecks() leaves out any criterion that
+  // carries a probe, on the grounds that the driver reports it, and the driver never did. The criteria simply
+  // vanished from the results, which is the one outcome a gate must never produce.
+  //
+  // An anonymous probe needs nothing but a running application. A probe that names a customer session still
+  // reports itself undetermined when no session was obtained, which is the honest answer for it.
+  const probeCall = async (method, p, bodyObj, cookie) => {
+    try {
+      const res = await fetch(base + p, {
+        method, signal: AbortSignal.timeout(10000),
+        headers: { ...(bodyObj ? { "content-type": "application/json" } : {}), ...(cookie ? { cookie } : {}) },
+        ...(bodyObj ? { body: JSON.stringify(bodyObj) } : {}),
+      });
+      return { status: res.status, text: await res.text().catch(() => "") };
+    } catch { return { status: 0, text: "" }; }
+  };
+  for (const pr of plan.probes || []) {
+    const cookie = pr.as === "customer" ? session : pr.as === "other-customer" ? otherSession : "";
+    if (pr.as !== "anonymous" && !cookie) {
+      add(pr.id, false, "no " + pr.as + " session was obtained, so this was not checked: " + pr.text, true);
+      continue;
+    }
+    const me = pr.as === "other-customer" ? other : who;
+    const body = pr.body ? fill(pr.body, me) : undefined;
+    let res = await probeCall(pr.method, concrete(pr.path), body, cookie);
+    if (pr.repeat) res = await probeCall(pr.method, concrete(pr.path), body, cookie);
+    // Status first, then what the response actually showed. Each part reports its own reason, because
+    // "declared 200, answered 200" beside a silent content failure tells a reader nothing.
+    const why = [];
+    if (res.status !== pr.expect) why.push("declared " + pr.expect + ", answered " + res.status);
+    for (const want of pr.expectBodyContains || []) {
+      if (!res.text.includes(want)) why.push("the response does not contain " + JSON.stringify(want));
+    }
+    for (const not of pr.expectBodyAbsent || []) {
+      if (res.text.includes(not)) why.push("the response still contains " + JSON.stringify(not));
+    }
+    add(pr.id, why.length === 0,
+      (why.length ? why.join("; ") : "answered " + res.status + (pr.expectBodyContains || pr.expectBodyAbsent ? " and the response showed what was required" : "")) + " :: " + pr.text);
   }
 }
 
