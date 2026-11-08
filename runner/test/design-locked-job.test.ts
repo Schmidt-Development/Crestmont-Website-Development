@@ -671,3 +671,36 @@ test("[DLJ-18] one unproductive cycle is ordinary; two in a row is stuck", async
   // Still bounded by the ceiling, which this does not raise.
   assert.ok(r.cycles.length <= MAX_REPAIR_CYCLES + 1, "the ceiling is unchanged");
 });
+
+test("[DLJ-19] a build that alters the approved frontend is refused, and the file is named", async () => {
+  // The guarantee the whole architecture rests on, which nothing checked. sourceFingerprint is taken once during
+  // the import and never looked at again, and conformance never read the frontend's files at all. Measured: three
+  // consecutive builds passed conformance AND the visual gate while serving an index page that had lost markup the
+  // approved file contains -- <b>28</b>, <b>1,900+</b>, Families &amp; owners advised, all present verbatim in the
+  // artifact and all absent from the response. Model B had replaced the server-rendered figures with placeholders
+  // its script filled from the new API. The only thing that noticed was an acceptance probe, and only because
+  // Model A happened to write one.
+  const repo = path.join(tmp(), "repo");
+  const provider = fakeProvider({
+    repo,
+    onCycle: () => {
+      writeConformingBackend(repo);
+      // Exactly the move that went unnoticed: the approved page edited to be filled in by script instead.
+      const page = path.join(repo, "index.html");
+      if (existsSync(page)) writeFileSync(page, readFileSync(page, "utf8").replace(/<body/, '<body data-rendered-by="model-b"'));
+    },
+  });
+
+  const r = await runDesignLockedJob(deps({ repo, provider: provider as never }));
+
+  assert.equal(r.ok, false, "a build that edited the approved design must never pass");
+  const codes = r.cycles.flatMap((c) => c.conformance.violations);
+  assert.ok(codes.includes("approved-frontend-changed"),
+    `the design lock did not bite: ${codes.join(",") || "(no violations)"}`);
+
+  // It must say WHICH file, because "something changed" is not actionable.
+  const said = (r.cycles[0].conformance.violationDetails ?? []).join(" ");
+  assert.match(said, /index\.html/, said);
+  assert.match(said, /must not alter it/, "and why it is forbidden, not merely that it is");
+
+});

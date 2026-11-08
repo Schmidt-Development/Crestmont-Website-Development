@@ -28,6 +28,8 @@ are resolved in round two).
 
 | 12 | `b5a1c39` | `GATE-FUNCTIONAL` — 4 passed, 4 failed | **`GATE-VISUAL` now passes: "the approved design held across 3 page view(s)".** The failures are real and the contract is right: `<b>28</b>` and `1,900+` ARE in the approved HTML (checked, not assumed), so the probe is protecting the frontend — Model B took the static figure out to inject it from the API, which is a change to an approved frontend | the brief now says the text a probe reports missing is text the approved page already contains: put it back, serve the approved file unchanged, add the API beside it. Feedback, not a gate change | — |
 
+| 13 | `b5a1c39` | `GATE-FUNCTIONAL` — 7 passed, **1 failed**: `the response does not contain "1,900+"` | conformance and visual both pass; the build is one acceptance check short. The loop then stopped at **cycle 2 of a permitted 4** because cycle 2 scored what cycle 1 scored — iterations 10, 11 and 12 all stopped that way, each holding two unspent cycles. The rule against waste was why the work was abandoned | a regression still breaks immediately; two **consecutive** flat cycles stop the loop, one does not. The ceiling is untouched | `[DLJ-18]` |
+
 ## Results by iteration
 
 **Iteration 3** (`876a33f`) — 28 passed, 2 failed, 1 undetermined.
