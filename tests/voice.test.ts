@@ -161,7 +161,7 @@ test("[VOICE-006] transcripts, summaries and recordings are stored only with rec
   assert.match(ev!.detail, /discarded: no recording consent/);
 });
 
-test("[VOICE-005] voice admin shows not-configured provider, no number, costs Unknown, and separates test calls", async () => {
+test("[VOICE-005] voice admin shows the real receptionist status (no Retell key here: not configured), no number, costs Unknown, and separates test calls", async () => {
   const { send, db, client } = await setup();
   const owner = await createStaff(db, "owner");
   await send({ event: "call_started", call_id: "real-1", from_number: "+1 555 0110" });
@@ -171,9 +171,11 @@ test("[VOICE-005] voice admin shows not-configured provider, no number, costs Un
   await send({ event: "call_ended", call_id: "test-1", outcome: "info_only", cost_microusd: 5000 });
   const c = await client().login(owner.email, TEST_PASSWORD, owner.secret);
   const html = await (await c.get("/staff/voice")).text();
-  assert.match(html, /None recorded/);
-  assert.match(html, /Purchasing a number requires Founder approval/);
-  assert.match(html, /PROVIDER-EVALUATION\.md/);
+  assert.match(html, /Receptionist status — development/);
+  assert.match(html, /Provider \(Retell\)<\/th><td><span class="badge[^"]*"[^>]*>Not configured<\/span><\/td><td class="muted">RETELL_INBOUND_API_KEY/);
+  assert.match(html, /No receptionist number is listed/);
+  assert.match(html, /this platform never buys numbers/);
+  assert.doesNotMatch(html, />Verified</, "nothing is shown as verified without evidence from this environment");
   assert.match(html, /1 test calls excluded/);
   assert.match(html, /1 calls with unknown cost/);
   assert.match(html, /\+1 555 0110/);

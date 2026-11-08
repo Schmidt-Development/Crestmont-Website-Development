@@ -326,7 +326,7 @@ test("[VOICE-003] escalation in staffed hours with a transfer number returns tra
   assert.ok(await t.db.prepare(`SELECT 1 FROM calls WHERE provider_call_id = 'e_1' AND escalated_at IS NOT NULL`).first());
 });
 
-test("[VOICE-003] escalation outside staffed hours (or with no transfer number) emails the Owners and creates a CRM task (fixture)", async () => {
+test("[VOICE-003] escalation outside staffed hours (or with no transfer number) emails the internal operations mailbox and creates a CRM task (fixture)", async () => {
   const t = await app({}, { now: MON_8PM });
   await saveVoiceConfig(t.db, t.owner.id, configured({ transfer: { enabled: true, number: "+15550107777" } }));
   await t.post("/api/webhooks/retell/inbound", inbound("e_2"));
@@ -336,7 +336,7 @@ test("[VOICE-003] escalation outside staffed hours (or with no transfer number) 
   const task = await t.db.prepare(`SELECT a.body, a.due_at FROM crm_activities a JOIN calls c ON c.lead_id = a.lead_id WHERE c.provider_call_id = 'e_2' AND a.kind = 'task'`).first<{ body: string; due_at: string }>();
   assert.match(task!.body, /ESCALATION from AI receptionist: Urgent: website is down — call back \+15550100123/);
   const mail = await t.db.prepare(`SELECT d.to_email, m.subject, m.text_body FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.template = 'voice_escalation'`).first<{ to_email: string; subject: string; text_body: string }>();
-  assert.equal(mail!.to_email, t.owner.email);
+  assert.equal(mail!.to_email, "crestmontwebsitedevelopment@gmail.com");
   assert.match(mail!.subject, /escalation/);
   assert.match(mail!.text_body, /outside staffed hours/);
   assert.match(mail!.text_body, /\/staff\/voice\/calls\/call_/);

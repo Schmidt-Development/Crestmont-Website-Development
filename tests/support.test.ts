@@ -172,8 +172,9 @@ test("[SUP-003] escalation sweep flags first-response breaches once (idempotent)
   assert.equal(r2.flagged, 0, "second sweep does not re-flag");
   assert.ok((await ticket(db, late))!.sla_breached_at);
   assert.equal((await ticket(db, fresh))!.sla_breached_at, null);
-  const reminders = (await db.prepare(`SELECT COUNT(*) AS n FROM email_deliveries WHERE idempotency_key LIKE ?`).bind(`sla:${late}:%`).first<{ n: number }>())!.n;
-  assert.ok(reminders >= 1);
+  const reminders = (await db.prepare(`SELECT COUNT(*) AS n FROM email_deliveries WHERE idempotency_key = ?`).bind(`internal:support_escalation:sla:${late}`).first<{ n: number }>())!.n;
+  assert.equal(reminders, 1, "one email per breached ticket, to the internal operations mailbox");
+  assert.equal((await db.prepare(`SELECT to_email FROM email_deliveries WHERE idempotency_key = ?`).bind(`internal:support_escalation:sla:${late}`).first<{ to_email: string }>())!.to_email, "crestmontwebsitedevelopment@gmail.com");
   assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'ticket.sla_breached' AND subject_id = ?`).bind(late).first<{ n: number }>())!.n, 1);
   // Manual trigger route works and stays idempotent.
   const o = await new TestClient(env).login(owner.email, undefined, owner.secret);

@@ -8,6 +8,7 @@ import { require as requirePerm, can, type Actor } from "../domain/authz.ts";
 import type { AppContext } from "../app/context.ts";
 import { cookie, isSecure, parseCookies } from "../app/http.ts";
 import { sendMail } from "./mailer.ts";
+import { sendInternalTemplate } from "./internal-notify.ts";
 import { intake } from "./contact-identity.ts";
 import { businessDate, endOfBusinessDay } from "../lib/business-time.ts";
 
@@ -165,13 +166,9 @@ export async function notifyNewLead(ctx: Pick<AppContext, "db" | "email" | "base
         WHERE NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = ? AND kind = 'lead_new' AND subject_id = ?)`)
       .bind(newId("ntf"), s.user_id, leadId, body.slice(0, 500), at, s.user_id, leadId).run();
   }
-  const ownerEmail = lead.owner_user_id ? (await db.prepare(`SELECT email FROM users WHERE id = ? AND disabled_at IS NULL`).bind(lead.owner_user_id).first<{ email: string }>())?.email : null;
-  const firstOwner = async () => (await db.prepare(`SELECT u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id = 'owner' AND u.disabled_at IS NULL ORDER BY m.created_at LIMIT 1`).first<{ email: string }>())?.email ?? null;
-  const to = ownerEmail ?? (ctx.settings["contact.email"]?.trim() || null) ?? await firstOwner();
-  if (to) {
-    await sendMail(ctx, { template: "lead_alert", to, idempotencyKey: `lead-staff:${leadId}`,
-      data: { kind: kind === "api" ? "lead" : kind, name: lead.name, company: lead.company, interest: lead.interest, assigned: !!lead.owner_user_id, url: `${ctx.baseUrl}/staff/crm/leads/${leadId}` } });
-  }
+  // Phase 14: the staff email goes to the internal operations mailbox, once per lead.
+  await sendInternalTemplate(ctx, "new_lead", leadId, { template: "lead_alert",
+    data: { kind: kind === "api" ? "lead" : kind, name: lead.name, company: lead.company, interest: lead.interest, assigned: !!lead.owner_user_id, url: `${ctx.baseUrl}/staff/crm/leads/${leadId}` } });
 }
 
 export async function changeLeadStage(db: Db, actor: Actor, leadId: string, to: LeadStage, opts: { reason?: string } = {}) {

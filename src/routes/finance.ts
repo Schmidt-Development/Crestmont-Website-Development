@@ -524,7 +524,7 @@ export function register(r: Router): void {
     const f = await ctx.form();
     const v = { payment_id: str(f, "payment_id"), amount: str(f, "amount"), reason: str(f, "reason"), evidence: str(f, "evidence") };
     const amt = fin.parseDollars(v.amount);
-    const res = await requestRefund(ctx, { id: ctx.user!.id, email: ctx.user!.email }, org.organizationId, { paymentId: v.payment_id, reason: v.reason, evidence: v.evidence, amountCents: amt });
+    const res = await requestRefund(ctx, { id: ctx.user!.id, email: ctx.user!.email, name: ctx.user!.displayName }, org.organizationId, { paymentId: v.payment_id, reason: v.reason, evidence: v.evidence, amountCents: amt });
     if (!res.ok) return billingPage(ctx, res.issues, v, 422);
     return redirect(ctx, "/portal/billing", { kind: "success", text: "Refund request submitted. We will email you when it is reviewed." });
   });

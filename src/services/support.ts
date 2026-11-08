@@ -10,6 +10,7 @@ import { assertTransition, TransitionError } from "../domain/state-machine.ts";
 import { sanitizeFilename, validateUpload } from "../adapters/storage.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
+import { sendInternalTemplate } from "./internal-notify.ts";
 import { notify } from "./notifications.ts";
 import { decideAiJob } from "./ai.ts";
 import { replyPrompt, startDraft, type DraftStatus, type DraftSubject } from "./ai-drafts.ts";
@@ -318,8 +319,9 @@ export async function escalateTicket(ctx: MailCtx, ticket: TicketRow, userId: st
   for (const s of await supervisors(ctx.db)) {
     if (s.id === userId) continue;
     await notify(ctx.db, s.id, { kind: "ticket_escalated", subjectType: "ticket", subjectId: ticket.id, body: `Escalated: ${ticket.subject}` });
-    await sendMail(ctx, { template: "support_ticket", to: s.email, data: { event: "escalated", subject: ticket.subject, ticketRef: ticket.id, url: `${ctx.baseUrl}/staff/support/${ticket.id}` }, idempotencyKey: `escalate:${ticket.id}:${s.id}:${ticket.updated_at}` });
   }
+  // Phase 14: an important support escalation is emailed once to the internal operations mailbox.
+  await sendInternalTemplate(ctx, "support_escalation", `ticket:${ticket.id}:${ticket.updated_at}`, { template: "support_ticket", data: { event: "escalated", subject: ticket.subject, ticketRef: ticket.id, url: `${ctx.baseUrl}/staff/support/${ticket.id}` } });
 }
 
 export async function assignTicket(ctx: MailCtx, ticket: TicketRow, assigneeId: string, byUserId: string): Promise<void> {
@@ -440,8 +442,9 @@ export async function runSupportEscalationSweep(ctx: Pick<AppContext, "db" | "em
     const people = a ? [{ id: a.user_id, email: a.email }] : (await supervisors(ctx.db)).map((x) => ({ id: x.id, email: x.email }));
     for (const p of people) {
       await notify(ctx.db, p.id, { kind: "ticket_sla_breached", subjectType: "ticket", subjectId: t.id, body: `No first response within ${s.firstResponseTargetHours}h: ${t.subject}` });
-      await sendMail(ctx, { template: "support_ticket", to: p.email, data: { event: "sla_breached", subject: t.subject, ticketRef: t.id, targetHours: s.firstResponseTargetHours, url: `${ctx.baseUrl}/staff/support/${t.id}` }, idempotencyKey: `sla:${t.id}:${p.id}` });
     }
+    // Phase 14: one email per breached ticket to the internal operations mailbox.
+    await sendInternalTemplate(ctx, "support_escalation", `sla:${t.id}`, { template: "support_ticket", data: { event: "sla_breached", subject: t.subject, ticketRef: t.id, targetHours: s.firstResponseTargetHours, url: `${ctx.baseUrl}/staff/support/${t.id}` } });
   }
   return { flagged, checked: due.length, targetHours: s.firstResponseTargetHours };
 }

@@ -355,14 +355,15 @@ test("[PAY-007] charge.refunded: Dashboard refunds email the customer once; plat
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE to_email = ? AND template = 'refund_decision'`, cu.email), 2);
 });
 
-test("[PAY-008] dispute opened emails the Owner once (in-app notices unchanged)", async () => {
+test("[PAY-008] dispute opened emails the internal operations mailbox once (in-app notices unchanged)", async () => {
   const t = await app();
   const owner = await createStaff(t.db, "owner", "owner-dispute@crestmont.test");
   const dispute = { id: "dp_fixture_1", object: "dispute", payment_intent: "pi_none", amount: 99_900, reason: "fraudulent", status: "needs_response", evidence_details: { due_by: nowS() + 7 * 86400 } };
   await webhook(t, "charge.dispute.created", dispute);
   await webhook(t, "charge.dispute.created", dispute);
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE to_email = ? AND template = 'dispute_opened'`, owner.email), 1);
-  assert.match((await lastEmail(t.db, owner.email))!.text_body, /\$999\.00[\s\S]*Evidence is due by \d{4}-\d{2}-\d{2}/);
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE to_email = 'crestmontwebsitedevelopment@gmail.com' AND template = 'dispute_opened'`), 1, "once, despite the duplicate webhook");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE to_email = ?`, owner.email), 0, "not to the Owner's personal address");
+  assert.match((await lastEmail(t.db, "crestmontwebsitedevelopment@gmail.com"))!.text_body, /\$999\.00[\s\S]*Evidence is due by \d{4}-\d{2}-\d{2}/);
 });
 
 test("[AUTH-002] completing a password reset sends a security notice", async () => {
@@ -387,7 +388,7 @@ async function leadApp(extra: Partial<Env> = {}) {
 }
 const quoteForm = (over: Record<string, string> = {}) => ({ name: "Morgan Fixture", email: "Morgan.Fixture@Example.COM", company: "Fixture Coffee", interest: "business", budget: "", timeline: "", message: "We need a new website with online ordering.", "cf-turnstile-response": "ok-1", ...over });
 
-test("[CRM-001] a new web lead notifies Owners and sales in-app plus one staff email; resubmitting creates nothing; the default lead owner is applied", async () => {
+test("[CRM-001] a new web lead notifies Owners and sales in-app plus one email to the internal mailbox; resubmitting creates nothing; the default lead owner is applied", async () => {
   const t = await leadApp();
   const owner = await createStaff(t.db, "owner", "owner-leads@crestmont.test");
   const sales = await createStaff(t.db, "sales", "sales-leads@crestmont.test");
@@ -402,7 +403,7 @@ test("[CRM-001] a new web lead notifies Owners and sales in-app plus one staff e
   for (const u of [owner.id, sales.id]) assert.equal(await count(t.db, `SELECT COUNT(*) n FROM notifications WHERE user_id = ? AND kind = 'lead_new' AND subject_id = ?`, u, lead.id), 1);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM notifications WHERE user_id = ?`, dev.id), 0, "developers are not notified");
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE template = 'lead_alert'`), 1, "one staff email");
-  assert.equal((await lastEmail(t.db, owner.email))?.template, "lead_alert", "no contact email set → first Owner");
+  assert.equal((await lastEmail(t.db, "crestmontwebsitedevelopment@gmail.com"))?.template, "lead_alert", "the staff email goes to the internal mailbox");
   // CREST-GAP-093: stored lowercased and trimmed.
   assert.equal((await one<{ email: string }>(t.db, `SELECT c.email FROM contacts c JOIN leads l ON l.contact_id = c.id WHERE l.id = ?`, lead.id)).email, "morgan.fixture@example.com");
   // Resubmitting the same form (same submission token) creates no lead, notification or email.
@@ -410,13 +411,13 @@ test("[CRM-001] a new web lead notifies Owners and sales in-app plus one staff e
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM leads`), 1);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM notifications WHERE kind = 'lead_new'`), 2);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE template = 'lead_alert'`), 1);
-  // Default lead owner (Business settings) → new leads arrive assigned and the email goes to that owner.
+  // Default lead owner (Business settings) → new leads arrive assigned (in-app to the team; one internal email).
   await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('crm.default_lead_owner', ?, ?)`).bind(sales.id, nowIso()).run();
   const api = await t.client().request("POST", "/api/leads", { body: JSON.stringify({ name: "Api Fixture", email: "  API.Fixture@Example.com ", interest: "custom", message: "Integration with our booking system please.", source: "web_form", turnstileToken: "ok-2" }), headers: { "content-type": "application/json" } });
   assert.equal(api.status, 201);
   const { leadId } = (await api.json()) as { leadId: string };
   assert.equal((await one<{ owner_user_id: string }>(t.db, `SELECT owner_user_id FROM leads WHERE id = ?`, leadId)).owner_user_id, sales.id);
-  assert.equal((await lastEmail(t.db, sales.email))?.template, "lead_alert");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE template = 'lead_alert' AND to_email = 'crestmontwebsitedevelopment@gmail.com'`), 2);
   assert.equal((await one<{ email: string }>(t.db, `SELECT c.email FROM contacts c JOIN leads l ON l.contact_id = c.id WHERE l.id = ?`, leadId)).email, "api.fixture@example.com");
   // A disabled or non-sales default owner is ignored.
   await t.db.prepare(`UPDATE business_settings SET value = ? WHERE key = 'crm.default_lead_owner'`).bind(dev.id).run();

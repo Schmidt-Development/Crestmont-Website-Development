@@ -15,7 +15,7 @@ export const INTERNAL_NOTIFY_EMAIL = "crestmontwebsitedevelopment@gmail.com";
 export const internalNotifyEmail = (env?: { INTERNAL_NOTIFY_EMAIL?: string } | null) =>
   (env?.INTERNAL_NOTIFY_EMAIL?.trim() || INTERNAL_NOTIFY_EMAIL).toLowerCase();
 
-export type InternalKind = "paid_order" | "appointment" | "founder_callback" | "support_escalation" | "refund_request" | "dispute" | "automation_failure" | "launch_blocker";
+export type InternalKind = "paid_order" | "appointment" | "founder_callback" | "support_escalation" | "refund_request" | "dispute" | "automation_failure" | "launch_blocker" | "new_lead";
 
 /**
  * Sends one internal notification. `key` must identify the business event (not the attempt), so repeats are no-ops.
