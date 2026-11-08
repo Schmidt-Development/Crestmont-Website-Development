@@ -602,3 +602,45 @@ test("[DLJ-16] a build-machine failure is not sent to the model as a defect to r
   // And a person reading the outcome is told it was the platform.
   assert.match(r.problems.join(" "), /platform failure, not a failure of the generated website/, r.problems.join(" | "));
 });
+
+test("[DLJ-17] an environment difference is not charged to Model B as design drift", async () => {
+  // The gate asks "did Model B change the approved design?". It was answered by comparing the build's
+  // measurement against the baseline measured during IMPORT -- a different container, a different run -- so any
+  // difference between those two environments was permanent, unfixable drift blamed on the model. Measured: the
+  // Founder's law firm document fingerprinted b2dd67f236668efb at import and 973c825990b3 in the build, from the
+  // same bytes with the same ten pinned assets, consistently, a section 12207px lower at mobile. Three repair
+  // cycles went on it and the gate could not be passed.
+  //
+  // Here the approved baseline carries a DIFFERENT palette from the one this build measures, which is what an
+  // environment difference looks like: the design the build renders is not bit-identical to the approved record.
+  // Model B changes nothing visual, so the gate must pass -- and the divergence from the approved design is
+  // reported separately, by the drift check that owns that question.
+  const report = JSON.parse(readFileSync(path.join(REAL, "import-baseline.json"), "utf8")) as {
+    signatures: { page: string; viewport: string; palette?: string[] }[];
+  };
+  const page = report.signatures[0].page;
+  const mine = report.signatures.filter((s) => s.page === page);
+  assert.ok(mine.length > 0, "the fixture must measure at least one page view");
+
+  // The approved record differs from what this environment renders, in a way no repair could reconcile.
+  const approvedSignatures = mine.map((s) => ({ ...s, palette: ["rgb(1, 2, 3)", ...(s.palette ?? [])] }));
+
+  const repo = path.join(tmp(), "repo");
+  const provider = fakeProvider({ repo, onCycle: () => writeConformingBackend(repo) });
+  const r = await runDesignLockedJob(deps({
+    repo, provider: provider as never,
+    fetchArtifact: async () => artifact({ designFingerprint: baselineFingerprint(approvedSignatures as never) }),
+    fetchApprovedBaseline: async () => ({ signatures: approvedSignatures as never }),
+  }));
+
+  const visual = r.cycles[0]?.visual;
+  assert.ok(visual, "no cycle ran, so the gate was never reached");
+  assert.equal(visual.ran, true, `the visual gate did not run: ${visual.detail}`);
+  assert.equal(visual.ok, true,
+    `an environment difference was charged to Model B as drift: ${visual.detail}`);
+
+  // And the difference from the approved design is still SAID, where a person reads it.
+  assert.match(r.problems.join(" ") + r.summary,
+    /renders a different design from the one approved/,
+    "the divergence from the approved design must still be recorded, just not as the model's fault");
+});

@@ -518,7 +518,45 @@ async function measureVisual(
   // the second Northgate run: the design signature held on all 21 page views and the gate still failed with 9
   // undeclared-content findings. A signature change is still design-drift whatever the manifest claims; this only
   // restores the content declarations the contract already carries.
-  const v = verifyAgainstBaseline(baseline, after, { before, manifest });
+  // WHAT THIS GATE ASKS, AND WHAT IT USED TO ASK.
+  //
+  // The question is "did Model B change the approved design?". It was being answered by comparing the build's
+  // measurement against the baseline measured during IMPORT -- a different container, a different run. Any
+  // difference between those two environments was therefore permanent, unfixable drift, reported to Model B as a
+  // design regression it had not caused and could not undo. Measured: the same bytes with the same ten pinned
+  // assets fingerprinted b2dd67f236668efb at import and 973c825990b3 in the build, consistently, a section
+  // sitting 12207px lower at mobile. Three cycles were spent on it. The gate could not be passed.
+  //
+  // So it compares like with like: this build's own measurement of the UNMODIFIED artifact against its
+  // measurement after Model B. Same container, same assets, same render -- what remains is what Model B did.
+  //
+  // Nothing is weakened by this. The approved design is still protected twice over:
+  //   · step 5 above already compares the build's fresh measurement of the unmodified artifact against the
+  //     APPROVED baseline and records any divergence for a person. That is where an environment difference
+  //     belongs, and it is where this one now shows up instead of here.
+  //   · and this gate still fails on any change Model B makes to any approved page view.
+  //
+  // The page set stays the approved one. A build that cannot reproduce an approved page view is a failure, not a
+  // narrower comparison -- that invariant was added after a build quietly compared one page out of six.
+  const approved = new Set(baseline.signatures.map((s) => `${s.page}|${s.viewport}`));
+  const startSignatures = before.signatures.filter((s) => approved.has(`${s.page}|${s.viewport}`));
+  if (startSignatures.length !== baseline.signatures.length) {
+    const missing = baseline.signatures
+      .filter((s) => !before.signatures.some((b) => b.page === s.page && b.viewport === s.viewport))
+      .map((s) => `${s.page} at ${s.viewport}`);
+    return {
+      ran: false, ok: false,
+      detail: `this build could not reproduce ${missing.length} approved page view(s) before Model B ran, so there is nothing to compare them against: ${missing.join(", ")}`,
+    };
+  }
+  const startOfBuild: DesignBaseline = {
+    ...baseline,
+    signatures: startSignatures,
+    renders: before.renders.filter((r) => approved.has(`${r.page}|${r.viewport}`)),
+    fingerprint: baselineFingerprint(startSignatures),
+  };
+
+  const v = verifyAgainstBaseline(startOfBuild, after, { before, manifest });
   const drifted = v.drift.findings.filter((f) => f.kind !== "declared-content");
   const ok = v.drift.ok && v.stateChanges.length === 0;
   return {
