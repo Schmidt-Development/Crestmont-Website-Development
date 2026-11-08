@@ -186,7 +186,17 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
     }
     case "resend_webhooks":
       if (!e.RESEND_WEBHOOK_SECRET) return { status: "not_configured", detail: "RESEND_WEBHOOK_SECRET is not set; /api/webhooks/resend rejects every request, so bounces and complaints are not recorded.", fingerprint: null, probe: false };
-      return { status: "configured_unverified", detail: "Svix signing secret set; signed Resend delivery events are accepted. Unverified until Resend delivers a real event.", fingerprint: await fp(e.RESEND_WEBHOOK_SECRET), probe: false };
+    {
+      // Rows are written only after the Svix signature verified (routes/hooks.ts), so a recent event for THIS
+      // environment ("ignored" = another environment's mail) is proof the webhook path works end to end. This row used
+      // to stay "unverified" forever while the Resend row counted the very deliveries these events confirmed.
+      const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+      const ev = await d.db.prepare(`SELECT COUNT(*) AS n, MAX(received_at) AS last FROM email_webhook_events WHERE outcome <> 'ignored' AND received_at >= ?`).bind(since)
+        .first<{ n: number; last: string | null }>().catch(() => null);
+      const fpw = `${await fp(e.RESEND_WEBHOOK_SECRET)}:${ev?.n ?? 0}`;
+      if (ev && ev.n > 0) return { status: "verified", detail: `Svix signing secret set; ${ev.n} signed Resend delivery event(s) received for this environment in the last 30 days (latest ${ev.last}). Bounces and complaints are recorded.`, fingerprint: fpw, probe: false };
+      return { status: "configured_unverified", detail: "Svix signing secret set; signed Resend delivery events are accepted. Unverified until Resend delivers a real event.", fingerprint: fpw, probe: false };
+    }
   }
 }
 

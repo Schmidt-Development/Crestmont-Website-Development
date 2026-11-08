@@ -574,6 +574,27 @@ jobs:
             echo "process still alive: $(kill -0 "$(cat worker-tail.pid)" 2>/dev/null && echo yes || echo no)"
           fi
 
+      # D1 contention, not a page fault (staging deploys 42514825859 and 42521194657, 2026-11-08). A merge to main starts
+      # CI and, usually in the same minute, this deploy. CI's last step posts ~1,400 evidence rows to this staging
+      # Worker and recalculates readiness: about three seconds of D1 work in one atomic batch. Both runs take ~8 minutes
+      # to reach that point, so the evidence post landed inside the Owner-module sweep below both times, and D1 answered
+      # "Too many resources consumed within a 10 second window" to the sweep and to the evidence post alike. Waiting for
+      # this commit's CI run to finish (bounded; read-only workflow token; nothing is retried) keeps the two apart.
+      - name: Wait for this commit's CI evidence post (keeps it out of the D1 window of the checks below)
+        if: env.FULL == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deadline=$(( $(date +%s) + 900 ))
+          while :; do
+            st=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=1" --jq '.workflow_runs[0].status // "none"' 2>/dev/null || echo "unknown")
+            if [ "$st" = "completed" ] || [ "$st" = "none" ]; then echo "CI for this commit: $st"; break; fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then echo "::warning title=CI still running::CI for this commit is still $st after 15 minutes; verifying anyway."; break; fi
+            sleep 15
+          done
+          # Let the 10-second window that held the evidence batch pass before the sweep starts.
+          sleep 15
+
       - name: Verify the full access sequence on the live site
         id: verify
         if: env.FULL == 'true'
