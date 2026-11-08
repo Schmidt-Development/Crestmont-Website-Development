@@ -14,6 +14,8 @@ import {
 } from "../ui/components.ts";
 import { toCsv } from "../services/finance.ts";
 import * as P from "../services/projects.ts";
+import * as FW from "../services/finance-work.ts";
+import { RESOLUTIONS } from "../services/stripe-reconcile.ts";
 import { launchEligibility } from "../services/launch-gate.ts";
 import * as F from "../services/files.ts";
 import * as M from "../services/messages.ts";
@@ -90,16 +92,67 @@ async function needsAttention(ctx: AppContext): Promise<SafeHtml> {
     const n = (await db.prepare(`SELECT COUNT(*) AS n FROM privacy_requests WHERE kind = 'deletion' AND status IN ('received','in_progress')`).first<{ n: number }>())?.n ?? 0;
     if (n) items.push({ text: `${n} customer data-deletion request${n === 1 ? "" : "s"} to process`, href: "/staff/security#privacy", tone: "warn" });
   }
-  if (can(actor, "finance.read")) {
-    const n = (await db.prepare(`SELECT COUNT(*) AS n FROM reconciliation_findings WHERE status = 'open'`).first<{ n: number }>())?.n ?? 0;
-    if (n) items.push({ text: `${n} payment record${n === 1 ? "" : "s"} that do${n === 1 ? "es" : ""} not match Stripe — review and resolve`, href: "/staff/finance/reconciliation", tone: "warn" });
+  if (can(actor, "finance.read") || can(actor, "refund.review")) {
+    const n = (await FW.financeWorkItems(db, actor, ctx.now())).length;
+    if (n) items.push({ text: `${n} financial issue${n === 1 ? "" : "s"} to review (payments, refunds, disputes, cost import)`, href: "/staff?tab=finance", tone: "warn" });
   }
   if (!items.length) return html``;
   return html`<section class="card" data-needs-attention style="margin-bottom:1.5rem"><h2 class="card__title">Needs your attention</h2>
 <ul class="checklist">${items.map((i) => html`<li>${badge(i.tone, "To do")} <a href="${i.href}">${i.text}</a></li>`)}</ul></section>`;
 }
 
+/** My Work → Financial issues (finance-work.ts): each issue in plain English, with what to do and where. */
+async function financeIssuesSection(ctx: AppContext): Promise<SafeHtml> {
+  const items = await FW.financeWorkItems(ctx.db, ctx.actor!, ctx.now());
+  const me = ctx.user!.id;
+  const assignees = new Map<string, { id: string; display_name: string }[]>();
+  const peopleFor = async (key: string) => { const k = key.startsWith("refund:") ? "refund" : "finance"; if (!assignees.has(k)) assignees.set(k, await FW.financeAssignees(ctx.db, key)); return assignees.get(k)!; };
+  const canAssign = can(ctx.actor!, "finance.read");
+  const cards: SafeHtml[] = [];
+  for (const i of items) {
+    const people = canAssign ? await peopleFor(i.key) : [];
+    cards.push(html`<article class="card" data-finance-issue="${i.key}" style="margin-bottom:1rem">
+<div class="row row--between" style="flex-wrap:wrap;gap:.5rem"><h3 style="margin:0">${i.title}</h3><div>${badge(i.priority === "urgent" ? "urgent" : i.priority === "high" ? "high" : "normal", i.priority === "urgent" ? "Urgent" : i.priority === "high" ? "High priority" : "Normal")} ${badge("open", i.status)}</div></div>
+<p>${i.explanation}</p>
+${dl([["Customer", i.customer ?? "—"], ["Project", i.project ? html`<a href="/staff/projects/${i.project.id}">${i.project.name}</a>` : "—"],
+  ["Amount", i.amountCents === null ? "—" : formatCents(i.amountCents)], ["Found", formatDateTime(i.discoveredAt)],
+  ["Assigned to", i.assignedTo ? (i.assignedTo.id === me ? "You" : i.assignedTo.name) : html`<span class="faint">Not assigned</span>`],
+  ["Recommended next step", i.nextAction]])}
+<div class="row" style="gap:.5rem;flex-wrap:wrap;margin-top:.5rem">
+${linkButton("Open the record", i.href, "secondary", "sm")}
+${canAssign ? html`<form method="post" action="/staff/finance-work/assign" class="row" style="gap:.25rem">${csrf(ctx)}<input type="hidden" name="key" value="${i.key}">
+<label class="visually-hidden" for="as-${i.key}">Assign ${i.title}</label><select class="select" id="as-${i.key}" name="user_id"><option value="">Not assigned</option>${people.map((p) => html`<option value="${p.id}"${i.assignedTo?.id === p.id ? html` selected` : ""}>${p.id === me ? "Me" : p.display_name}</option>`)}</select>${button("Assign", { variant: "ghost", size: "sm" })}</form>` : ""}
+</div>
+${i.findingId && can(ctx.actor!, "finance.read") ? html`<details style="margin-top:.5rem"><summary>Mark as resolved</summary>
+<form method="post" action="/staff/finance/reconciliation/${i.findingId}/resolve" class="stack" style="margin-top:.5rem">${csrf(ctx)}<input type="hidden" name="back" value="mywork">
+${select({ name: "resolution", label: "What was done", options: Object.entries(RESOLUTIONS).map(([value, l]) => ({ value, label: l })), id: `res-${i.findingId}` })}
+${textarea({ name: "note", label: "What you checked and did", rows: 2, maxlength: 1000, required: true, id: `note-${i.findingId}` })}
+<p class="faint">Resolving records your note; it does not change any payment or invoice. If the same problem is found again after being fixed, it re-opens here.</p>
+<div>${button("Mark as resolved", { variant: "secondary", size: "sm" })}</div></form></details>` : ""}
+${i.technical ? html`<details style="margin-top:.5rem"><summary class="faint">Technical details</summary><p class="faint"><code>${i.technical}</code></p></details>` : ""}
+</article>`);
+  }
+  return html`<section><h2 class="card__title">Financial issues</h2>
+<p class="muted">Problems found automatically in payments, refunds, disputes and cost imports. Each one disappears by itself when it is genuinely resolved. <a href="/staff/finance/reconciliation">Full reconciliation records</a></p>
+${items.length ? html`${cards}` : emptyState("Nothing to review", "No payment discrepancies, failed maintenance payments, refund requests, disputes or failed cost imports right now.")}</section>`;
+}
+
 export function register(r: Router): void {
+  r.post("/staff/finance-work/assign", async (ctx) => {
+    requireStaff(ctx, "finance.read");
+    const f = await ctx.form();
+    try {
+      await FW.assignFinanceWork(ctx.db, ctx.actor!, ctx.user!.id, str(f, "key"), str(f, "user_id") || null);
+      return redirect(ctx, "/staff?tab=finance", { kind: "success", text: str(f, "user_id") ? "Issue assigned." : "Issue unassigned." });
+    } catch (e) {
+      if (e instanceof FW.FinanceWorkError) {
+        if (e.status === 403) throw new HttpError(403, e.message);
+        if (e.status === 404) throw new HttpError(404, e.message);
+        return redirect(ctx, "/staff?tab=finance", { kind: "error", text: e.message });
+      }
+      throw e;
+    }
+  });
   // Assigned below, next to the task routes it belongs with; My Work renders it as its "All tasks" tab.
   let allTasksSection: (ctx: AppContext) => Promise<SafeHtml> = async () => html``;
   // ───────────── My work ─────────────
@@ -108,10 +161,17 @@ export function register(r: Router): void {
     const db = ctx.db, me = ctx.user!.id, actor = ctx.actor!;
     // My Work is the single operational task interface (Founder directive 2026-11-08): "My work" and, for delivery
     // staff, "All tasks" (what used to be the separate Tasks page).
-    const tab = ctx.url.searchParams.get("tab") === "tasks" && can(actor, "delivery.access") ? "tasks" : "mine";
-    const workTabs = can(actor, "delivery.access")
-      ? tabs([{ href: "/staff", label: "My work", current: tab === "mine" }, { href: "/staff?tab=tasks", label: "All tasks", current: tab === "tasks" }], "My work views")
-      : html``;
+    const wanted = ctx.url.searchParams.get("tab");
+    const seesFinance = can(actor, "finance.read") || can(actor, "refund.review");
+    const tab = wanted === "tasks" && can(actor, "delivery.access") ? "tasks" : wanted === "finance" && seesFinance ? "finance" : "mine";
+    const tabItems = [{ href: "/staff", label: "My work", current: tab === "mine" },
+      ...(can(actor, "delivery.access") ? [{ href: "/staff?tab=tasks", label: "All tasks", current: tab === "tasks" }] : []),
+      ...(seesFinance ? [{ href: "/staff?tab=finance", label: "Financial issues", current: tab === "finance" }] : [])];
+    const workTabs = tabItems.length > 1 ? tabs(tabItems, "My work views") : html``;
+    if (tab === "finance") {
+      return page(ctx, "Financial issues", html`${pageHead("My work", undefined, label(ctx.user!.memberships.find((m) => m.organizationId)?.role ?? "staff"))}${workTabs}
+${await financeIssuesSection(ctx)}`);
+    }
     if (tab === "tasks") {
       return page(ctx, "All tasks", html`${pageHead("My work", undefined, label(ctx.user!.memberships.find((m) => m.organizationId)?.role ?? "staff"))}${workTabs}
 <section class="card">${await allTasksSection(ctx)}</section>`);

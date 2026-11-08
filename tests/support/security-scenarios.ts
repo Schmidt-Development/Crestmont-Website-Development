@@ -374,6 +374,9 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/email-suppressions/:id/remove", fields: () => ({ note: "Customer confirmed the new mailbox works" }) },
     { key: "POST /staff/finance/reconciliation/:id/resolve", fields: () => ({ resolution: "no_action_needed", note: "Test-mode session from a deleted invoice; nothing owed." }) },
     { key: "POST /staff/finance/reconciliation/:id/reopen", fields: () => ({ note: "Customer disputes this; reviewing again." }) },
+    { key: "POST /staff/finance-work/assign", fields: () => ({ key: "job:cost_import", user_id: w.staff.owner.id }),
+      setup: async () => { await w.db.prepare(`INSERT INTO ingestion_status (source, last_attempt_at, last_error) VALUES ('job:cost_import', ?, 'matrix: provider timeout')
+          ON CONFLICT(source) DO UPDATE SET last_error = excluded.last_error, last_attempt_at = excluded.last_attempt_at`).bind(nowIso()).run(); } },
 
     // ── Readiness and operations ──
     { key: "POST /staff/readiness/blockers/new", fields: () => ({ category: "security", severity: "medium", description: "Audit blocker description", subsystem: "Platform", owner: "Engineering", required_action: "Do the thing properly", dependency: "", requirement_ids: "" }) },

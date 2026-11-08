@@ -452,6 +452,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/finance/reconciliation": staff(finance),
   "POST /staff/finance/reconciliation/:id/resolve": staff(finance, P("reconFinding"), act("reconciliation.finding_resolved")),
   "POST /staff/finance/reconciliation/:id/reopen": staff(finance, P("reconFinding"), act("reconciliation.finding_reopened")),
+  "POST /staff/finance-work/assign": staff(finance, undefined, act("finance_work.assigned")),
 
   // ── Launch readiness and operations (src/routes/readiness.ts, ops.ts) ──
   "GET /staff/readiness": staff(readiness),
