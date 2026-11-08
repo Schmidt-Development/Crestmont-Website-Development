@@ -20,7 +20,16 @@ import { settings } from "../scanner/src/main.ts";
 const SECRET = "scanner-test-secret-0123456789abcdef0123";
 // Assembled at run time so the repository never holds the EICAR string verbatim.
 export const EICAR = ["X5O!P%@AP[4\\PZX54(P^)7CC)7}$", "EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"].join("");
-const VERSION = "ClamAV 1.5.1/27812/Wed Nov  5 08:26:19 2026";
+const VERSION = "ClamAV 1.5.1/27812/Wed Nov  5 08:26:19 2026"; // a fixed sample, for the parser and for heartbeats sent directly
+/** clamd's VERSION reply for signatures published at `at` (its ctime-style date, printed in UTC as the container runs). */
+function clamdVersion(at: Date): string {
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `ClamAV 1.5.1/27812/${days[at.getUTCDay()]} ${months[at.getUTCMonth()]} ${String(at.getUTCDate()).padStart(2, " ")} ${two(at.getUTCHours())}:${two(at.getUTCMinutes())}:${two(at.getUTCSeconds())} ${at.getUTCFullYear()}`;
+}
+// The stand-in daemon reports signatures published an hour ago. A fixed date here made the lifecycle test fail by
+// itself 72 hours after that date (the platform rightly calls older signatures stale), i.e. a time bomb in the test.
+const LIVE_VERSION = clamdVersion(new Date(Date.now() - 3_600_000));
 
 /** A stand-in clamd: PING, VERSION, INSTREAM. `mode` changes its behaviour per test. */
 async function fakeClamd(mode: { down?: boolean; reply?: (bytes: Buffer) => string } = {}) {
@@ -33,7 +42,7 @@ async function fakeClamd(mode: { down?: boolean; reply?: (bytes: Buffer) => stri
         const nul = buf.indexOf(0); if (nul < 0) return;
         cmd = buf.subarray(1, nul).toString(); buf = buf.subarray(nul + 1);
         if (cmd === "PING") return void sock.end("PONG\0");
-        if (cmd === "VERSION") return void sock.end(`${VERSION}\0`);
+        if (cmd === "VERSION") return void sock.end(`${LIVE_VERSION}\0`);
       }
       while (buf.length >= 4) {
         const n = buf.readUInt32BE(0);
@@ -202,6 +211,7 @@ test("[SEC-003] scanner parsing and configuration", () => {
   assert.deepEqual(parseStreamReply("stream: Win.Test.EICAR_HDB-1 FOUND"), { kind: "found", signature: "Win.Test.EICAR_HDB-1" });
   assert.deepEqual(parseStreamReply("INSTREAM size limit exceeded. ERROR"), { kind: "error", message: "INSTREAM size limit exceeded." });
   assert.equal(parseVersion(VERSION).signaturesAt, "2026-11-05T08:26:19.000Z");
+  assert.equal(parseVersion(clamdVersion(new Date("2026-03-01T09:05:07Z"))).signaturesAt, "2026-03-01T09:05:07.000Z", "the stand-in's format is what clamd prints");
   assert.equal(parseVersion("ClamAV 1.5.4").signaturesAt, null);
   assert.throws(() => settings({ PLATFORM_URL: "http://example.com", FILE_SCANNER_SECRET: SECRET }), /https origin/);
   assert.throws(() => settings({ PLATFORM_URL: "https://example.com", FILE_SCANNER_SECRET: "short" }), /at least 32/);

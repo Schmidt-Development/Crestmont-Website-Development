@@ -167,7 +167,12 @@ test("[PAY-004] LG-05 a declined card is refused by Stripe and the subscription 
   const p = await signIn(customer());
   await startCheckout(p);
   await fillCard(p, "4000 0000 0000 0002"); // Stripe's published "generic decline" test card
-  await p.waitForFunction(() => /declined/i.test(document.body.innerText), undefined, { timeout: 45_000 });
+  // Polled through a locator: evaluating code in the page is refused by a strict CSP (tests/e2e harness rule, TEST-002).
+  const end = Date.now() + 45_000;
+  while (!/declined/i.test((await p.locator("body").innerText().catch(() => "")) as string)) {
+    if (Date.now() > end) assert.fail("Stripe did not show the decline within 45s");
+    await p.waitForTimeout(1_000);
+  }
   assert.match(p.url(), /^https:\/\/checkout\.stripe\.com\//, "Stripe keeps the customer on Checkout after a decline");
   await p.goto(projectUrl());
   assert.match(await text(p, "[data-launch-gate]"), /Pending action: Activate your maintenance subscription/);
@@ -232,7 +237,7 @@ test("[EMAIL-001] EM-02 a test lead through the public lead API triggers the int
 
 async function waitForDraft(p: Page, what: string): Promise<string> {
   await p.locator("[data-ai-draft-button]").first().click();
-  await p.waitForFunction(() => { const s = document.querySelector("[data-ai-draft-status]"); return !!s && !s.hasAttribute("hidden"); }, undefined, { timeout: 15_000 });
+  await p.locator("[data-ai-draft-status]").first().waitFor({ state: "visible", timeout: 15_000 }); // the request is acknowledged at once
   const t0 = Date.now();
   for (;;) {
     const body = (await p.locator("#reply textarea[name=body]").inputValue()) as string;
