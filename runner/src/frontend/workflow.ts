@@ -18,7 +18,8 @@ import type { BuildResult, BuildSandbox } from "./build.ts";
 import { describeIngest, ingestArtifact } from "./ingest.ts";
 import type { ArtifactSource, IngestResult, ScanGate } from "./ingest.ts";
 import { baselineFrom, describeImport, readImportReport, verifyAgainstBaseline } from "./import.ts";
-import { describePinned, pinExternalAssets } from "./pin-assets.ts";
+import { describePinned, discoverRefs, pinExternalAssets } from "./pin-assets.ts";
+import { isVisual, visualImpact } from "./external-assets.ts";
 import type { PinOutcome, ResolveAssets } from "./pin-assets.ts";
 import type { ImportReport, VerifyResult } from "./import.ts";
 import type { DesignBaseline } from "./design-lock.ts";
@@ -113,6 +114,22 @@ export async function importFrontend(o: {
       out.problems.push(describePinned(out.assets));
     } catch (err) {
       out.problems.push(`the external assets could not be resolved: ${String((err as Error)?.message ?? err).slice(0, 300)}`);
+    }
+  } else {
+    // NO RESOLVER AT ALL, which must not pass quietly.
+    //
+    // Acquisition needs the control plane, so a caller can legitimately have none. Discovery does not: it reads
+    // the files. The platform refuses approval of a baseline that has a REFUSED asset row, and with no attempt
+    // there are no rows -- so "nobody tried" was indistinguishable from "nothing was needed", and a law firm
+    // design whose typography and four photographs come from CDNs measured in a fallback face with no images and
+    // was approved. Say it here, where the import's own problems are read.
+    const unacquired = discoverRefs(o.repo).filter((r) => isVisual(r.kind));
+    if (unacquired.length) {
+      out.problems.push(
+        `${unacquired.length} external visual dependenc${unacquired.length === 1 ? "y was" : "ies were"} NOT acquired, because this import was given no way to fetch them: ` +
+        unacquired.slice(0, 6).map((r) => `${r.url} (${visualImpact(r.kind, r.url)})`).join("; ") +
+        `. The design was measured without them, so this measurement is not what a visitor would see.`,
+      );
     }
   }
 

@@ -39,7 +39,7 @@
 // Exit 0 only when every check that RAN passed and nothing was skipped silently. A gate that could not be
 // evaluated is reported as "undetermined" and fails the run: a check that did not happen is not a check that
 // passed.
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomBytes, createHash } from "node:crypto";
@@ -65,6 +65,7 @@ import { assertIsolation, createWorkspace } from "../runner/src/workspace.ts";
 import { JobSandbox, cliDockerExecutor } from "../runner/src/sandbox.ts";
 import { importFrontend } from "../runner/src/frontend/workflow.ts";
 import { runDesignLockedJob, writeEvidence, MAX_REPAIR_CYCLES } from "../runner/src/frontend/design-locked-job.ts";
+import { collectSnapshot } from "../runner/src/orchestrator/snapshot.ts";
 import { LocalProvider } from "../runner/src/providers/local.ts";
 import { RunTracker, StopSwitch } from "../runner/src/agent.ts";
 import { validateManifest, completeness, describeContract } from "../runner/src/frontend/integration-manifest.ts";
@@ -88,7 +89,15 @@ const fixtureArg = opt("--fixture", "northgate-clinic");
 const FIXTURE = path.isAbsolute(fixtureArg)
   ? fixtureArg
   : path.resolve(import.meta.dirname, "../runner/test/fixtures", FIXTURES[fixtureArg] ?? fixtureArg);
-if (!existsSync(path.join(FIXTURE, "package.json"))) { console.error(`no frontend artifact at ${FIXTURE}`); process.exit(2); }
+// A frontend is a package.json OR an HTML document. It used to be package.json alone, which quietly excluded the
+// shape the Founder actually uploads -- one self-contained .html file, no manifest, no build -- so the static
+// path was never once exercised end to end by this script. That is the same path whose rebuild was broken.
+const hasPackage = existsSync(path.join(FIXTURE, "package.json"));
+const hasHtml = existsSync(FIXTURE) && readdirSync(FIXTURE).some((n) => /[.]html?$/i.test(n));
+if (!hasPackage && !hasHtml) {
+  console.error(`no frontend artifact at ${FIXTURE}: expected a package.json or at least one .html document`);
+  process.exit(2);
+}
 
 const CLAMD_PORT = Number(opt("--clamd-port", process.env.CLAMD_TEST_PORT ?? "3310"));
 const MAX_TURNS = Number(opt("--turns", "60"));
@@ -284,6 +293,18 @@ async function main(): Promise<number> {
   const dockerEnvOnly: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) dockerEnvOnly[k] = v;
   const executor = cliDockerExecutor(cfg.jobSandbox.dockerBin, dockerEnvOnly);
+
+  // The worker and the signed control-plane client are created HERE, before the import, because acquiring the
+  // design's external assets is a control-plane call: the measurement container has no network, so the platform
+  // fetches each permitted asset and the runner pins the bytes it is given. This used to sit after the claim, so
+  // the import had no resolver, no asset was ever attempted, and a law firm design whose typography and four
+  // photographs come from CDNs was measured in a fallback face with no images -- and approved, because the
+  // approval gate only refuses assets it has a REFUSED row for and there were no rows at all.
+  const worker = await BW.registerWorker({ db: t.db, userId: owner.id }, { label: "Node 1 (design-locked-e2e)", maxActiveProjects: 1 });
+  const client = new ControlPlaneClient({
+    baseUrl: BASE, secret: RUNNER_SECRET, runnerId: cfg.runnerId, fetchImpl: appFetch, logger,
+    worker: { id: worker.id, key: worker.enrollmentKey },
+  });
   const pre = await JobSandbox.preflight(cfg.jobSandbox, executor);
   if (pre.length) { check("SANDBOX-READY", "undetermined", `the sandbox is not usable: ${pre.join("; ")}`); return finish(1); }
   check("SANDBOX-READY", "pass", `sandbox image ${cfg.jobSandbox.image} is usable`);
@@ -294,6 +315,19 @@ async function main(): Promise<number> {
   try {
     imported = await importFrontend({
       archive, source: "customer-upload", repo: importWs.repo, sandbox: importSandbox,
+      // The same resolver runner/src/job.ts gives the real build, pointed at this artifact.
+      resolveAssets: async (refs) => {
+        const out: { url: string; kind: string; status: string; why?: string | null; base64?: string | null; localPath?: string | null; contentType?: string | null }[] = [];
+        for (let i = 0; i < refs.length; i += 10) {
+          const answer = await client.resolveFrontendAssets({
+            artifactId: artifact.id,
+            assets: refs.slice(i, i + 10).map((r) => ({ url: r.url, kind: r.kind, referencedBy: r.referencedBy })),
+          });
+          if (!answer) break;
+          out.push(...(answer.assets as typeof out));
+        }
+        return out as never;
+      },
       approvedBy: owner.id,
       // The real scan verdict from above, not an assumption: an 'upload' source requires a clean scan.
       scan: { status: "clean", scannedAt: new Date().toISOString(), engine: cycle.engine ?? "ClamAV", fileId: artifact.file_id },
@@ -314,6 +348,23 @@ async function main(): Promise<number> {
   const baseline = imported.baseline;
   check("IMPORT-MEASURED", "pass",
     `${imported.report.routes.length} route(s), ${imported.report.interactions.length} interaction(s), ${baseline.signatures.length} signature(s); design fingerprint ${baseline.fingerprint.slice(0, 16)}…`);
+
+  // THE DESIGN'S EXTERNAL VISUAL DEPENDENCIES (release-critical). A design whose typography and photographs come
+  // from CDNs must be measured WITH them: the measurement container has no network, so the platform fetches each
+  // permitted asset under its SSRF rules and the runner pins the bytes into the artifact. Nothing asserted this
+  // before, and with no resolver wired the law firm artifact measured in a fallback face with no images -- and was
+  // approved, because the approval gate only refuses assets it holds a REFUSED row for and there were none.
+  const pin = imported.assets;
+  if (!pin || !pin.assets.length) {
+    check("ASSETS-ACQUIRED", "pass", "this design references no external assets: everything it needs is inside the archive");
+  } else {
+    const pinned = pin.assets.filter((a) => a.status === "pinned");
+    const kb = Math.round(pinned.reduce((n, a) => n + (a.bytes ?? 0), 0) / 1024);
+    expect("ASSETS-ACQUIRED", pin.missing.length === 0,
+      `${pinned.length} of ${pin.assets.length} external asset(s) acquired and pinned into the artifact (${kb} KB, ${pin.rounds} round(s), ${pin.rewritten.length} file(s) rewritten), so the design is measured with them`,
+      `${pin.missing.length} visual dependenc(ies) could not be acquired, so this baseline is materially incomplete: ` + pin.missing.map((m) => `${m.kind} ${m.url}: ${m.why}`).join("; "));
+    check("ASSETS-KINDS", "pass", pin.assets.map((a) => `${a.kind} ${a.status} ${a.url.slice(0, 70)}`).join(" | ").slice(0, 900));
+  }
 
   const needsBackend = imported.report.interactions.filter((i) => i.needsBackend).length;
   const undetermined = imported.report.interactions.filter((i) => i.undetermined === true).length;
@@ -346,6 +397,15 @@ async function main(): Promise<number> {
     "a design-locked project was allowed to generate its own design");
 
   // The manifest is a contract, and it is checked before any model is asked to satisfy it.
+  // The contract this script checks is a FIXTURE one, written beside the artifact. In production Model A drafts
+  // it and the platform validates it; this script does not exercise that. An artifact with no fixture contract --
+  // the Founder's own uploads have none -- therefore has nothing to check here, and that is said rather than
+  // thrown: the run used to die with ENOENT after a clean import and approval, losing the evidence it had earned.
+  if (!existsSync(path.join(FIXTURE, "integration-manifest.json"))) {
+    check("MANIFEST-VALID", "undetermined",
+      `no integration-manifest.json beside this artifact, so no contract was checked here. In production Model A authors it; this script reads a fixture one.`);
+    return finish(1);
+  }
   const manifest = JSON.parse(readFileSync(path.join(FIXTURE, "integration-manifest.json"), "utf8"));
   manifest.designFingerprint = baseline.fingerprint;
   manifest.artifactSha = artifact.sha256;
@@ -363,7 +423,6 @@ async function main(): Promise<number> {
 
   // ── 6. the runner claims the job over its real signed protocol ────────────────────────────────────────────
   rule("5. the runner claims the build, and the platform hands it the approved design");
-  const worker = await BW.registerWorker({ db: t.db, userId: owner.id }, { label: "Node 1 (design-locked-e2e)", maxActiveProjects: 1 });
   const jobId = newId("bld");
   const at = new Date().toISOString();
   await t.db.prepare(
@@ -376,10 +435,6 @@ async function main(): Promise<number> {
     `the queued build is a design-locked build (phase ${applied.phase}, baseline ${applied.baselineId})`,
     `the build was not marked design-locked: ${JSON.stringify(applied)}`);
 
-  const client = new ControlPlaneClient({
-    baseUrl: BASE, secret: RUNNER_SECRET, runnerId: cfg.runnerId, fetchImpl: appFetch, logger,
-    worker: { id: worker.id, key: worker.enrollmentKey },
-  });
   const claimed = await client.claim(capabilities(cfg));
   if (!claimed.job) { check("RUNNER-CLAIMED", "fail", `the runner claimed nothing: ${JSON.stringify(claimed).slice(0, 300)}`); return finish(1); }
   expect("RUNNER-CLAIMED", claimed.job.id === jobId && !!claimed.job.designLocked,
@@ -465,6 +520,129 @@ async function main(): Promise<number> {
   check("BUILD-VERDICT", dl.ok ? "pass" : "fail",
     dl.ok ? `all three gates passed: ${dl.summary.slice(0, 400)}`
           : `the build did not pass its gates (stopped at ${dl.failedAt ?? "verification"}): ${dl.problems.join("; ").slice(0, 500)}`);
+
+
+  // ── 8. the finished website reaches the customer who bought it ────────────────────────────────────────────
+  //
+  // Everything above proves a website was BUILT. The requirement is that a customer can OPEN it, and this script
+  // has never gone that far: it called runDesignLockedJob directly and never told the platform the outcome, so no
+  // revision was stored, the job never reached ready_for_review, and delivery -- which needs both -- was
+  // unreachable. The two calls below are the same two signed endpoints runner/src/job.ts ends in, so the platform
+  // learns about this build exactly as it would in production.
+  rule("7. the finished website reaches the customer who bought it");
+
+  if (!dl.ok) {
+    check("DELIVER-REACHED", "undetermined",
+      `the build did not pass its gates, so there is no finished website to deliver: ${dl.problems.join("; ").slice(0, 300)}`);
+    return finish(1);
+  }
+
+  const snap = collectSnapshot(buildWs.repo);
+  const storedRev = await client.storeRevision(claimed.job, {
+    cycle: dl.cycles.length, phase: "final", commit: null, isBest: true, files: snap.files,
+  });
+  expect("DELIVER-REVISION-STORED", storedRev.stored > 0,
+    `the finished website is stored as a revision: ${storedRev.stored} file(s), ${Math.round(snap.bytes / 1024)} KB`,
+    `no website snapshot was stored, so there is nothing a customer could be shown: ${JSON.stringify(storedRev).slice(0, 200)}`);
+
+  await client.complete(claimed.job, {
+    outcome: "ready_for_review", runCostUsd: 0, turns: 0, sessionId: "design-locked-e2e",
+    sourceRepo: "", sourceBranch: "", sourceCommit: "", previewUrl: null,
+    report: dl.summary.slice(0, 2000),
+  });
+  const jobState = await t.db.prepare(`SELECT state FROM build_jobs WHERE id = ?`).bind(jobId).first<{ state: string }>();
+  expect("DELIVER-READY-FOR-REVIEW", jobState?.state === "ready_for_review",
+    `the build reached a real ready_for_review state over the signed channel`,
+    `the build is in "${jobState?.state ?? "(missing)"}", not ready_for_review, so it is not a finished deliverable`);
+
+  // An EXISTING purchased project of an EXISTING customer -- the website is assigned to it, never a new project.
+  const buyer = await createCustomer(t.db, "owner@riverbendlaw.test", "Riverbend Law");
+  const stranger = await createCustomer(t.db, "hello@unrelated.test", "Unrelated Ltd");
+  const seedFor = async (orgId: string, name: string) => {
+    const id = newId("prj");
+    const at = new Date().toISOString();
+    await t.db.prepare(
+      `INSERT INTO projects (id, organization_id, name, status, revision_allowance, payment_schedule, created_at, updated_at)
+       VALUES (?, ?, ?, 'development', 2, 'upfront', ?, ?)`,
+    ).bind(id, orgId, name, at, at).run();
+    return id;
+  };
+  const buyerProject = await seedFor(buyer.organizationId, "Riverbend Law website (purchased)");
+  const strangerProject = await seedFor(stranger.organizationId, "Unrelated Ltd website");
+  const projectsBefore = await t.db.prepare(`SELECT COUNT(*) AS n FROM projects`).first<{ n: number }>();
+
+  const assignRes = await staff.post(`/staff/builds/${jobId}/deliver`, { projectId: buyerProject });
+  expect("DELIVER-ASSIGNED", assignRes.status === 303 || assignRes.status === 302,
+    `the staff route assigned the finished website to the existing project ${buyerProject} (${assignRes.status})`,
+    `the assignment was refused: ${assignRes.status} ${(await assignRes.clone().text()).slice(0, 300)}`);
+
+  const delivery = await t.db.prepare(
+    `SELECT id, project_id, organization_id, status, visible_at FROM website_deliveries WHERE job_id = ? AND superseded_at IS NULL`,
+  ).bind(jobId).first<{ id: string; project_id: string; organization_id: string; status: string; visible_at: string | null }>();
+  expect("DELIVER-ON-RIGHT-PROJECT",
+    !!delivery && delivery.project_id === buyerProject && delivery.organization_id === buyer.organizationId,
+    `the delivery is recorded against the buyer's project and organisation`,
+    `the delivery row is wrong: ${JSON.stringify(delivery)}`);
+
+  const projectsAfter = await t.db.prepare(`SELECT COUNT(*) AS n FROM projects`).first<{ n: number }>();
+  expect("DELIVER-NO-DUPLICATE-PROJECT", Number(projectsAfter?.n) === Number(projectsBefore?.n),
+    `no project was created by delivering: still ${projectsAfter?.n}`,
+    `delivery created ${Number(projectsAfter?.n) - Number(projectsBefore?.n)} project(s); it must assign to the existing one`);
+
+  // Visibility is its own decision, so it is its own request.
+  expect("DELIVER-NOT-YET-VISIBLE", !delivery?.visible_at,
+    `assigning did not by itself show the website to the customer`,
+    `the customer could see it the moment it was assigned, which is not a decision anybody made`);
+  const visRes = await staff.post(`/staff/builds/${jobId}/deliver/${delivery?.id}/visible`, {});
+  expect("DELIVER-MADE-VISIBLE", visRes.status === 303 || visRes.status === 302,
+    `a second, separate decision made it visible to the customer (${visRes.status})`,
+    `making it visible failed: ${visRes.status} ${(await visRes.clone().text()).slice(0, 300)}`);
+
+  // ── the customer's own portal ─────────────────────────────────────────────────────────────────────────────
+  const buyerClient = t.client();
+  await buyerClient.login(buyer.email);
+  const portal = await buyerClient.get(`/portal/projects/${buyerProject}`);
+  const portalHtml = await portal.text();
+  const hasPreview = portalHtml.includes("/build-preview/");
+  expect("PORTAL-SHOWS-WEBSITE", portal.status === 200 && hasPreview,
+    `the buyer's portal page offers the finished website`,
+    `the portal did not show a website (${portal.status}): ${portalHtml.slice(0, 300)}`);
+
+  // Not a screenshot, not a mock-up, not a localhost address: the real stored site, served and read back.
+  const previewAt = portalHtml.indexOf("/build-preview/");
+  let previewPath = "";
+  if (previewAt >= 0) {
+    const rest = portalHtml.slice(previewAt);
+    const stop = rest.search(/["'\s>]/);
+    previewPath = (stop > 0 ? rest.slice(0, stop) : rest).split("&amp;").join("&");
+  }
+  const served = previewPath ? await buyerClient.get(previewPath) : null;
+  const servedBody = served ? await served.text() : "";
+  expect("PORTAL-SERVES-REAL-WEBSITE", !!served && served.status === 200 && /<html/i.test(servedBody),
+    `the portal's own link serves the real stored website (${served?.status}, ${servedBody.length} bytes from ${previewPath.slice(0, 60)})`,
+    `the portal link did not serve a working website: ${served?.status ?? "no link found"} ${servedBody.slice(0, 200)}`);
+  expect("PORTAL-IS-THE-APPROVED-DESIGN", /northgate/i.test(servedBody),
+    `the served website is the approved frontend, not a placeholder`,
+    `the served page does not look like the approved design: ${servedBody.slice(0, 300)}`);
+
+  // And nobody else's.
+  const strangerClient = t.client();
+  await strangerClient.login(stranger.email);
+  const theirOwn = await strangerClient.get(`/portal/projects/${strangerProject}`);
+  const theirOwnHtml = await theirOwn.text();
+  expect("PORTAL-ISOLATED-OWN-PAGE", theirOwn.status === 200 && !theirOwnHtml.includes("/build-preview/"),
+    `an unrelated customer's own project shows no website`,
+    `an unrelated customer was offered a website on their own project: ${theirOwnHtml.slice(0, 300)}`);
+  const crossRead = await strangerClient.get(`/portal/projects/${buyerProject}`);
+  expect("PORTAL-ISOLATED-CROSS-READ", crossRead.status === 403 || crossRead.status === 404,
+    `an unrelated customer cannot open the buyer's project at all (${crossRead.status})`,
+    `an unrelated customer could read the buyer's project: ${crossRead.status}`);
+
+  writeFileSync(path.join(OUT, "delivery.json"), JSON.stringify({
+    jobId, buyerProject, buyerOrganization: buyer.organizationId, deliveryId: delivery?.id,
+    revision: { attempt: claimed.job.attempt, cycle: dl.cycles.length, files: storedRev.stored },
+    previewPath, servedBytes: servedBody.length,
+  }, null, 2));
 
   return finish(ledger.some((l) => l.outcome !== "pass") ? 1 : 0);
 }

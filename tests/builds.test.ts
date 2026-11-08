@@ -1303,3 +1303,48 @@ test("[AIB-QUALITY] a project keeps its starter: revisions of a pre-V2 website c
   assert.equal(rev.quality, undefined);
   assert.match(await (await t.oc.get(`/staff/builds/${rev.id}`)).text(), /Legacy website/);
 });
+
+test("[AIB-QUEUE-ADVANCE] four slots hold, the fifth job waits, and it starts by itself when a slot frees", async () => {
+  // The Founder's completion criterion, which nothing asserted: four concurrent builds, the rest QUEUED, and a
+  // waiting build starting on its own when a slot opens. [AIB-003] proves the cap mechanism refuses an over-cap
+  // claim, but it sets the cap to 1 and stops at the refusal -- it never shows the queue advancing, which is the
+  // half that decides whether a full node drains or stalls.
+  const t = await app();
+  const cap = (await t.db.prepare(`SELECT max_concurrent AS n FROM build_settings WHERE id = 1`).first<{ n: number }>())!.n;
+  assert.equal(cap, 4, "the shipped configuration is four concurrent builds (migration 0092)");
+
+  for (let i = 0; i < 5; i++) await queuedProject(t);
+
+  // Four runners each get a build; the fifth is told the node is full rather than being handed a fifth build.
+  const claimed = [];
+  for (const r of ["r1", "r2", "r3", "r4"]) {
+    const c = await runner(t, "claim", { runnerId: r });
+    assert.ok(c.json.job, `runner ${r} should have been given a build: ${JSON.stringify(c.json)}`);
+    claimed.push(c.json.job);
+  }
+  const active = async () => (await t.db.prepare(
+    `SELECT COUNT(*) AS n FROM build_jobs WHERE state IN ('preparing','building','verifying')`).first<{ n: number }>())!.n;
+  const queued = async () => (await t.db.prepare(
+    `SELECT COUNT(*) AS n FROM build_jobs WHERE state = 'queued'`).first<{ n: number }>())!.n;
+
+  assert.equal(await active(), 4, "four builds are active");
+  assert.equal(await queued(), 1, "the fifth is queued, not running and not dropped");
+  assert.deepEqual((await runner(t, "claim", { runnerId: "r5" })).json, { job: null, reason: "at_capacity" },
+    "a fifth concurrent build is refused while the node is full");
+
+  // A slot frees. Nothing is re-queued by hand and no setting is touched.
+  const done = await runner(t, "complete", {
+    jobId: claimed[0].id, leaseToken: claimed[0].leaseToken, outcome: "ready_for_review",
+    runCostUsd: 0, turns: 1, sessionId: "queue-advance", sourceRepo: "", sourceBranch: "", sourceCommit: "",
+    previewUrl: null, report: "queue advancement check",
+  });
+  assert.equal(done.status, 200, JSON.stringify(done.json));
+  assert.equal(await active(), 3, "the finished build no longer occupies its slot");
+
+  // The waiting build is now handed out on the next claim, by the ordinary path.
+  const next = await runner(t, "claim", { runnerId: "r5" });
+  assert.ok(next.json.job, `the queued build did not start when a slot freed: ${JSON.stringify(next.json)}`);
+  assert.ok(!claimed.some((j) => j.id === next.json.job.id), "it is the waiting build, not one already running");
+  assert.equal(await active(), 4, "the node is back to four active builds");
+  assert.equal(await queued(), 0, "and nothing is left waiting");
+});
