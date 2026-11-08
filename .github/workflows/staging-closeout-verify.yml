@@ -1,0 +1,108 @@
+name: Staging closeout verification (launch gate with real Stripe test mode, email, AI drafts)
+
+# Production-closeout verification against the ALREADY-DEPLOYED staging Worker, without redeploying:
+#   - the maintenance launch gate with real Stripe TEST-mode Checkout and the real signed webhooks, on a per-run test
+#     customer and project (scripts/staging-closeout-fixture.ts) -- never a demo customer's data;
+#   - a real internal notification through Resend, followed in staging D1 from queued to accepted to delivered;
+#   - AI draft replies on a support ticket and a customer conversation from the configured provider;
+#   - what the receptionist and Integrations pages report.
+# Stripe's published test cards only (the session is asserted to be cs_test_); nothing can charge a card, place a call
+# or mail a customer (the test customer's address is @example.com, which the platform never mails). Read the results
+# from the "Read what staging recorded" step: PASS / FAIL / PENDING / BLOCKED with evidence.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: staging
+    # Job-level, after the `if:` (CREST-NEW-007). The same group as the staging deploy: this run applies access SQL
+    # and writes staging rows, so it waits for a deploy (and its Owner sign-ins) to finish first.
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+      STAGING_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+
+      # The Cloudflare token lives on the steps that need it, never at job level: the browser step runs third-party
+      # packages and must not hold it (F-24, tests/workflow-security.test.ts).
+      - name: Resolve the staging D1 database id (same injection as deploy-staging.yml, CREST-GAP-065)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          id=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-staging");process.stdout.write(r?r.uuid:"")})')
+          [ -n "$id" ] || { echo "::error::The crestmont-staging D1 database was not found."; exit 1; }
+          node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-staging", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
+          grep -q "$id" wrangler.toml && echo "Staging D1: $id"
+
+      - name: Apply staging access (same epoch, no rotation, so the same derived passwords)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCESS_EPOCH: "3"
+          MFA_ENCRYPTION_KEY: ${{ secrets.STAGING_MFA_ENCRYPTION_KEY }}
+        run: node --no-warnings scripts/staging-access.ts --url "$STAGING_URL" --out access
+
+      - name: Create this run's launch-gate test customer and project (staging only; TEST DATA)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/staging-closeout-fixture.ts --environment staging --url "$STAGING_URL" --out access/closeout-fixture.json
+
+      - name: Launch gate with real Stripe test mode, internal email, AI drafts and status pages (browser)
+        env:
+          E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+          E2E_ACCOUNTS_FILE: access/demo-accounts.md
+          E2E_CLOSEOUT_FIXTURE: access/closeout-fixture.json
+          E2E_CLOSEOUT_RUN_FILE: access/closeout-run.json
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          set +e
+          node --no-warnings --test --test-concurrency=1 tests/e2e/staging-closeout.e2e.ts 2>&1 | tee closeout-e2e.log
+          rc=${PIPESTATUS[0]}
+          # A SKIPPED check is UNDETERMINED, which is not a pass.
+          skipped=$(grep -cE '^ok [0-9]+ - .* # SKIP' closeout-e2e.log || true)
+          if [ "${skipped:-0}" -gt 0 ]; then echo "::error title=Closeout::${skipped} check(s) were skipped"; rc=1; fi
+          grep -E '^# (tests|pass|fail|skipped) ' closeout-e2e.log || true
+          exit "$rc"
+
+      - name: Read what staging recorded (Resend, Stripe, AI jobs, integrations, calls)
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          mkdir -p evidence
+          node --no-warnings scripts/staging-closeout-check.ts --run access/closeout-run.json --out evidence/staging-closeout.json --wait-ms 180000
+
+      - name: Upload the evidence (verdicts only; no credentials, no email bodies)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: staging-closeout
+          path: evidence/staging-closeout.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Remove the credential files
+        if: always()
+        run: rm -f access/private.json access/access.json access/demo-accounts.md access/README.md access/closeout-fixture.json access/closeout-run.json
