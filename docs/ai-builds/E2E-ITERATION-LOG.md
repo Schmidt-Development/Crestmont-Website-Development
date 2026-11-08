@@ -18,6 +18,8 @@ are resolved in round two).
 | 6 | `d108065` | `loop detected: run_command repeated 4x` | `git log` ×6 then `ls .git` ×4: the workspace is a repository with **no commits** (the design-locked path never makes one), so git fails the same way in production | the prompt says there is no history to read; the e2e initialises the repo like the runner | `[DLJ-*]`, `[INT-*]` pass |
 | 7 | `d108065` | `GATE-VISUAL` — approved `973c825990b3` vs measured `b2dd67f23666` | **the measurement is not deterministic**: four images carry `loading="lazy"` and part of the page is written by its own JavaScript, so `waitUntil: load` + `fonts.ready` + a flat 250ms measured one of two resting states, 12207px apart | a bounded `settle()` before every measurement and screenshot: images made eager and scrolled past, awaited and decoded, fonts awaited, document height held still across two samples | two imports of the same bytes must agree on the fingerprint |
 
+| 8 | `bdb9c81` | `GATE-VISUAL` — approved `b2dd67f23666` vs measured `973c825990b3` | the gate compared the build's measurement against the baseline measured during **import** — a different container — so an environment difference was permanent drift blamed on Model B. Each path was now individually deterministic, which is what made the systematic difference visible | the gate compares against this build's own measurement of the unmodified artifact (`before`, already passed in and used only for state changes); divergence from the approved design stays reported by the drift check that owns that question | `[DLJ-17]` |
+
 ## Results by iteration
 
 **Iteration 3** (`876a33f`) — 28 passed, 2 failed, 1 undetermined.
@@ -38,6 +40,15 @@ against the running application**, the second time in five runs that the generat
 `GATE-VISUAL` failed, and its own message gave the cause away: it had measured `b2dd67f23666`, which is the value
 iteration 3's import produced from these same bytes. Both sides pinned 10 of 10 assets, 1359 KB, so the asset set
 was identical and what differed was the rendering itself.
+
+**Iteration 6** (`bdb9c81`) — 28 passed, 2 failed, 1 undetermined.
+Model A accepted on attempt 1 (1 operation, 5 criteria, 5 probes). Model B: 2 cycles, 8 file changes.
+`GATE-CONFORMANCE` passed. **`GATE-FUNCTIONAL` passed — 9 contract checks against the running application**, the
+third working backend in six runs. `GATE-VISUAL` failed with approved `b2dd67f23666` against measured
+`973c825990b3` — the same two values as iteration 5, with the same 12207px / 8616px deltas. Each measurement path
+was deterministic by now, so the difference was systematic between import and build, which is what led to the
+gate fix above. Eliminated along the way, cheaply and then reverted: the git repository in the build workspace was
+**not** the cause — an import with git initialised still measured `b2dd67f236668efb`.
 
 ## Standing observations
 

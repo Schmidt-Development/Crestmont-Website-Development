@@ -227,6 +227,26 @@ export function validateManifest(
       reject("expect-change", `${where} must say whether making it work changes the page's content ("content") or not ("none")`, op.id);
     }
 
+    // AN OPERATION THAT PUTS SERVER DATA ON A PAGE CHANGES THAT PAGE.
+    //
+    // `data-read` and `search` exist to render something the backend returns, so "none" is a contradiction: the
+    // page shows figures, results, a list, where before it showed a placeholder or nothing. The visual gate reads
+    // these declarations to tell an authorised content change from design drift, and an operation that denies its
+    // own effect makes the gate report the change as undeclared drift -- which is Model B's work being refused for
+    // doing exactly what the contract asked.
+    //
+    // Measured: a law firm contract declared `firm-figures-read` on the index page, kind `data-read`, serving
+    // GET /api/firm-figures, with expectChange "none". Cycle 2 passed the visual gate with no server; cycle 3 added
+    // the server, the page rendered live figures, and the gate failed with "the rendering changed but nothing in
+    // the integration manifest said this page would change". Both gates had passed, never together.
+    if ((op.kind === "data-read" || op.kind === "search") && op.expectChange === "none") {
+      reject("expect-change-contradicts-kind",
+        `${where} is a ${op.kind} operation, which exists to put data from the backend onto the page, so making it work `
+        + `changes what that page renders: expectChange must be "content". Declaring "none" tells the visual gate the `
+        + `page will look the same, and the gate then reports the data appearing as undeclared design drift.`,
+        op.id);
+    }
+
     // An operation with no acceptance criterion cannot be verified, so it can never honestly be reported done.
     if (!Array.isArray(op.acceptance) || op.acceptance.filter(isStr).length === 0) {
       reject("no-acceptance", `${where} has no acceptance criteria, so there would be no way to tell whether it works`, op.id);

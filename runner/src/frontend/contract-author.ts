@@ -77,7 +77,10 @@ export const CONTRACT_JSON_SCHEMA = {
           element: { type: "string", description: "Copied EXACTLY from the measured interaction inventory." },
           kind: { type: "string", enum: [...OPERATION_KINDS] },
           behaviour: { type: "string", minLength: 20, maxLength: 600 },
-          expectChange: { type: "string", enum: ["content", "none"] },
+          expectChange: {
+            type: "string", enum: ["content", "none"],
+            description: "Does making this work change what the page RENDERS? A data-read or search operation puts data from the backend onto the page, so it is always content: the page shows figures or results where it showed a placeholder or nothing. Declaring none there tells the visual check the page will look the same, and the data appearing is then reported as design drift and refused.",
+          },
           acceptance: { type: "array", minItems: 1, maxItems: 6, items: { type: "string", minLength: 10, maxLength: 300 } },
           dataModel: {
             type: "array",

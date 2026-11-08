@@ -363,3 +363,31 @@ test("[IM-013] a question that prevents nothing does not stop the work it was re
   assert.deepEqual(withoutBlocked(paid).deferred.map((d) => d.id), ["take-deposit"]);
   assert.deepEqual(withoutBlocked(paid).openQuestions, [], "a gap that did stop something is not also listed as harmless");
 });
+
+test("[IM-014] an operation that puts server data on a page cannot deny changing it", () => {
+  // Measured, and it was the last thing standing between the gates: a law firm contract declared
+  // `firm-figures-read` on the index page, kind `data-read`, serving GET /api/firm-figures, with
+  // expectChange "none". Cycle 2 passed the visual gate with no server; cycle 3 added the server, the page
+  // rendered live figures, and the gate failed with "the rendering changed but nothing in the integration
+  // manifest said this page would change". Both gates had passed by then, just never together -- because the
+  // contract told the gate the page would look the same while asking for the thing that changes it.
+  for (const kind of ["data-read", "search"] as const) {
+    const r = valid(manifest([op({ kind, expectChange: "none" })]));
+    assert.equal(r.ok, false, `${kind} with expectChange "none" must be refused`);
+    assert.ok(codes(r.problems).includes("expect-change-contradicts-kind"), codes(r.problems).join(","));
+    const said = r.problems.find((p) => p.code === "expect-change-contradicts-kind")!;
+    assert.match(said.detail, /expectChange must be "content"/, said.detail);
+    assert.match(said.detail, /undeclared design drift/, "and it says what goes wrong, not just that it is wrong");
+  }
+
+  // "content" is accepted for the same kinds, so the bar is reachable.
+  for (const kind of ["data-read", "search"] as const) {
+    const r = valid(manifest([op({ kind, expectChange: "content" })]));
+    assert.ok(!codes(r.problems).includes("expect-change-contradicts-kind"), codes(r.problems).join(","));
+  }
+
+  // And a kind that genuinely need not change the page keeps both choices.
+  const inert = valid(manifest([op({ kind: "form-submit", expectChange: "none" })]));
+  assert.ok(!codes(inert.problems).includes("expect-change-contradicts-kind"),
+    "a form submission may legitimately leave the page as it was");
+});
