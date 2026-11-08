@@ -63,8 +63,23 @@ jobs:
           MFA_ENCRYPTION_KEY: ${{ secrets.STAGING_MFA_ENCRYPTION_KEY }}
         run: node --no-warnings scripts/staging-access.ts --url "$STAGING_URL" --out access
 
+      # A finished build with a real stored snapshot, so the AI-build delivery E2E tests DELIVERY without depending
+      # on the AI builder having run (staging had none, and [WDE-02] failed for that reason alone). Synthetic and
+      # labelled as such everywhere, including on every page of the website; it is NOT evidence that the builder
+      # works. Idempotent: fixed ids, INSERT OR IGNORE, the same R2 objects. Staging only: the script refuses any
+      # other environment or URL and writes only to crestmont-staging / crestmont-files-staging. It verifies the
+      # result through the deployed Worker with a real signed capability before the browser tests start.
+      - name: Ensure the synthetic website delivery fixture (staging only; not AI output)
+        id: fixture
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node --no-warnings scripts/staging-delivery-fixture.ts --apply --environment staging --url "$STAGING_URL"
+
       - name: Deliver a finished AI build and an externally hosted website to an existing customer project
         env:
+          E2E_DELIVERY_FIXTURE_JOB: ${{ steps.fixture.outputs.job }}
           E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
           E2E_ACCOUNTS_FILE: access/demo-accounts.md
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
