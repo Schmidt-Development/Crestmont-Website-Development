@@ -19,6 +19,8 @@ import * as refunds from "../services/refunds.ts";
 import * as lifecycle from "../services/maintenance-lifecycle.ts";
 import * as fin from "../services/finance.ts";
 import * as docs from "../services/finance-documents.ts";
+import { formatDocNumber, invoiceLabel, receiptLabel } from "../services/document-numbers.ts";
+import { productService } from "../services/receipts.ts";
 import { createStripeMilestoneInvoice, stripeInvoicer, stripeInvoiceBlocker, STRIPE_INVOICE_KINDS } from "../services/stripe-invoices.ts";
 import { audit } from "../services/security.ts";
 import { requireVerifiedForPayment } from "./verify-gate.ts";
@@ -60,7 +62,7 @@ ${!ctx.payments.configured ? alert("warn", `${NOT_CONFIGURED} Open invoices cann
 ${formErrors(errors)}
 <div class="kpis">${kpi("Open invoices", open.length, open.length ? formatCents(open.reduce((s, i) => s + i.amount_cents, 0)) + " due" : "Nothing due")}${kpi("Paid to date", formatCents(b.payments.filter((p) => p.status !== "failed").reduce((s, p) => s + p.amount_cents, 0)), b.refunds.some((r) => r.status === "issued") ? `${formatCents(b.refunds.filter((r) => r.status === "issued").reduce((s, r) => s + r.amount_cents, 0))} refunded` : undefined)}${kpi("Active plans", b.subscriptions.filter((s) => ["active", "trialing", "past_due"].includes(s.status)).length)}</div>
 <section class="card stack"><h2 style="font-size:1.2rem">Invoices</h2>${table(b.invoices, [
-    { header: "Invoice", cell: (i) => html`<a href="/portal/billing/invoices/${i.id}">${i.description ?? MILESTONE_LABEL[i.milestone_kind ?? ""] ?? i.id}</a>` },
+    { header: "Invoice", cell: (i) => html`<a href="/portal/billing/invoices/${i.id}" data-invoice-number>${invoiceLabel(i.invoice_number)}</a><br><span class="faint">${i.description ?? MILESTONE_LABEL[i.milestone_kind ?? ""] ?? "Website development services"}</span>` },
     { header: "Issued", cell: (i) => formatDate(i.created_at) }, { header: "Status", cell: (i) => badge(i.status) }, { header: "Amount", cell: (i) => formatCents(i.amount_cents), numeric: true },
     { header: "", cell: (i) => html`${needsIntake.has(i.id) ? html`<a class="btn btn--primary btn--sm" href="/portal/billing/invoices/${i.id}/intake" data-testid="invoice-intake-link">Complete website intake</a>`
       : i.status === "open" && canPay && stripeInvoiceLink(i) ? html`<a class="btn btn--primary btn--sm" href="${stripeInvoiceLink(i)!}" rel="noopener">Pay Stripe invoice</a>`
@@ -68,9 +70,10 @@ ${formErrors(errors)}
       <a href="/portal/billing/invoices/${i.id}/pdf" data-pdf>PDF</a>` }],
     { empty: emptyState("No invoices", "Invoices appear here when you buy a package, accept a proposal or reach a payment milestone.", linkButton("See packages", "/pricing", "secondary")) })}</section>
 <section class="card stack"><h2 style="font-size:1.2rem">Receipts</h2>${table(b.payments, [
-    { header: "Date", cell: (p) => formatDate(p.created_at) }, { header: "For", cell: (p) => p.description ?? "Payment" }, { header: "Status", cell: (p) => badge(p.status) }, { header: "Amount", cell: (p) => formatCents(p.amount_cents), numeric: true },
+    { header: "Date", cell: (p) => formatDate(p.created_at) }, { header: "Receipt", cell: (p) => (p.receipt_seq ? receiptLabel(p.receipt_seq) : "—") },
+    { header: "For", cell: (p) => html`${p.description ?? "Payment"}${p.invoice_number ? html`<br><span class="faint">${invoiceLabel(p.invoice_number)}</span>` : ""}` }, { header: "Status", cell: (p) => badge(p.status) }, { header: "Amount", cell: (p) => formatCents(p.amount_cents), numeric: true },
     { header: "", cell: (p) => (p.status !== "failed" ? html`<a href="/portal/billing/receipts/${p.id}">Receipt</a> · <a href="/portal/billing/receipts/${p.id}/pdf">PDF</a>` : "") }], { empty: html`<p class="muted">No payments yet. Payments are recorded when Stripe confirms them.</p>` })}</section>
-<section class="card stack"><h2 style="font-size:1.2rem">Orders</h2>${table(b.orders, [{ header: "Order", cell: (o) => o.id }, { header: "Type", cell: (o) => label(o.kind) }, { header: "Placed", cell: (o) => formatDate(o.created_at) }, { header: "Status", cell: (o) => badge(o.status) }, { header: "Total", cell: (o) => formatCents(o.total_cents), numeric: true }], { empty: html`<p class="muted">No orders yet.</p>` })}</section>
+<section class="card stack"><h2 style="font-size:1.2rem">Orders</h2>${table(b.orders, [{ header: "Order", cell: (o) => productService(o) ?? (o.kind === "quote" ? "Custom website (accepted proposal)" : label(o.kind)) }, { header: "Type", cell: (o) => label(o.kind) }, { header: "Placed", cell: (o) => formatDate(o.created_at) }, { header: "Status", cell: (o) => badge(o.status) }, { header: "Total", cell: (o) => formatCents(o.total_cents), numeric: true }], { empty: html`<p class="muted">No orders yet.</p>` })}</section>
 <section class="card stack"><h2 style="font-size:1.2rem">Maintenance subscriptions</h2>${table(b.subscriptions, [{ header: "Plan", cell: (s) => planName(s.product_id) }, { header: "Status", cell: (s) => badge(s.status) }, { header: "Current period ends", cell: (s) => formatDate(s.current_period_end) }, { header: "Started", cell: (s) => formatDate(s.created_at) }],
     { empty: html`<p class="muted">No maintenance plan. Plans open for purchase once their entitlements are finalized.</p>` })}
 ${b.subscriptions.some((s) => s.status === "past_due") ? alert("error", "A maintenance payment failed. Update your payment method to keep your plan active.") : ""}</section>
@@ -88,8 +91,9 @@ ${textarea({ name: "evidence", label: "Supporting details (optional)", value: re
 async function invoicePage(ctx: AppContext, id: string) {
   const org = requireCustomerOrg(ctx);
   const inv = await customerInvoice(ctx.db, org.organizationId, id);
-  const pays = (await ctx.db.prepare(`SELECT id, amount_cents, status, created_at, stripe_payment_intent_id FROM payments WHERE invoice_id = ? AND organization_id = ? ORDER BY created_at`).bind(inv.id, org.organizationId)
-    .all<{ id: string; amount_cents: number; status: string; created_at: string; stripe_payment_intent_id: string | null }>()).results;
+  const pays = (await ctx.db.prepare(`SELECT p.id, p.amount_cents, p.status, p.created_at, (SELECT r.seq FROM receipts r WHERE r.payment_id = p.id AND p.status <> 'failed' AND p.provider <> 'simulated') AS receipt_seq
+      FROM payments p WHERE p.invoice_id = ? AND p.organization_id = ? ORDER BY p.created_at`).bind(inv.id, org.organizationId)
+    .all<{ id: string; amount_cents: number; status: string; created_at: string; receipt_seq: number | null }>()).results;
   const project = inv.project_id ? await ctx.db.prepare(`SELECT id, name FROM projects WHERE id = ? AND organization_id = ?`).bind(inv.project_id, org.organizationId).first<{ id: string; name: string }>() : null;
   const canPay = can(ctx.actor!, "customer.billing", { organizationId: org.organizationId });
   const hosted = stripeInvoiceLink(inv);
@@ -100,12 +104,12 @@ async function invoicePage(ctx: AppContext, id: string) {
     : hosted ? html`<a class="btn btn--primary" href="${hosted}" rel="noopener">Pay ${formatCents(inv.amount_cents)} — Stripe invoice</a><p class="faint">This invoice is billed through a Stripe invoice. Payment is confirmed when Stripe notifies us.</p>`
     : ctx.payments.configured ? html`<form method="post" action="/portal/billing/invoices/${inv.id}/pay">${csrf(ctx)}${button(`Pay ${formatCents(inv.amount_cents)} securely`)}</form><p class="faint">You will be taken to Stripe's secure checkout. Payment is confirmed when Stripe notifies us.</p>`
     : alert("warn", `${NOT_CONFIGURED} Contact us for payment options.`);
-  return portalPage(ctx, "Invoice", html`${pageHead(inv.description ?? MILESTONE_LABEL[inv.milestone_kind ?? ""] ?? "Invoice", html`${badge(inv.status)}${linkButton("Download PDF", `/portal/billing/invoices/${inv.id}/pdf`, "secondary", "sm")}${linkButton("All billing", "/portal/billing", "ghost", "sm")}`, `Invoice ${inv.id}`)}
+  return portalPage(ctx, "Invoice", html`${pageHead(inv.description ?? MILESTONE_LABEL[inv.milestone_kind ?? ""] ?? "Invoice", html`${badge(inv.status)}${linkButton("Download PDF", `/portal/billing/invoices/${inv.id}/pdf`, "secondary", "sm")}${linkButton("All billing", "/portal/billing", "ghost", "sm")}`, invoiceLabel(inv.invoice_number))}
 ${ctx.url.searchParams.get("checkout") === "cancelled" ? alert("info", "Checkout was cancelled. Nothing was charged.") : ""}
-<section class="card stack">${dl([["Organization", org.organizationName], ["Issued", formatDate(inv.created_at)], ["Type", MILESTONE_LABEL[inv.milestone_kind ?? ""] ?? "—"], ["Project", project ? html`<a href="/portal/projects/${project.id}">${project.name}</a>` : "Created after payment"], ["Due", formatDate(inv.due_at)], ["Paid", formatDate(inv.paid_at)]])}
+<section class="card stack">${dl([["Invoice number", inv.invoice_number ? formatDocNumber(inv.invoice_number) : "Not yet issued"], ["Organization", org.organizationName], ["Issued", formatDate(inv.created_at)], ["Type", MILESTONE_LABEL[inv.milestone_kind ?? ""] ?? "—"], ["Project", project ? html`<a href="/portal/projects/${project.id}">${project.name}</a>` : "Created after payment"], ["Due", formatDate(inv.due_at)], ["Paid", formatDate(inv.paid_at)]])}
 <p class="price">${formatCents(inv.amount_cents)}</p>${taxBreakdown(parseTaxDetail(inv.tax_detail_json))}
 ${payBlock}</section>
-<section class="card"><h2 style="font-size:1.2rem">Payments (receipts)</h2>${table(pays, [{ header: "Date", cell: (p) => formatDateTime(p.created_at) }, { header: "Status", cell: (p) => badge(p.status) }, { header: "Amount", cell: (p) => formatCents(p.amount_cents), numeric: true }, { header: "Reference", cell: (p) => p.stripe_payment_intent_id ?? p.id }, { header: "", cell: (p) => (p.status !== "failed" ? html`<a href="/portal/billing/receipts/${p.id}">Receipt</a> · <a href="/portal/billing/receipts/${p.id}/pdf">PDF</a>` : "") }], { empty: html`<p class="muted">No payment recorded yet.</p>` })}</section>`);
+<section class="card"><h2 style="font-size:1.2rem">Payments (receipts)</h2>${table(pays, [{ header: "Date", cell: (p) => formatDateTime(p.created_at) }, { header: "Status", cell: (p) => badge(p.status) }, { header: "Amount", cell: (p) => formatCents(p.amount_cents), numeric: true }, { header: "Receipt", cell: (p) => (p.receipt_seq ? receiptLabel(p.receipt_seq) : "—") }, { header: "", cell: (p) => (p.status !== "failed" ? html`<a href="/portal/billing/receipts/${p.id}">Receipt</a> · <a href="/portal/billing/receipts/${p.id}/pdf">PDF</a>` : "") }], { empty: html`<p class="muted">No payment recorded yet.</p>` })}</section>`);
 }
 
 /** The questions an invoice's intake is filtered by: the package, or the accepted quote's package ("custom" otherwise). */
@@ -124,7 +128,7 @@ async function invoiceIntakePage(ctx: AppContext, id: string, errors: string[] =
   const org = requireCustomerOrg(ctx);
   const inv = await customerInvoice(ctx.db, org.organizationId, id);
   const target = await intakeTargetForInvoice(ctx.db, org.organizationId, inv);
-  const head = pageHead("Website intake", linkButton("Back to invoice", `/portal/billing/invoices/${inv.id}`, "ghost", "sm"), `Invoice ${inv.id}`);
+  const head = pageHead("Website intake", linkButton("Back to invoice", `/portal/billing/invoices/${inv.id}`, "ghost", "sm"), invoiceLabel(inv.invoice_number));
   if (!target) return portalPage(ctx, "Website intake", html`${head}${alert("info", "No website intake is needed for this invoice.")}`);
   const productKey = await intakeProductFor(ctx, org.organizationId, target);
   const intake = await findIntake(ctx.db, org.organizationId, target);
@@ -157,16 +161,22 @@ async function pdfDownload(ctx: AppContext, kind: "invoice" | "receipt", id: str
   else orgScope = requireCustomerOrg(ctx).organizationId;
   const at = ctx.now();
   let bytes: Uint8Array<ArrayBuffer>, filename: string, organizationId: string, number: string;
+  let legacy: string | undefined;
   if (kind === "invoice") {
-    const d = await docs.loadInvoiceDoc(ctx.db, id, orgScope); // 404 for another organization's invoice
-    bytes = docs.invoicePdf(d, ctx.settings, at);
-    filename = `crestmont-invoice-${d.invoice.id}.pdf`; organizationId = d.organization.id; number = d.invoice.id;
+    const d = await docs.loadInvoiceDoc(ctx.db, id, orgScope, at); // 404 for another organization's invoice
+    const extra = await ctx.db.prepare(`SELECT stripe_invoice_status, stripe_hosted_invoice_url FROM invoices WHERE id = ?`).bind(d.invoice.id).first<{ stripe_invoice_status: string | null; stripe_hosted_invoice_url: string | null }>();
+    // The payment link is the Stripe-hosted invoice when there is one, else the portal Billing page (no internal id in the printed link).
+    const payUrl = d.invoice.status === "open" && d.balanceCents > 0 ? stripeInvoiceLink(extra ?? {}) ?? `${ctx.baseUrl}/portal/billing` : null;
+    bytes = docs.invoicePdf(d, ctx.settings, at, { payUrl });
+    const n = d.invoice.invoice_number ? formatDocNumber(d.invoice.invoice_number) : "draft";
+    filename = `crestmont-invoice-${n}.pdf`; organizationId = d.organization.id; number = d.label;
   } else {
     const r = await docs.loadReceiptDoc(ctx.db, id, orgScope);
     bytes = docs.receiptPdf(r, ctx.settings, at);
-    filename = `crestmont-receipt-${r.receiptNumber}.pdf`; organizationId = r.organization.id; number = r.receiptNumber;
+    filename = `crestmont-receipt-${r.receiptNumber}.pdf`; organizationId = r.organization.id; number = r.receiptLabel; legacy = r.legacyReference;
   }
-  await audit(ctx.db, { actorUserId: ctx.user!.id, action: `${kind}.pdf_downloaded`, subjectType: kind === "invoice" ? "invoice" : "payment", subjectId: id, organizationId, ip: ctx.ip, details: { number, bytes: bytes.length, via: staff ? "staff" : "portal" } });
+  // The audit keeps the internal subject id (and, for receipts, the legacy reference) next to the customer-facing number.
+  await audit(ctx.db, { actorUserId: ctx.user!.id, action: `${kind}.pdf_downloaded`, subjectType: kind === "invoice" ? "invoice" : "payment", subjectId: id, organizationId, ip: ctx.ip, details: { number, ...(legacy ? { legacyReference: legacy } : {}), bytes: bytes.length, via: staff ? "staff" : "portal" } });
   return download(ctx, bytes, filename, "application/pdf");
 }
 
@@ -357,12 +367,12 @@ async function invoicesPage(ctx: AppContext) {
   // Read-only remediation list: Stripe-hosted first invoices issued before the intake rule, still unpaid, whose order
   // has no completed website intake. Nothing here is voided or changed automatically.
   const missingIntake = await stripeHostedInvoicesMissingIntake(ctx.db);
-  const filters = html`${input({ name: "q", label: "Search", value: q, placeholder: "Customer, description, invoice id", maxlength: 100 })}
+  const filters = html`${input({ name: "q", label: "Search", value: q, placeholder: "Customer, description, invoice number or id", maxlength: 100 })}
 ${select({ name: "status", label: "Status", options: [...fin.INVOICE_STATUSES], value: valid, includeBlank: "Any status" })}
 ${select({ name: "kind", label: "Type", options: fin.INVOICE_KINDS.map((k) => ({ value: k, label: MILESTONE_LABEL[k] ?? label(k) })), value: kind, includeBlank: "Any type" })}`;
   return staffPage(ctx, "Invoices", html`${pageHead("Invoices", html`<a class="btn btn--ghost btn--sm" href="${csvHref(ctx)}" data-csv>Export CSV</a>`, "Finance")}
 ${rangeForm(ctx, range?.from ?? "", range?.to ?? "", filters)}
-${table(rows.slice(0, limit), [{ header: "Issued", cell: (i) => html`<a href="/staff/finance/invoices/${i.id}">${formatDate(i.created_at)}</a>` }, { header: "Customer", cell: (i) => html`<a href="/staff/customers/${i.organization_id}">${i.org_name}</a>` },
+${table(rows.slice(0, limit), [{ header: "Invoice", cell: (i) => html`<a href="/staff/finance/invoices/${i.id}" data-invoice-number>${i.invoice_number ? invoiceLabel(i.invoice_number) : "Draft"}</a>` }, { header: "Issued", cell: (i) => formatDate(i.created_at) }, { header: "Customer", cell: (i) => html`<a href="/staff/customers/${i.organization_id}">${i.org_name}</a>` },
     { header: "Description", cell: (i) => html`${i.description ?? MILESTONE_LABEL[i.milestone_kind ?? ""] ?? "—"}${i.stripe_invoice_id ? html`<br><span class="faint">Stripe invoice ${i.stripe_invoice_status ?? ""}</span>` : ""}` },
     { header: "Status", cell: (i) => badge(i.status) }, { header: "Amount", cell: (i) => formatCents(i.amount_cents), numeric: true },
     { header: "Paid", cell: (i) => formatDate(i.paid_at) }, { header: "Project", cell: (i) => (i.project_id ? html`<a href="/staff/projects/${i.project_id}">View</a>` : "—") },
@@ -394,13 +404,18 @@ async function staffInvoicePage(ctx: AppContext, id: string, errors: string[] = 
     : blocker ? alert("info", blocker)
     : html`${inv.stripe_invoice_error ? alert("error", `Last attempt failed: ${inv.stripe_invoice_error}`) : ""}${inv.stripe_invoice_id ? html`<p class="faint">Draft ${inv.stripe_invoice_id} exists in Stripe; creating again resumes it without billing twice.</p>` : ""}
 ${actionForm(ctx, `/staff/finance/invoices/${inv.id}/stripe-invoice`, `Create Stripe invoice for ${formatCents(inv.amount_cents)}`, { variant: "primary", confirm: "Create and finalize this invoice in Stripe (not sent by email)?" })}`;
-  return staffPage(ctx, "Invoice", html`${pageHead(d.lines[0]?.description ?? "Invoice", html`${badge(inv.status)}${linkButton("Invoice PDF", `/staff/finance/invoices/${inv.id}/pdf`, "secondary", "sm")}${linkButton("All invoices", "/staff/finance/invoices", "ghost", "sm")}`, `Invoice ${inv.id}`)}${formErrors(errors)}
-<div class="grid grid-2"><section class="card stack">${dl([["Customer", html`<a href="/staff/customers/${d.organization.id}">${d.organization.name}</a>`], ["Type", MILESTONE_LABEL[inv.milestone_kind ?? ""] ?? "—"], ["Amount", formatCents(inv.amount_cents)],
+  return staffPage(ctx, "Invoice", html`${pageHead(d.lines[0]?.description ?? "Invoice", html`${badge(inv.status)}${linkButton("Invoice PDF", `/staff/finance/invoices/${inv.id}/pdf`, "secondary", "sm")}${linkButton("All invoices", "/staff/finance/invoices", "ghost", "sm")}`, d.label)}${formErrors(errors)}
+<div class="grid grid-2"><section class="card stack">${dl([["Invoice number", inv.invoice_number ? formatDocNumber(inv.invoice_number) : "Not yet issued (draft)"], ["Customer", html`<a href="/staff/customers/${d.organization.id}">${d.organization.name}</a>`], ["Type", MILESTONE_LABEL[inv.milestone_kind ?? ""] ?? "—"], ["Status (customer-facing)", d.statusLabel], ["Amount", formatCents(inv.amount_cents)],
     ["Sales tax", d.tax ? docs.usd(d.tax.taxCents) : "None (issued without tax configuration)"],
     ["Paid", formatCents(d.paidCents)], ["Refunded", formatCents(d.refundedCents)], ["Balance due", formatCents(d.balanceCents)], ["Issued", formatDate(inv.created_at)], ["Paid at", formatDate(inv.paid_at)],
-    ["Project", d.project ? html`<a href="/staff/projects/${d.project.id}">${d.project.name}</a>` : "—"], ["Order", d.order ? `${d.order.id} (${label(d.order.kind)}, ${formatCents(d.order.total_cents)})` : "—"], ["Checkout session", inv.stripe_checkout_session_id]])}
-<h2 style="font-size:1.1rem">Receipts</h2>${table(d.payments, [{ header: "Date", cell: (p) => formatDate(p.created_at) }, { header: "Receipt", cell: (p) => html`<a href="/staff/finance/receipts/${p.id}">${p.receipt_number}</a> · <a href="/staff/finance/receipts/${p.id}/pdf">PDF</a>` },
-    { header: "Amount", cell: (p) => formatCents(p.amount_cents), numeric: true }, { header: "Status", cell: (p) => badge(p.status) }], { empty: html`<p class="muted">No payment recorded yet.</p>` })}</section>
+    ["Project", d.project ? html`<a href="/staff/projects/${d.project.id}">${d.project.name}</a>` : "—"], ["Order", d.order ? `${label(d.order.kind)}, ${formatCents(d.order.total_cents)}` : "—"]])}
+<h2 style="font-size:1.1rem">Receipts</h2>${table(d.payments, [{ header: "Date", cell: (p) => formatDate(p.created_at) }, { header: "Receipt", cell: (p) => html`<a href="/staff/finance/receipts/${p.id}">${p.receipt_label}</a> · <a href="/staff/finance/receipts/${p.id}/pdf">PDF</a>` },
+    { header: "Amount", cell: (p) => formatCents(p.amount_cents), numeric: true }, { header: "Status", cell: (p) => badge(p.status) }], { empty: html`<p class="muted">No payment recorded yet.</p>` })}
+<details data-testid="technical-details"><summary>Technical details</summary>
+<p class="faint">Internal and payment-processor references for reconciliation, support and audit. They never appear on customer documents.</p>
+${dl([["Internal invoice id", html`<code>${inv.id}</code>`], ["Order id", d.order ? html`<code>${d.order.id}</code>` : "—"], ["Stripe Checkout session", inv.stripe_checkout_session_id ? html`<code>${inv.stripe_checkout_session_id}</code>` : "—"],
+    ["Stripe invoice", inv.stripe_invoice_id ? html`<code>${inv.stripe_invoice_id}</code>${inv.stripe_invoice_number ? ` (${inv.stripe_invoice_number})` : ""}` : "—"],
+    ...d.payments.map((p) => [`${p.receipt_label} payment`, html`<code>${p.id}</code>${p.stripe_payment_intent_id ? html` · <code>${p.stripe_payment_intent_id}</code>` : ""}`] as [string, SafeHtml])])}</details></section>
 <section class="stack"><div class="card stack"><h2 style="font-size:1.1rem">Stripe invoice (PAY-006)</h2>${stripeSection}</div>
 <div class="card"><h2 style="font-size:1.1rem">Audit trail</h2>${history.length ? html`<ul class="timeline">${history.map((h) => html`<li><strong>${h.action}</strong> <span class="faint">${formatDateTime(h.created_at)} · ${h.display_name ?? h.actor_kind}</span></li>`)}</ul>` : html`<p class="muted">No entries.</p>`}</div></section></div>`, status);
 }

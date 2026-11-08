@@ -1033,6 +1033,50 @@ a.shot { display: block; cursor: zoom-in; }
 .receipt > *, .receipt .grid > * { min-width: 0; }
 .receipt-print { background: #fff; color: #000; }
 .receipt-print .receipt, .receipt-print .receipt * { color: #000; background: #fff; border-color: #999; }
+.receipt-print .btn--secondary, .receipt-print .btn--ghost { --btn-fg: #111; --btn-bd: #999; }
+/* Phase 8: customer-facing financial document (receipt). White paper, black type, restrained gold accents — the
+   same layout as the PDF. Text-safe gold on white is --gold-3 darkened (#7a6536, 5.6:1). */
+.fin-doc { --doc-ink: #111; --doc-body: #2e2e2e; --doc-muted: #5f5f5f; --doc-gold: #7a6536; --doc-gold-line: var(--gold-3); --doc-wash: #fbf7ed; --doc-rule: #dcdcdc;
+  max-width: 52rem; background: #fff; color: var(--doc-body); border-radius: var(--r-2); border-top: 8px solid #111; box-shadow: 0 0 0 1px rgba(0, 0, 0, .06), 0 18px 48px rgba(0, 0, 0, .35);
+  padding: var(--s-6) clamp(var(--s-4), 5vw, var(--s-7)) var(--s-5); font: 400 var(--fs-sm)/1.55 var(--font-body); overflow-wrap: anywhere; }
+.fin-doc * { color: inherit; }
+.fin-doc h1, .fin-doc strong, .fin-doc dd, .fin-doc th, .fin-doc .fin-doc__party { color: var(--doc-ink); }
+.fin-doc__head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s-4); padding-bottom: var(--s-4); border-bottom: 1px solid var(--doc-gold-line); }
+.fin-doc__mark { display: block; font: 700 1.6rem/1 var(--font-display); letter-spacing: .14em; color: var(--doc-ink); }
+.fin-doc__sub { display: block; margin-top: 6px; font: 600 .62rem/1 var(--font-body); letter-spacing: .3em; color: var(--doc-gold); }
+.fin-doc__entity { margin: var(--s-3) 0 0; font-size: var(--fs-xs); color: var(--doc-muted); }
+.fin-doc__title { text-align: right; }
+.fin-doc__title h1 { margin: 0; font: 700 1.7rem/1 var(--font-display); letter-spacing: .18em; text-transform: uppercase; }
+.fin-doc__number { margin: var(--s-2) 0 0; font-weight: 700; color: var(--doc-gold); }
+.fin-doc .fin-doc__label { margin: 0 0 var(--s-2); font: 700 .66rem/1.2 var(--font-body); letter-spacing: .16em; text-transform: uppercase; color: var(--doc-gold); }
+.fin-doc__parties { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 18rem); gap: var(--s-5); padding: var(--s-5) 0 var(--s-4); }
+.fin-doc__party { margin: 0; font-size: var(--fs-lg); font-weight: 700; }
+.fin-doc__facts { margin: 0; }
+.fin-doc__facts > div { display: flex; justify-content: space-between; gap: var(--s-3); padding: 5px 0; border-bottom: 1px solid var(--doc-rule); }
+.fin-doc__facts dt { color: var(--doc-muted); }
+.fin-doc__facts dd { margin: 0; font-weight: 700; text-align: right; }
+.fin-doc__notice { margin: 0 0 var(--s-4); padding: var(--s-3) var(--s-4); background: var(--doc-wash); border-left: 3px solid var(--doc-gold-line); color: var(--doc-ink); }
+.fin-doc__amount { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: var(--s-3); margin-bottom: var(--s-5); padding: var(--s-4) var(--s-5); background: var(--doc-wash); border-left: 3px solid var(--doc-gold-line); }
+.fin-doc__amount strong { display: block; font: 700 2rem/1.1 var(--font-display); }
+.fin-doc__amount .fin-doc__label { margin: 0 0 var(--s-1); }
+.fin-doc__table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.fin-doc__table th { text-align: left; padding: var(--s-2) var(--s-2); font: 700 .66rem/1.2 var(--font-body); letter-spacing: .12em; text-transform: uppercase; color: var(--doc-muted); border-top: 1px solid var(--doc-ink); border-bottom: 1px solid var(--doc-gold-line); }
+.fin-doc__table td { padding: var(--s-3) var(--s-2); border-bottom: 1px solid var(--doc-rule); vertical-align: top; }
+.fin-doc__table .num { text-align: right; white-space: nowrap; }
+.fin-doc__totals { margin: var(--s-3) 0 0 auto; width: min(100%, 20rem); border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.fin-doc__totals th { text-align: left; font-weight: 400; padding: 4px var(--s-3); color: var(--doc-body); }
+.fin-doc__totals td { text-align: right; padding: 4px var(--s-3); white-space: nowrap; color: var(--doc-ink); }
+.fin-doc__totals .is-strong th, .fin-doc__totals .is-strong td { font-weight: 700; color: var(--doc-ink); border-top: 1px solid var(--doc-ink); }
+.fin-doc__totals .is-highlight th, .fin-doc__totals .is-highlight td { font-weight: 700; background: var(--doc-wash); color: var(--doc-ink); padding-top: var(--s-2); padding-bottom: var(--s-2); }
+.fin-doc__section { margin-top: var(--s-5); }
+.fin-doc__details { display: grid; grid-template-columns: minmax(8rem, 12rem) minmax(0, 1fr); gap: var(--s-2) var(--s-4); margin: 0; }
+.fin-doc__details dt { color: var(--doc-muted); }
+.fin-doc__details dd { margin: 0; font-weight: 600; }
+.fin-doc__foot { margin-top: var(--s-6); padding-top: var(--s-3); border-top: 1px solid var(--doc-gold-line); font-size: var(--fs-xs); color: var(--doc-muted); }
+.fin-doc__foot p { margin: 0 0 var(--s-2); max-width: none; }
+.fin-doc__thanks { color: var(--doc-ink); font-weight: 700; }
+.fin-doc + .fin-doc__tech { max-width: 52rem; margin-top: var(--s-4); }
+@media (max-width: 560px) { .fin-doc__parties { grid-template-columns: minmax(0, 1fr); } .fin-doc__title { text-align: left; } .fin-doc__details { grid-template-columns: minmax(0, 1fr); } .fin-doc__details dd { margin-bottom: var(--s-2); } }
 .copy-btn[data-copied="true"] { color: var(--ok); }
 
 /* ── 19. Responsive refinements & touch targets ───────────────────────────────────────────────── */
@@ -1101,6 +1145,8 @@ a.shot { display: block; cursor: zoom-in; }
   .readiness-report details > *:not(summary) { display: block; }
   .receipt, .receipt * { color: #000 !important; background: #fff !important; border-color: #999 !important; box-shadow: none !important; }
   .receipt { border: 1px solid #999; break-inside: avoid; }
+  .fin-doc { box-shadow: none; border-radius: 0; max-width: none; padding: 0; }
+  .fin-doc__tech { display: none !important; }
 }
 /* Phones: the full-bleed black contact band runs straight into the black footer. */
 @media (max-width: 900px) { main:has(> #contact:last-child) + .site-footer { margin-top: 0; } main:has(> #contact:last-child) + .site-footer .container { border-top: 1px solid var(--line); padding-top: var(--s-7); } }

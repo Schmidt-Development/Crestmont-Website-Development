@@ -134,22 +134,25 @@ test("[PAY-005] invoice and receipt PDFs: amounts and line items from persisted 
   const b = await customer(t, "pdf-b@beta.example", "Beta LLC");
   const s = await seedMilestoneOrder(t.db, a.organizationId, owner.id, { prefix: "pdf" });
 
-  // Customer A downloads the paid deposit invoice.
+  // Customer A downloads the paid deposit invoice. Phase 8: the file is named by the customer-facing number, not the internal id.
   const res = await a.c.get(`/portal/billing/invoices/${s.dep}/pdf`);
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("content-type"), "application/pdf");
-  assert.equal(res.headers.get("content-disposition"), `attachment; filename="crestmont-invoice-${s.dep}.pdf"`);
+  const depNo = String((await one<{ invoice_number: number }>(t.db, `SELECT invoice_number FROM invoices WHERE id = ?`, s.dep)).invoice_number).padStart(3, "0");
+  assert.equal(res.headers.get("content-disposition"), `attachment; filename="crestmont-invoice-${depNo}.pdf"`);
   assert.equal(res.headers.get("cache-control"), "no-store");
   const inv = parsePdf(new Uint8Array(await res.arrayBuffer()));
-  for (const want of ["INVOICE", "Alpha (PDF) LLC", "50% deposit", "$5,000.00", "Custom web application (TEST DATA)", "$8,000.00", "Booking integration (TEST DATA)", "$2,000.00", "Order total", "$10,000.00",
-    "25% design milestone", "25% pre-launch", "50% deposit (this invoice)", "Balance due", "$0.00", "Payments received", "pi_test_pdf_dep"]) {
+  for (const want of ["INVOICE", `Invoice ${depNo}`, "Alpha (PDF) LLC", "50% deposit", "$5,000.00", "Custom web application (TEST DATA)", "$8,000.00", "Booking integration (TEST DATA)", "$2,000.00", "Project total", "$10,000.00",
+    "25% design milestone", "25% pre-launch", "50% deposit (this invoice)", "Balance due", "$0.00", "PAYMENTS RECEIVED"]) {
     assert.ok(inv.text.some((x) => x.includes(want)), `invoice PDF shows "${want}"`);
   }
-  const rcptNo = inv.text.find((x) => /^CWD-R-\d{6}$/.test(x));
+  // Phase 8.2: no internal or Stripe identifiers on the customer's document.
+  for (const hidden of ["pi_test_pdf_dep", s.dep, s.ord, s.pay]) assert.ok(!inv.text.some((x) => x.includes(hidden)), `invoice PDF hides "${hidden}"`);
+  const rcptNo = inv.text.find((x) => /^Receipt \d{3,}$/.test(x));
   assert.ok(rcptNo, "payment row carries the stable receipt number");
   // Open milestone invoice: balance due equals the persisted amount.
   const open = parsePdf(new Uint8Array(await (await a.c.get(`/portal/billing/invoices/${s.d25}/pdf`)).arrayBuffer()));
-  assert.ok(open.text.includes("25% on approved design") && open.text.includes("$2,500.00"));
+  assert.ok(open.text.some((x) => x.includes("25% on approved design")) && open.text.includes("$2,500.00"), "the line names the service and the milestone");
   const bal = open.text.indexOf("Balance due");
   assert.equal(open.text[bal + 1], "$2,500.00");
   // Changing the persisted amount changes the document (nothing is recomputed from the catalog).
@@ -159,9 +162,10 @@ test("[PAY-005] invoice and receipt PDFs: amounts and line items from persisted 
   // Receipt PDF (customer) with the same receipt number as the HTML receipt.
   const r = await a.c.get(`/portal/billing/receipts/${s.pay}/pdf`);
   assert.equal(r.status, 200);
-  assert.equal(r.headers.get("content-disposition"), `attachment; filename="crestmont-receipt-${rcptNo}.pdf"`);
+  assert.equal(r.headers.get("content-disposition"), `attachment; filename="crestmont-receipt-${rcptNo!.slice("Receipt ".length)}.pdf"`);
   const rp = parsePdf(new Uint8Array(await r.arrayBuffer()));
-  for (const want of ["RECEIPT", rcptNo!, "Alpha (PDF) LLC", "$5,000.00", "pi_test_pdf_dep", `50% deposit (invoice ${s.dep})`]) assert.ok(rp.text.some((x) => x.includes(want)), `receipt PDF shows "${want}"`);
+  for (const want of ["RECEIPT", rcptNo!, "Alpha (PDF) LLC", "$5,000.00", "50% deposit", `Invoice ${depNo}`]) assert.ok(rp.text.some((x) => x.includes(want)), `receipt PDF shows "${want}"`);
+  for (const hidden of ["pi_test_pdf_dep", s.dep, s.pay]) assert.ok(!rp.text.some((x) => x.includes(hidden)), `receipt PDF hides "${hidden}"`);
   assert.match(await (await a.c.get(`/portal/billing/receipts/${s.pay}`)).text(), new RegExp(rcptNo!));
 
   // Tenant isolation: org B gets 404 for A's documents; staff without finance.read get 403; anonymous is sent to login.

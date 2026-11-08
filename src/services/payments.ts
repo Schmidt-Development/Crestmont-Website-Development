@@ -9,6 +9,7 @@ import { notify } from "./notifications.ts";
 import { paymentsMode, expectedLivemode, type PaymentsEnv } from "../domain/payments-mode.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
+import { ensureInvoiceNumber, ensureReceipt, invoiceLabel, receiptLabel } from "./document-numbers.ts";
 import { sendInternalNotification, sendInternalTemplate } from "./internal-notify.ts";
 import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { syncProjectBuildSafe } from "./builds.ts";
@@ -414,8 +415,16 @@ export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" |
   const recipient = simulated || opts.noReceipt ? null : to ?? await orgBillingEmail(db, inv.organization_id);
   // The website intake is normally completed before payment (migration 0089): the receipt then points at the project.
   const intakeDone = projectId ? !!(await db.prepare(`SELECT 1 FROM onboarding_responses WHERE project_id = ? AND completed_at IS NOT NULL`).bind(projectId).first()) : false;
-  if (recipient) await sendMail(ctx, { template: "receipt", to: recipient, idempotencyKey: `receipt:${inv.id}`,
-    data: { amountCents: inv.amount_cents, next: !projectId ? "billing" : intakeDone ? "project" : "onboarding", url: `${ctx.baseUrl}/portal${!projectId ? "/billing" : intakeDone ? `/projects/${projectId}` : `/projects/${projectId}/onboarding`}` } });
+  if (recipient) {
+    // Phase 8: the email names the customer-facing numbers and links the receipt document (HTML and PDF).
+    const pay = await db.prepare(`SELECT id FROM payments WHERE invoice_id = ? AND status <> 'failed' AND provider <> 'simulated' ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(inv.id).first<{ id: string }>();
+    const rc = pay ? await ensureReceipt(db, pay.id) : null;
+    const invNo = await ensureInvoiceNumber(db, inv.id);
+    await sendMail(ctx, { template: "receipt", to: recipient, idempotencyKey: `receipt:${inv.id}`,
+      data: { amountCents: inv.amount_cents, next: !projectId ? "billing" : intakeDone ? "project" : "onboarding", url: `${ctx.baseUrl}/portal${!projectId ? "/billing" : intakeDone ? `/projects/${projectId}` : `/projects/${projectId}/onboarding`}`,
+        ...(invNo ? { invoiceLabel: invoiceLabel(invNo) } : {}),
+        ...(pay && rc ? { receiptLabel: receiptLabel(rc.seq), receiptUrl: `${ctx.baseUrl}/portal/billing/receipts/${pay.id}` } : {}) } });
+  }
   return { projectId, provisioned };
 }
 

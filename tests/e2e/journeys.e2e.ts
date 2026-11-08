@@ -549,7 +549,7 @@ step("[PM-006] release readiness panel gates deployment: customer launch approva
   // Design milestone invoice (design is approved) → paid by signed webhook fixture.
   await nav(p, btn(p, "Issue 25% design invoice"));
   await c.goto(srv.base + "/portal/billing");
-  await nav(c, c.getByRole("link", { name: "25% on approved design" }));
+  await nav(c, c.locator("tr", { hasText: "25% on approved design" }).locator("a[data-invoice-number]")); // the link reads "Invoice NNN" (Phase 8)
   await stripePaid(new URL(c.url()).pathname.split("/").pop()!, contact.email);
 
   // Deployment authorization is refused while other checks fail.
@@ -572,7 +572,7 @@ step("[PM-006] release readiness panel gates deployment: customer launch approva
   await p.goto(approvalsTab);
   await nav(p, btn(p, "Issue 25% pre-launch invoice"));
   await c.goto(srv.base + "/portal/billing");
-  await nav(c, c.getByRole("link", { name: "25% before launch" }));
+  await nav(c, c.locator("tr", { hasText: "25% before launch" }).locator("a[data-invoice-number]")); // the link reads "Invoice NNN" (Phase 8)
   await stripePaid(new URL(c.url()).pathname.split("/").pop()!, contact.email);
   await p.goto(approvalsTab);
   assert.match(await text(p, ".card--gold"), /6\. Required payment verification\s+Pass\s+All required invoices paid/);
