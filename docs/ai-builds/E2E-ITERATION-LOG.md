@@ -44,7 +44,13 @@ was identical and what differed was the rendering itself.
 - **Model A and Model B output varies between identical runs.** Iteration 3 produced a working backend; iteration 4
   produced none from the same bytes. Any claim that the builder "works" has to account for this, and the honest
   statement is a success *rate*, not a success.
-- `node server.js & sleep …` ran **38 times** in iteration 4's phase. Not yet diagnosed; next in the loop.
+- **Withdrawn, and worth recording as withdrawn.** An earlier note here said `node server.js & sleep …` "ran 38
+  times" in iteration 4. It is not supported: the activity record keeps only the **first line** of a multi-line
+  command, so 38 different commands sharing that prefix look identical in the log. The loop detector compares the
+  call signature *and* its output (`r.sig === sig && r.out === out`), and it did not fire on those 38 — which is
+  the correct answer, because a server start that returns different output each time is not a loop. The detector
+  is sound; there was no defect here. What is real is the observability limit: a repeated-looking run of activity
+  lines is not evidence of repetition.
 - The visual gate reports `findings: undefined` when it did not run, and `gateScore` scores that as `1`. A
   "visual 1" in a stop message therefore means *did not run*, not *one finding* — this cost a wrong diagnosis once.
 - Staging Worker `f0b8a7b2-77a6-467e-a39d-4cec55cf341b`; runner image `sha256:4a8367f4…`, reporting `slots: 4`,
