@@ -46,6 +46,35 @@ async function customerAdmins(db: Db, organizationId: string): Promise<string[]>
     .bind(organizationId).all<{ email: string }>()).results.map((r) => r.email);
 }
 
+/** Project statuses at which the website is ready for (or past) the customer's review: the activation opens there. */
+const ACTIVATION_OPEN_STAGES = ["customer_review", "revisions", "final_approval", "deployment", "completed", "maintenance"];
+
+/**
+ * Custom work: the maintenance plan of an accepted QUOTE is recorded by the Owner from that quote. Package orders carry
+ * the customer's own choice from checkout (migration 0084), but quote acceptance never did, so a quote-based website
+ * could never open its maintenance activation and could never launch (the launch status told staff to "record the
+ * plan from the approved quote" with no way to do it; found by staging journey 19, deploy 42530695208).
+ *
+ * Owner-only (it fixes what the customer is billed monthly), recorded once (a recorded plan is never silently
+ * changed), audited, and only for quote orders. If the website is already at customer review or later, the
+ * activation opens now exactly as it would have on reaching review. The launch gate itself is unchanged: the customer
+ * must still sign the agreement and Stripe must still confirm the first payment.
+ */
+export async function recordQuoteMaintenancePlan(db: Db, mail: LifecycleCtx | null, input: { projectId: string; planId: string; actorUserId: string }): Promise<MaintenanceActivation | null> {
+  if (!isMaintenanceId(input.planId)) throw new HttpError(422, "Choose Essential, Professional or Executive.");
+  const p = await db.prepare(`SELECT p.id, p.status, p.organization_id, o.id AS order_id, o.kind, o.maintenance_plan_id FROM projects p LEFT JOIN orders o ON o.id = p.order_id WHERE p.id = ?`)
+    .bind(input.projectId).first<{ id: string; status: string; organization_id: string; order_id: string | null; kind: string | null; maintenance_plan_id: string | null }>();
+  if (!p) throw new HttpError(404, "Project not found.");
+  if (!p.order_id || p.kind !== "quote") throw new HttpError(409, "Only a project from an accepted quote has its maintenance plan recorded here; package orders carry the plan the customer chose at checkout.");
+  if (p.maintenance_plan_id) throw new HttpError(409, `The ${MAINTENANCE_PLANS[p.maintenance_plan_id as MaintenanceId]?.name ?? p.maintenance_plan_id} plan is already recorded for this project and is not changed here.`);
+  const res = await db.prepare(`UPDATE orders SET maintenance_plan_id = ?, maintenance_plan_source = 'minimum_default' WHERE id = ? AND kind = 'quote' AND maintenance_plan_id IS NULL`)
+    .bind(input.planId, p.order_id).run();
+  if (res.meta.changes !== 1) throw new HttpError(409, "The maintenance plan was recorded by someone else meanwhile. Reload the project.");
+  await audit(db, { actorUserId: input.actorUserId, action: "maintenance.plan_recorded", subjectType: "project", subjectId: p.id, organizationId: p.organization_id,
+    details: { planId: input.planId, orderId: p.order_id, source: "approved_quote" } });
+  return ACTIVATION_OPEN_STAGES.includes(p.status) ? openMaintenanceActivation(db, mail, p.id, "ready_for_review") : null;
+}
+
 /**
  * Opens the maintenance activation for a project that has just launched. Idempotent per project (a later deployment or
  * release changes nothing). Projects without a committed plan (quote orders whose plan is set in the approved quote,

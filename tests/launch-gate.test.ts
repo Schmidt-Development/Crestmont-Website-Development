@@ -273,3 +273,47 @@ test("[PAY-004] launch gate: a quote-based project cannot reach maintenance Chec
   assert.match(after.headers.get("location") ?? "", /^https:\/\/checkout\.stripe\.com\//);
   assert.equal(created.length, 1);
 });
+
+test("[PAY-004] launch gate: a custom-quote project gets its maintenance plan recorded by the Owner, then the normal gate applies (found by staging journey 19)", async () => {
+  // Quote acceptance never recorded a maintenance plan, so a quote-based website could never open its activation and
+  // could never launch: the launch status told staff to "record the plan from the approved quote" with no way to do it.
+  const t = await createTestApp({ STRIPE_WEBHOOK_SECRET: WHSEC });
+  const cu = await createCustomer(t.db, `qplan${++seq}@fixture.example`, "Fixture Quote Plan LLC");
+  const at = nowIso(), pid = newId("prj"), oid = newId("ord");
+  await t.db.prepare(`INSERT INTO orders (id, organization_id, total_cents, status, kind, created_at) VALUES (?,?, 500000, 'paid', 'quote', ?)`).bind(oid, cu.organizationId, at).run();
+  await t.db.prepare(`INSERT INTO projects (id, organization_id, order_id, name, status, revision_allowance, payment_schedule, created_at, updated_at) VALUES (?,?,?, 'Custom portal', 'customer_review', 2, 'milestone_50_25_25', ?, ?)`)
+    .bind(pid, cu.organizationId, oid, at, at).run();
+  const before = await gate(t.db, pid);
+  assert.equal(before.activationStatus, null);
+  assert.deepEqual(before.customerActions, [], "nothing the customer can do yet");
+  assert.match(before.steps.find((s) => s.key === "subscription_active")!.detail, /record the plan from the approved quote/);
+
+  const owner = await createStaff(t.db, "owner", `owner${++seq}@crestmont.test`);
+  const pm = await createStaff(t.db, "project_manager", `pm${++seq}@crestmont.test`);
+  const oc = await t.client().login(owner.email), pc = await t.client().login(pm.email);
+  assert.match(await (await oc.get(`/staff/projects/${pid}?tab=approvals`)).text(), /data-record-maintenance-plan/, "the Owner is offered the control");
+  assert.doesNotMatch(await (await pc.get(`/staff/projects/${pid}?tab=approvals`)).text(), /data-record-maintenance-plan/, "a project manager is not");
+  assert.equal((await pc.post(`/staff/projects/${pid}/maintenance-plan`, { plan: "professional" })).status, 403, "only the Owner records it");
+  assert.equal((await oc.post(`/staff/projects/${pid}/maintenance-plan`, { plan: "platinum" })).status, 422, "only a real plan");
+
+  assert.equal((await oc.post(`/staff/projects/${pid}/maintenance-plan`, { plan: "professional" })).status, 303);
+  const after = await gate(t.db, pid);
+  assert.equal(after.activationStatus, "due", "the activation opens because the website is already at review");
+  assert.equal(after.planId, "professional");
+  assert.deepEqual(after.customerActions, ["sign_agreement"], "the normal gate now applies: agreement first");
+  assert.equal(after.eligible, false, "recording a plan unlocks nothing by itself");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'maintenance.plan_recorded' AND subject_id = ?`).bind(pid).first(), "audited");
+  const again = await oc.post(`/staff/projects/${pid}/maintenance-plan`, { plan: "executive" });
+  assert.equal(again.status, 409, "a recorded plan is never silently changed");
+  assert.equal((await one<{ p: string }>(t.db, `SELECT maintenance_plan_id AS p FROM orders WHERE id = ?`, oid)).p, "professional");
+
+  const c = await t.client().login(cu.email);
+  assert.match(await (await c.get(`/portal/projects/${pid}`)).text(), /Pending action: Sign your maintenance agreement/, "the customer sees the first step");
+
+  // Package orders carry the customer's own checkout choice and are refused here.
+  const pkgOrder = newId("ord"), pkgProject = newId("prj");
+  await t.db.prepare(`INSERT INTO orders (id, organization_id, total_cents, status, kind, created_at) VALUES (?,?, 150000, 'paid', 'package', ?)`).bind(pkgOrder, cu.organizationId, at).run();
+  await t.db.prepare(`INSERT INTO projects (id, organization_id, order_id, name, status, revision_allowance, payment_schedule, created_at, updated_at) VALUES (?,?,?, 'Package site', 'customer_review', 2, 'upfront', ?, ?)`)
+    .bind(pkgProject, cu.organizationId, pkgOrder, at, at).run();
+  assert.equal((await oc.post(`/staff/projects/${pkgProject}/maintenance-plan`, { plan: "essential" })).status, 409);
+});

@@ -431,11 +431,11 @@ async function payOnStripeCheckout(p: Page, testCard: { number: string; expiry: 
   await p.waitForURL((u: URL) => u.href.startsWith(BASE!), { timeout: 90_000 });
 }
 /** Reloads `url` until `re` matches the page (the Stripe webhook arrives asynchronously). */
-async function until(p: Page, url: string, re: RegExp, what: string, ms = 120_000): Promise<string> {
+async function until(p: Page, url: string, re: RegExp, what: string, ms = 120_000, read: (p: Page) => Promise<string> = (q) => text(q)): Promise<string> {
   const end = Date.now() + ms;
   for (;;) {
     await p.goto(url);
-    const t = await text(p);
+    const t = await read(p);
     if (re.test(t)) return t;
     if (Date.now() > end) assert.fail(`${what} did not happen within ${ms / 1000}s. Page: ${t.slice(0, 200).replace(/\s+/g, " ")}`);
     await p.waitForTimeout(5_000);
@@ -858,6 +858,16 @@ journey(19, ["PM-007"], "authorized deployment occurs (this run's project, after
   // Founder Phase 7 (production-blocking, #226): no deployment until the customer has signed the maintenance agreement
   // AND Stripe has confirmed the first subscription payment through its signed webhook. This run's customer does both
   // through the real portal and Stripe TEST-mode Checkout, exactly as a customer would; nothing is forced in the database.
+  // This run's project comes from an accepted custom quote, so the Owner records its maintenance plan from that quote
+  // first (package orders carry the customer's checkout choice instead). Recording a plan unlocks nothing by itself.
+  const owner = await as("owner");
+  await owner.goto(`${BASE}/staff/projects/${id}?tab=approvals`);
+  const recordPlan = owner.locator("form[data-record-maintenance-plan]");
+  if (await recordPlan.count()) {
+    await recordPlan.locator("select[name=plan]").selectOption("essential");
+    await nav(owner, recordPlan.getByRole("button", { name: "Record maintenance plan" }));
+    assert.match(await alerts(owner), /Maintenance plan recorded/i, await alerts(owner));
+  }
   const c = people.newCustomer.page;
   await c.goto(`${BASE}/portal/projects/${id}`);
   const sign = c.locator("[data-launch-gate]").getByRole("link", { name: "Sign your maintenance agreement" });
@@ -1096,7 +1106,10 @@ test("[PAY-007] [PAY-003] Stripe test mode: the Founder issues a refund; the sig
   assert.ok(pi, "the refunded payment's PaymentIntent");
 
   // The signed charge.refunded webhook arrives asynchronously; it is audited with the refund it resolved.
-  await until(o, `${BASE}/staff/audit?action=payment.refunded&subject=${pi}`, new RegExp(esc(stripeRefund!)), "the signed charge.refunded webhook for the refund");
+  // The audit timeline (plain English, #230) keeps each entry's original technical record, which names the Stripe refund,
+  // under a collapsed "Details". innerText skips collapsed content, so the entry is read with its full text content.
+  await until(o, `${BASE}/staff/audit?action=payment.refunded&subject=${pi}`, new RegExp(esc(stripeRefund!)), "the signed charge.refunded webhook for the refund", 120_000,
+    async (q) => ((await q.locator("main").first().textContent()) ?? "") as string);
 
   // Exactly one "refund issued" confirmation for this refund (no second one from the webhook).
   await o.goto(`${BASE}/staff/email?to=${encodeURIComponent(contact.email)}&template=refund_decision`);
