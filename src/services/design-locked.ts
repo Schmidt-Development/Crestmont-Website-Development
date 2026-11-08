@@ -731,6 +731,56 @@ export async function getBaseline(db: Db, id: string): Promise<DesignBaselineRow
   return await db.prepare(`SELECT * FROM design_baselines WHERE id = ?`).bind(id).first<DesignBaselineRow>();
 }
 
+/** The design waiting to be approved for this artifact, if it has been measured yet. */
+export async function latestDraftBaseline(db: Db, artifactId: string): Promise<DesignBaselineRow | null> {
+  return await db.prepare(
+    `SELECT * FROM design_baselines WHERE artifact_id = ? AND status = 'draft' ORDER BY version DESC LIMIT 1`,
+  ).bind(artifactId).first<DesignBaselineRow>();
+}
+
+/**
+ * Record that a person has approved THIS upload for backend construction, before it has been measured.
+ *
+ * Not an approval: there is nothing to approve yet. It is the decision, held against the artifact, and
+ * `applySubmissionApproval` turns it into a real approval of a real baseline once scanning and import have
+ * produced one -- with that baseline's version, its fingerprint and these bytes' own checksum. An artifact that
+ * turns out infected, invalid or unmeasurable never reaches that point, so this can never approve one.
+ *
+ * Idempotent: pressing the button twice is the same decision, not two of them.
+ */
+export async function recordApprovalIntent(
+  db: Db,
+  artifactId: string,
+  o: { by: string },
+): Promise<{ ok: true; alreadyHeld: boolean } | { ok: false; why: string }> {
+  const a = await db.prepare(
+    `SELECT id, status, scan_status, organization_id, project_id, approval_intent_by, approval_intent_applied_at
+       FROM frontend_artifacts WHERE id = ?`,
+  ).bind(artifactId).first<{
+    id: string; status: string; scan_status: string; organization_id: string; project_id: string;
+    approval_intent_by: string | null; approval_intent_applied_at: string | null;
+  }>();
+  if (!a) return { ok: false, why: "no such artifact" };
+  if (a.scan_status === "infected" || a.status === "quarantined") {
+    return { ok: false, why: "this artifact was quarantined by the scanner, so it can never be approved" };
+  }
+  if (a.status === "rejected") return { ok: false, why: "this artifact was rejected at import, so there is nothing to approve" };
+  if (a.approval_intent_applied_at) return { ok: true, alreadyHeld: true };
+  if (a.approval_intent_by) return { ok: true, alreadyHeld: true };
+
+  const at = nowIso();
+  await db.prepare(
+    `UPDATE frontend_artifacts SET approval_intent_by = ?, approval_intent_at = ?, updated_at = ?
+      WHERE id = ? AND approval_intent_by IS NULL`,
+  ).bind(o.by, at, at, artifactId).run();
+  await audit(db, {
+    organizationId: a.organization_id, actorUserId: o.by, actorKind: "user",
+    action: "frontend.approval_intent_recorded", subjectType: "frontend_artifact", subjectId: artifactId,
+    details: { projectId: a.project_id, why: "approved for backend construction before measurement" },
+  });
+  return { ok: true, alreadyHeld: false };
+}
+
 export async function approvedBaseline(db: Db, projectId: string): Promise<DesignBaselineRow | null> {
   return await db.prepare(`SELECT * FROM design_baselines WHERE project_id = ? AND status = 'approved'`)
     .bind(projectId).first<DesignBaselineRow>();

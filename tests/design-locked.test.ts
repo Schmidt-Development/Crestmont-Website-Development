@@ -13,6 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, TEST_PASSWORD } from "./support/app.ts";
 import * as DL from "../src/services/design-locked.ts";
+import * as DLR from "../src/routes/design-locked.ts";
 import * as B from "../src/services/builds.ts";
 import * as MS from "../src/services/malware-scan.ts";
 import * as AA from "../src/services/artifact-assets.ts";
@@ -685,7 +686,10 @@ test("[DLR-01] the dashboard and the project page render what a person needs to 
     const html = await page.text();
     assert.match(html, /scanned clean/, "the scan verdict is shown, not assumed");
     assert.match(html, /vite/);
-    assert.match(html, /Approve and lock/, "an owner is offered the approval");
+    // One action, named for everything it sets off. It used to read "Approve and lock", which described half of
+    // what the person wanted and left the backend waiting behind two more buttons.
+    assert.match(html, /Approve &(amp;)? Build Backend/, "an owner is offered the one approval");
+    assert.doesNotMatch(html, /Start a backend job/, "starting the backend is not a step a person performs");
     assert.match(html, /waiting for a person to approve it/);
     assert.match(html, /never be edited/, "the page says what approval means");
   } finally { t.close(); }
@@ -2345,4 +2349,163 @@ test("[DLC-12] every acceptance criterion needs a probe, not just one of them", 
     }, { recordedBy: staff.id });
     assert.equal(all.ok, true, JSON.stringify(all));
   } finally { t.close(); }
+});
+
+// ── ONE APPROVAL ──────────────────────────────────────────────────────────────────────────────────────────────
+
+test("[SIMPLE-01] uploading authorizes nothing: approval is a separate act", async () => {
+  // The workflow is UPLOAD -> PREVIEW -> APPROVE & BUILD BACKEND. The step between the first two exists so a
+  // person can SEE what was measured before deciding, so an upload must never carry an authorization to build.
+  // An earlier draft of this defaulted the submission acknowledgement to true, which made uploading an approval
+  // in everything but name.
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Upload only", actorId: staff.id });
+    const client = t.client();
+    await client.login("owner@crestmont.test");
+
+    const res = await client.post(`/staff/builds/frontends/${made.projectId}/artifact`, { artifact: zipFile() });
+    assert.ok(res.status === 303 || res.status === 302, `the upload was refused: ${res.status}`);
+
+    const artifact = await DL.latestArtifact(t.db, made.projectId);
+    assert.ok(artifact, "no artifact was recorded");
+    const row = await t.db.prepare(
+      `SELECT approval_intent_by, approval_intent_applied_at FROM frontend_artifacts WHERE id = ?`,
+    ).bind(artifact.id).first<{ approval_intent_by: string | null; approval_intent_applied_at: string | null }>();
+    assert.equal(row?.approval_intent_by, null, "uploading must not authorize backend construction");
+    assert.equal(row?.approval_intent_applied_at, null);
+    assert.equal(artifact.scan_status, "pending");
+
+    const state = await DL.frontendState(t.db, made.projectId);
+    assert.equal(state.designLocked, false, "an upload alone never locks a design");
+    const jobs = (await t.db.prepare(`SELECT COUNT(*) AS n FROM build_jobs WHERE project_id = ?`)
+      .bind(made.projectId).first<{ n: number }>())!.n;
+    assert.equal(jobs, 0, "an upload alone never starts a build");
+  } finally { t.close(); }
+});
+
+test("[SIMPLE-04] the approval holds while preparation finishes, and applies itself afterwards", async () => {
+  // Pressing the button before the design has been measured is the ordinary case: scanning and import take time
+  // and a person should not have to come back. The decision is held against the artifact and becomes a real
+  // approval of a real baseline the moment one exists -- with that baseline's fingerprint and these bytes' own
+  // checksum, so it can never approve something else.
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Approve while preparing", actorId: staff.id });
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+
+    const client = t.client();
+    await client.login("owner@crestmont.test");
+    const approve = () => client.post(`/staff/builds/frontends/${made.projectId}/approve-and-build`, {});
+
+    const first = await approve();
+    assert.ok(first.status === 303 || first.status === 302, `the approval was refused: ${first.status}`);
+    const held = await t.db.prepare(`SELECT approval_intent_by, approval_intent_applied_at FROM frontend_artifacts WHERE id = ?`)
+      .bind(artifact.id).first<{ approval_intent_by: string | null; approval_intent_applied_at: string | null }>();
+    assert.equal(held?.approval_intent_by, staff.id, "the decision was not recorded");
+    assert.equal(held?.approval_intent_applied_at, null, "nothing is approved until there is a measured design");
+    assert.equal((await DL.frontendState(t.db, made.projectId)).designLocked, false);
+
+    // Pressing it twice is the same decision, not two of them.
+    await approve();
+    const again = await t.db.prepare(`SELECT approval_intent_by FROM frontend_artifacts WHERE id = ?`)
+      .bind(artifact.id).first<{ approval_intent_by: string | null }>();
+    assert.equal(again?.approval_intent_by, staff.id);
+
+    // Preparation finishes. The held decision becomes an approval of the baseline that was actually measured.
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "static" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput({ signatures: [{ page: "index", viewport: "desktop" }] }));
+    const applied = await DL.applySubmissionApproval(t.db, artifact.id, baseline.id);
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal((await DL.frontendState(t.db, made.projectId)).designLocked, true, "the design should now be locked");
+
+    // And it is spent: a second baseline cannot be approved by the same acknowledgement.
+    const second = await DL.applySubmissionApproval(t.db, artifact.id, baseline.id);
+    assert.equal(second.applied, false, "an acknowledgement must approve exactly one design");
+  } finally { t.close(); }
+});
+
+test("[SIMPLE-05] a quarantined or rejected artifact can never be approved", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Refusals", actorId: staff.id });
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "rejected", problems: ["no index.html"] });
+
+    const client = t.client();
+    await client.login("owner@crestmont.test");
+    const res = await client.post(`/staff/builds/frontends/${made.projectId}/approve-and-build`, {});
+    assert.equal(res.status, 409, `a rejected artifact must not be approvable: ${res.status}`);
+
+    const row = await t.db.prepare(`SELECT approval_intent_by FROM frontend_artifacts WHERE id = ?`)
+      .bind(artifact.id).first<{ approval_intent_by: string | null }>();
+    assert.equal(row?.approval_intent_by, null, "a refusal must not leave a decision behind");
+  } finally { t.close(); }
+});
+
+test("[SIMPLE-02] approving locks the design and the contract starts the build, with no second button", async () => {
+  // The real order, which the first draft of this test got wrong and the service refused: a contract is written
+  // AGAINST an approved design, so it cannot exist before the approval. That is why approving cannot itself queue
+  // a build -- there is nothing yet to judge the build against -- and why queueing is the contract's job. The
+  // chain is: the upload carries its approval, the import applies it, the runner is told a contract is wanted,
+  // Model A writes it, and submitting it queues the build. No step in that is a person.
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Approve and build", actorId: staff.id });
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "static" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput({ signatures: [{ page: "index", viewport: "desktop" }] }));
+
+    const client = t.client();
+    await client.login("owner@crestmont.test");
+    const approve = () => client.post(`/staff/builds/frontends/${made.projectId}/baselines/${baseline.id}/approve`, { note: "ship it" });
+    const jobs = async () => (await t.db.prepare(
+      `SELECT COUNT(*) AS n FROM build_jobs WHERE project_id = ?`).bind(made.projectId).first<{ n: number }>())!.n;
+
+    const first = await approve();
+    assert.ok(first.status === 303 || first.status === 302, `approval was refused: ${first.status}`);
+    const locked = await DL.frontendState(t.db, made.projectId);
+    assert.equal(locked.designLocked, true, "approving must lock the design");
+    assert.equal(await jobs(), 0, "no build yet: a design-locked build is judged against a contract, and there is none");
+
+    // A contract is now possible, because there is an approved design to write it against. This is what Model A
+    // submits, and submitting it is what queues the build.
+    const recorded = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint), { recordedBy: staff.id });
+    assert.equal(recorded.ok, true, JSON.stringify(recorded));
+    const started = await B.startBackendBuild(t.db, made.projectId, { actor: { kind: "user", userId: staff.id } });
+    assert.ok(started.job, `the contract did not start a build: ${started.refusal}`);
+    assert.equal(await jobs(), 1);
+
+    // A double-click, a refresh, a retried POST: the build is reused, never duplicated. syncProjectBuild keys on
+    // dedupe_key "<project>:first" and inserts OR IGNORE, and the database refuses a second active build anyway.
+    await approve();
+    await approve();
+    await B.startBackendBuild(t.db, made.projectId, { actor: { kind: "user", userId: staff.id } });
+    assert.equal(await jobs(), 1, "a repeated approval or start created another build");
+  } finally { t.close(); }
+});
+
+test("[SIMPLE-03] staff see seven states, and the internal one is still what is stored", async () => {
+  // Thirteen internal states, seven words a person reads. The mapping is total: an unmapped state would silently
+  // read as something, and the one thing worse than a confusing label is a confident wrong one.
+  const internal = ["awaiting_intake", "awaiting_payment", "queued", "preparing", "building", "verifying",
+    "needs_information", "ready_for_review", "approved", "failed", "canceled", "budget_paused", "paused"];
+  const labels = new Set(internal.map((s) => DLR.staffState(s)));
+  assert.deepEqual([...labels].sort(),
+    ["Building Backend", "Cancelled", "Completed", "Failed", "Preparing", "Queued", "Testing"],
+    "the staff-facing vocabulary is exactly the seven agreed words");
+
+  assert.equal(DLR.staffState("building"), "Building Backend");
+  assert.equal(DLR.staffState("verifying"), "Testing");
+  assert.equal(DLR.staffState("ready_for_review"), "Completed");
+  assert.equal(DLR.staffState("canceled"), "Cancelled");
+  // A build that stopped and needs a person reads as Failed, with the reason shown beside it.
+  assert.equal(DLR.staffState("needs_information"), "Failed");
+  assert.equal(DLR.staffState("budget_paused"), "Failed");
+  // Every state in the database's own CHECK constraint is covered.
+  for (const s of internal) assert.ok(DLR.STAFF_STATE[s], `${s} has no staff label`);
 });

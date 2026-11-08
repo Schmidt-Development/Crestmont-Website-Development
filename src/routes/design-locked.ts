@@ -379,7 +379,28 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
     ${csrf(ctx)}
     <input type="file" name="artifact" accept=".zip,application/zip" required>
     ${button("Upload", { variant: "primary" })}
-  </form>` : html`<p class="faint">You do not have permission to upload or approve a frontend.</p>`}
+  </form>
+  <p class="faint" style="margin:.4rem 0 0">Uploading authorizes nothing. The platform scans it, acquires its external
+    assets, imports it and measures the design, and you can preview the result below. Approving is a separate
+    decision, and it is the one that starts backend construction.</p>` : html`<p class="faint">You do not have permission to upload or approve a frontend.</p>`}
+
+  ${(() => {
+    // THE ONE HUMAN ACTION. Offered whatever stage the upload is at, because it is the same decision either way:
+    // this is the design, build its backend. When the design has been measured it approves that baseline now; when
+    // preparation is still running it records the decision against the artifact and the import applies it the
+    // moment a baseline exists. Either way nothing else is pressed.
+    const latest = artifacts.find((a) => a.id === latestArtifactId);
+    if (!mayApprove || !latest || approved) return html``;
+    if (latest.scan_status === "infected" || latest.status === "quarantined" || latest.status === "rejected") return html``;
+    const measured = baselines.some((b) => b.status === "draft");
+    return html`<form method="post" action="${BASE}/${projectId}/approve-and-build" style="margin:.9rem 0 0"
+        onsubmit="return confirm('Approve this frontend and build its backend? The appearance is locked, the AI will not be allowed to change it, and Model A and Model B run automatically from here.')">
+      ${csrf(ctx)}${button("Approve & Build Backend", { variant: "primary" })}
+      <span class="faint" style="margin-left:.5rem">${measured
+        ? "Locks this design and starts the backend: the integration contract is written automatically and the build is queued."
+        : "Preparation is still running. Your approval is recorded now and takes effect as soon as the design has been measured."}</span>
+    </form>`;
+  })()}
 </section>
 
 <section class="card">
@@ -410,8 +431,8 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
       { header: "Approved", cell: (b: DL.DesignBaselineRow) => b.approved_at ? html`${formatDateTime(b.approved_at)}` : html`<span class="faint">—</span>` },
       { header: "", cell: (b: DL.DesignBaselineRow) => !mayApprove ? html`` :
           b.status === "draft" ? html`<form method="post" action="${BASE}/${projectId}/baselines/${b.id}/approve" class="row" style="gap:.25rem"
-              onsubmit="return confirm('Approve this design? It locks the appearance, and the AI will not be allowed to change it.')">
-            ${csrf(ctx)}<input type="text" name="note" placeholder="note (optional)" maxlength="300">${button("Approve and lock", { variant: "primary", size: "sm" })}</form>`
+              onsubmit="return confirm('Approve this design and build its backend? It locks the appearance, the AI will not be allowed to change it, and the backend build starts automatically.')">
+            ${csrf(ctx)}<input type="text" name="note" placeholder="note (optional)" maxlength="300">${button("Approve & Build Backend", { variant: "primary", size: "sm" })}</form>`
           : (b.status === "superseded" || b.status === "rolled_back") ? html`<form method="post" action="${BASE}/${projectId}/rollback" class="row" style="gap:.25rem"
               onsubmit="return confirm('Roll back to this design? Backend work is not affected.')">
             ${csrf(ctx)}<input type="hidden" name="baselineId" value="${b.id}"><input type="text" name="reason" placeholder="why" maxlength="300" required>${button("Roll back", { variant: "ghost", size: "sm" })}</form>`
@@ -563,15 +584,16 @@ ${measured ? html`<section class="card">
       ? alert("warn", html`This project is design-locked, but the platform will not queue a build yet: <strong>${eligibility.reasons.join("; ")}</strong>. That is the same rule every build follows, so the thing to fix is the project, not this page.${automationOff ? html` Automatic starts are also switched off in <a href="/staff/builds">AI builds</a> settings.` : ""}`)
       : mayApprove
         ? html`<form method="post" action="${BASE}/${projectId}/build" class="row" style="gap:.5rem;align-items:center"
-            onsubmit="return confirm('Start a backend development job against the approved design?')">
-          ${csrf(ctx)}${button("Start a backend job", { variant: "primary" })}
-          <span class="faint">Queues a build for the Node 1 runner. The approved design is handed to it and cannot be changed by it.</span>
+            onsubmit="return confirm('Queue the backend build again? This is only needed if the automatic start did not happen.')">
+          ${csrf(ctx)}${button("Retry backend build", { variant: "ghost" })}
+          <span class="faint">Not a step in the workflow: approving the design starts the backend automatically. This is here for
+            the case where that did not happen, and it reuses the existing build rather than making a second one.</span>
         </form>`
         : html`<p class="faint">You do not have permission to start a build.</p>`}
 
   ${jobs.length === 0 ? emptyState("No backend job yet", "Nothing has been built against this design.") : table(jobs, [
       { header: "Build", cell: (j: Record<string, unknown>) => linkButton(String(j.id).slice(0, 12), `/staff/builds/${String(j.id)}`, "ghost", "sm") },
-      { header: "State", cell: (j: Record<string, unknown>) => badge(BUILD_TONE[String(j.state)] ?? "info", String(j.state).replace(/_/g, " ")) },
+      { header: "State", cell: (j: Record<string, unknown>) => html`<span title="${String(j.state)}">${badge(BUILD_TONE[String(j.state)] ?? "info", staffState(String(j.state)))}</span>` },
       { header: "Attempts", cell: (j: Record<string, unknown>) => html`${String(j.attempts ?? 0)} of ${String(j.max_attempts ?? 0)}` },
       { header: "Why it stopped", cell: (j: Record<string, unknown>) => j.stop_reason
           ? html`${String(j.stop_reason)}` : j.state_reason ? html`<span class="faint">${String(j.state_reason)}</span>` : html`<span class="faint">\u2014</span>` },
@@ -605,26 +627,66 @@ ${measured ? html`<section class="card">
     // `storeUpload` refuses anything that is not an allowed type, is empty, is oversized, or whose bytes do not
     // match its extension. That is a refusal to show the person, not an internal error, so it is answered 422
     // with the reason rather than being allowed to become a 500.
-    let stored;
-    try {
-      stored = await storeUpload(ctx, {
-        organizationId: project.organization_id, projectId, file, uploadedBy: actorId(ctx), folder: "frontend-artifacts",
-      });
-    } catch (e) {
-      if (e instanceof UploadError) throw new HttpError(422, e.message);
-      throw e;
-    }
-
-    await DL.recordArtifact(ctx.db, {
-      projectId, organizationId: project.organization_id, source: "upload",
-      fileId: stored.id, sha256: stored.sha256, sizeBytes: stored.size_bytes,
-      uploadedBy: actorId(ctx), scanStatus: stored.scan_status,
-    });
+    // UPLOADING AUTHORIZES NOTHING. It stores the bytes, and the platform then scans, imports, measures and
+    // previews them -- all of which a person needs to SEE before deciding. Approval is a separate act, and it is
+    // the only one that starts backend construction.
+    //
+    // An earlier version of this defaulted `approveOnMeasure` to true, so an upload silently authorized a build.
+    // That is the one thing this workflow must not do: the preview is the point of the step between them.
+    await receiveArtifact(ctx, { projectId, organizationId: project.organization_id, file });
 
     return redirect(ctx, `${BASE}/${projectId}`);
   });
 
-  // ── approve a baseline: the one step that must be a person ────────────────────────────────────────────────
+  // ── APPROVE & BUILD BACKEND: the one human action that starts the pipeline ────────────────────────────────
+  //
+  // Whatever stage the artifact is at, this is the same decision: "this is the design, build its backend". What
+  // differs is only whether there is a measured design to attach it to yet.
+  //
+  //   measured   -> approve that baseline now. The contract is written automatically and queues the build.
+  //   preparing  -> record the approval against the ARTIFACT. Scanning and import carry on, and the import report
+  //                 applies it the moment a baseline exists -- so the person waits for nothing and presses
+  //                 nothing again. An artifact that turns out infected or unmeasurable never reaches that point,
+  //                 so an intent can never approve one.
+  //
+  // Idempotent on purpose: a double-click, a refresh or a retried POST re-approves nothing and starts no second
+  // build (`syncProjectBuild` keys on a dedupe key and the database refuses a second active build anyway).
+  r.post(`${BASE}/:projectId/approve-and-build`, async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const projectId = p.projectId;
+    const artifact = await DL.latestArtifact(ctx.db, projectId);
+    if (!artifact) throw new HttpError(409, "There is no frontend artifact to approve. Upload one first.");
+    if (artifact.scan_status === "infected" || artifact.status === "quarantined") {
+      throw new HttpError(409, "This artifact was quarantined by the scanner, so it can never be approved.");
+    }
+    if (artifact.status === "rejected") {
+      throw new HttpError(409, "This artifact was rejected at import. Offer it for import again, or upload a corrected one.");
+    }
+
+    const draft = await DL.latestDraftBaseline(ctx.db, artifact.id);
+    if (draft) {
+      await DL.approveBaseline(ctx.db, draft.id, { approvedBy: actorId(ctx), note: "approved for backend construction" });
+      const contract = await DL.activeContract(ctx.db, projectId);
+      if (contract && contract.design_fingerprint === draft.fingerprint) {
+        const started = await startBackendBuild(ctx.db, projectId, { actor: { kind: "user", userId: actorId(ctx) } });
+        if (started.job) {
+          await audit(ctx.db, {
+            actorUserId: actorId(ctx), actorKind: "user", action: "builds.backend_job_started",
+            subjectType: "build_job", subjectId: started.job.id, organizationId: started.job.organization_id,
+            details: { projectId, baselineId: draft.id, trigger: "approve and build", contractVersion: contract.version },
+          });
+        }
+      }
+      return redirect(ctx, `${BASE}/${projectId}`);
+    }
+
+    // Nothing measured yet. Record the decision and let the preparation finish into it.
+    const noted = await DL.recordApprovalIntent(ctx.db, artifact.id, { by: actorId(ctx) });
+    if (!noted.ok) throw new HttpError(409, noted.why);
+    return redirect(ctx, `${BASE}/${projectId}`);
+  });
+
+  // ── approve a specific baseline by id (the same decision, from the baselines table) ───────────────────────
   r.post(`${BASE}/:projectId/baselines/:baselineId/approve`, async (ctx, p) => {
     requireStaff(ctx, "builds.configure");
     const form = await ctx.form();
@@ -632,6 +694,26 @@ ${measured ? html`<section class="card">
     const b = await DL.getBaseline(ctx.db, p.baselineId);
     if (!b || b.project_id !== p.projectId) throw new HttpError(404, "No such design baseline for this project.");
     await DL.approveBaseline(ctx.db, p.baselineId, { approvedBy: actorId(ctx), note: note || undefined });
+
+    // AND START THE BACKEND. Approving used to do only half of what the person meant: the design was locked and
+    // then nothing happened until somebody found the separate "start a backend job" button further down the page.
+    // One click now carries it as far as it can honestly go.
+    //
+    // A design-locked build is judged against an integration contract for THIS design, and without one it stops
+    // seconds after it starts. So: queue it when the contract is there, and when it is not, say that the contract
+    // is being written rather than queueing a build that cannot pass. Model A's draft arrives through
+    // frontend/contract/submit, which queues the build itself -- so that case completes without a person either.
+    const contract = await DL.activeContract(ctx.db, p.projectId);
+    if (contract && contract.design_fingerprint === b.fingerprint) {
+      const started = await startBackendBuild(ctx.db, p.projectId, { actor: { kind: "user", userId: actorId(ctx) } });
+      if (started.job) {
+        await audit(ctx.db, {
+          actorUserId: actorId(ctx), actorKind: "user", action: "builds.backend_job_started",
+          subjectType: "build_job", subjectId: started.job.id, organizationId: started.job.organization_id,
+          details: { projectId: p.projectId, baselineId: p.baselineId, trigger: "approve and build", contractVersion: contract.version },
+        });
+      }
+    }
     return redirect(ctx, `${BASE}/${p.projectId}`);
   });
 
@@ -808,6 +890,28 @@ function safeArr<T = Record<string, unknown>>(json: string | null): T[] {
 }
 
 /** A build's state, in the tone the workflow means it. */
+/**
+ * What staff see, which is seven words rather than thirteen internal states.
+ *
+ * The internal state is unchanged and still written to the row -- history, constraints and the runner's own
+ * reading of it all depend on it, and the unique index that stops two active builds names four of these values
+ * exactly. This is only the label, and the internal value stays available on hover.
+ *
+ * `needs_information`, `paused` and `budget_paused` read as Failed on purpose: each one means the build has
+ * stopped and a person has to do something, which is what Failed tells a reader. The row says what, beside it.
+ */
+export const STAFF_STATE: Record<string, string> = {
+  awaiting_intake: "Preparing", awaiting_payment: "Preparing", preparing: "Preparing",
+  queued: "Queued",
+  building: "Building Backend",
+  verifying: "Testing",
+  ready_for_review: "Completed", approved: "Completed",
+  failed: "Failed", needs_information: "Failed", budget_paused: "Failed", paused: "Failed",
+  canceled: "Cancelled",
+};
+
+export const staffState = (internal: string): string => STAFF_STATE[internal] ?? "Preparing";
+
 const BUILD_TONE: Record<string, string> = {
   ready_for_review: "ok", approved: "ok", queued: "info", preparing: "info", building: "info", verifying: "info",
   failed: "danger", canceled: "muted", needs_information: "warn", budget_paused: "warn", paused: "warn",
