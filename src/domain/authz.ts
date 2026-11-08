@@ -17,6 +17,9 @@ export type Permission =
   | "crm.access" | "delivery.access" | "support.access" | "ai.manage" | "voice.manage" | "customers.read"
   // AI Builds (paid-intake automation): read, operate (cancel/pause/retry/resume/revise), configure (limits, approve, backfill)
   | "builds.read" | "builds.manage" | "builds.configure" | "ai.budget"
+  // Website Delivery: attach a hosted website to an existing customer project, share it, replace and restore versions.
+  // Deliberately separate from the builds.* permissions: it does not depend on, or grant anything in, the AI builders.
+  | "website_delivery.manage"
   // Test-only payment simulation (internal E2E benchmarks; refused in production)
   | "payments.simulate"
   // AI Sales Optimization: view (owner/admin) and the Founder-only decisions (approve, production deploy/rollback, activation)
@@ -36,15 +39,15 @@ export const ROLE_PERMISSIONS: Record<Role, ReadonlySet<Permission>> = {
     "lead.read_all", "lead.write_all", "lead.assign", "quote.write", "quote.send", "project.read_all", "project.coordinate",
     "task.update_assigned", "milestone.update", "ticket.manage", "ticket.internal_note", "refund.review", "settings.operational",
     "cms.edit", "cms.publish", "portfolio.manage", "finance.read", "audit.read", "employee.manage",
-    "crm.access", "delivery.access", "support.access", "ai.manage", "voice.manage", "customers.read", "builds.read", "builds.manage", "salesopt.read", ...OWNER_ONLY, ...ALL_STAFF,
+    "crm.access", "delivery.access", "support.access", "ai.manage", "voice.manage", "customers.read", "builds.read", "builds.manage", "website_delivery.manage", "salesopt.read", ...OWNER_ONLY, ...ALL_STAFF,
   ]),
   administrator: new Set<Permission>(["lead.read_all", "lead.assign", "project.read_all", "settings.operational", "cms.edit",
     "cms.publish", "portfolio.manage", "audit.read", "employee.manage", "crm.access", "delivery.access", "support.access",
-    "ai.manage", "customers.read", "builds.read", "builds.manage", ...ALL_STAFF]),
+    "ai.manage", "customers.read", "builds.read", "builds.manage", "website_delivery.manage", ...ALL_STAFF]),
   sales: new Set<Permission>(["lead.read_assigned", "lead.write_assigned", "quote.write", "quote.send", "crm.access", "customers.read", ...ALL_STAFF]),
   developer: new Set<Permission>(["project.read_assigned", "task.update_assigned", "milestone.update", "delivery.access", ...ALL_STAFF]),
   project_manager: new Set<Permission>(["project.read_all", "project.coordinate", "milestone.update", "task.update_assigned",
-    "ticket.internal_note", "delivery.access", "support.access", "customers.read", "builds.read", ...ALL_STAFF]),
+    "ticket.internal_note", "delivery.access", "support.access", "customers.read", "builds.read", "website_delivery.manage", ...ALL_STAFF]),
   support: new Set<Permission>(["ticket.manage", "ticket.internal_note", "refund.review", "project.read_assigned", "support.access",
     "delivery.access", "customers.read", ...ALL_STAFF]),
   customer_admin: new Set<Permission>(["customer.org.read", "customer.org.write", "customer.approve", "customer.billing"]),

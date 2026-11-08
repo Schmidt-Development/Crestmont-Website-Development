@@ -252,8 +252,11 @@ ${rec && !done ? html`<p class="faint">Draft last saved ${formatDateTime(rec.upd
       organizationId: org.organizationId, projectId: p.id, decision,
       actorId: ctx.actor?.userId ?? "", note: String(form.get("note") ?? "").trim() || null, ip: ctx.ip ?? null,
     });
-    if (!r0.ok) throw new HttpError(409, r0.why);
-    return redirect(ctx, `/portal/projects/${p.id}`);
+    if (!r0.ok) return redirect(ctx, `/portal/projects/${p.id}`, { kind: "error", text: r0.why.charAt(0).toUpperCase() + r0.why.slice(1) + "." });
+    return redirect(ctx, `/portal/projects/${p.id}`, {
+      kind: "success",
+      text: decision === "approved" ? "Thank you — you approved the website. Your project team has been told." : "Thank you — your requested changes were sent to your project team.",
+    });
   });
 
   r.get("/portal/projects/:id/onboarding", async (ctx, p) => onboardingPage(ctx, requireCustomerOrg(ctx), p.id));

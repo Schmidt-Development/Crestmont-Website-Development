@@ -16,7 +16,7 @@
 
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
-import { html, formatDateTime, type SafeHtml } from "../lib/html.ts";
+import { html, formatDateTime, safeHttpsUrl, type SafeHtml } from "../lib/html.ts";
 import { HttpError, redirect, str as formStr } from "../app/http.ts";
 import { requireStaff } from "../app/app.ts";
 import { can } from "../domain/authz.ts";
@@ -154,37 +154,57 @@ export async function customerWebsiteSection(
   const d = await WD.visibleForCustomer(ctx.db, organizationId, projectId);
   if (!d) return html``;
 
-  const token = await BR.previewToken(ctx.env, d.job_id, d.revision_attempt, d.revision_cycle);
-  const href = token ? `/build-preview/${d.job_id}/${d.revision_attempt}-${d.revision_cycle}/${token}/` : null;
+  // Two sources, two ways of opening. An AI build is served from its stored snapshot through a freshly minted
+  // signed capability. An external website is opened at its own stored HTTPS address in a new tab: never framed,
+  // never proxied, and with no referrer, so the portal's address is not leaked to the host.
+  let viewLink: SafeHtml;
+  if (d.source === "external_url") {
+    const href = safeHttpsUrl(d.website_url);
+    viewLink = href !== "#"
+      ? html`<p><a class="btn primary" href="${href}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" data-website-link>View website</a>
+          <span class="faint">Opens the website in a new tab.</span></p>`
+      : alert("warn", "This website cannot be opened at the moment. Please tell us and we will look.");
+  } else {
+    const token = await BR.previewToken(ctx.env, d.job_id!, d.revision_attempt!, d.revision_cycle!);
+    const href = token ? `/build-preview/${d.job_id}/${d.revision_attempt}-${d.revision_cycle}/${token}/` : null;
+    viewLink = href
+      ? html`<p><a class="btn primary" href="${href}" target="_blank" rel="noopener noreferrer">View website</a>
+          <span class="faint">Opens in a new tab. The link is private to you and refreshes each time you load this page.</span></p>`
+      : alert("warn", "This website cannot be opened at the moment. Nobody has lost anything — the preview link could not be prepared. Please tell us and we will look.");
+  }
 
-  return html`<section class="card">
+  return html`<section class="card" data-your-website>
   <h2>Your website</h2>
-  <p class="faint">The website built for this project. Open it to look through it; it runs against a staging
-    environment, so anything you submit stays here.</p>
+  <p class="faint">${d.source === "external_url"
+    ? "The website prepared for this project. Open it to look through it, then approve it or tell us what you would like changed."
+    : "The website built for this project. Open it to look through it; it runs against a staging environment, so anything you submit stays here."}</p>
   ${dl([
-    ["Project", html`${d.project_id}`],
+    ["Website", d.website_name ?? "Your website"],
+    ["Version", html`Version ${String(d.version)}${d.source === "ai_build" ? html` <span class="faint">(<code>${String(d.revision_attempt)}-${String(d.revision_cycle)}</code>)</span>` : ""}`],
     ["Status", badge(d.customer_decision === "approved" ? "ok" : "info", WD.DELIVERY_LABEL[d.status])],
-    ["Version", html`<code>${String(d.revision_attempt)}-${String(d.revision_cycle)}</code>`],
-    ["Available since", html`${d.visible_at ? formatDateTime(d.visible_at) : "—"}`],
+    ["Date shared", html`${d.visible_at ? formatDateTime(d.visible_at) : "—"}`],
+    ["Last updated", html`${formatDateTime(d.updated_at)}`],
   ])}
-  ${href
-    ? html`<p><a class="btn primary" href="${href}" target="_blank" rel="noopener noreferrer">View website</a>
-        <span class="faint">Opens in a new tab. The link is private to you and refreshes each time you load this page.</span></p>`
-    : alert("warn", "This website cannot be opened at the moment. Nobody has lost anything — the preview link could not be prepared. Please tell us and we will look.")}
+  ${viewLink}
   ${d.customer_decision
     ? alert(d.customer_decision === "approved" ? "success" : "info",
         d.customer_decision === "approved"
-          ? html`You approved this website on ${formatDateTime(d.customer_reviewed_at!)}. Thank you.`
-          : html`You asked for changes on ${formatDateTime(d.customer_reviewed_at!)}${d.customer_note ? html`: “${d.customer_note}”` : ""}.`)
-    : html`<form method="post" action="/portal/projects/${projectId}/website/decision" class="stack" style="gap:.5rem">
-        ${csrf(ctx)}
-        <label for="f-website-note">Anything you would like changed?</label>
-        <textarea id="f-website-note" name="note" rows="3" maxlength="1000" placeholder="Optional — tell us what to adjust"></textarea>
-        <div class="row" style="gap:.5rem">
-          ${button("Approve this website", { variant: "primary", size: "sm" })}
-          <button class="btn secondary sm" type="submit" name="decision" value="revision_requested">Request changes</button>
-        </div>
-      </form>`}
+          ? html`You approved version ${String(d.version)} on ${formatDateTime(d.customer_reviewed_at!)}. Thank you.`
+          : html`You asked for changes to version ${String(d.version)} on ${formatDateTime(d.customer_reviewed_at!)}${d.customer_note ? html`: “${d.customer_note}”` : ""}. We will share a revised version here.`)
+    : html`<div class="stack" style="gap:.75rem">
+        <form method="post" action="/portal/projects/${projectId}/website/decision" class="row" style="gap:.5rem">
+          ${csrf(ctx)}
+          <input type="hidden" name="decision" value="approved">
+          ${button("Approve Website", { variant: "primary", size: "sm" })}
+        </form>
+        <form method="post" action="/portal/projects/${projectId}/website/decision" class="stack" style="gap:.5rem">
+          ${csrf(ctx)}
+          <input type="hidden" name="decision" value="revision_requested">
+          <label for="f-website-note">What would you like changed?</label>
+          <textarea id="f-website-note" name="note" rows="3" maxlength="1000" required placeholder="Describe the changes you would like"></textarea>
+          <div class="row">${button("Request Changes", { variant: "secondary", size: "sm" })}</div>
+        </form>
+      </div>`}
 </section>`;
 }
 

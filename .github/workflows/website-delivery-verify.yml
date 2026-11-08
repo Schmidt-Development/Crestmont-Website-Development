@@ -63,7 +63,7 @@ jobs:
           MFA_ENCRYPTION_KEY: ${{ secrets.STAGING_MFA_ENCRYPTION_KEY }}
         run: node --no-warnings scripts/staging-access.ts --url "$STAGING_URL" --out access
 
-      - name: Deliver a finished website to an existing customer project
+      - name: Deliver a finished AI build and an externally hosted website to an existing customer project
         env:
           E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
           E2E_ACCOUNTS_FILE: access/demo-accounts.md
@@ -73,8 +73,18 @@ jobs:
           npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
           rc=0
+          # Steps run under `bash -e -o pipefail`; a failing first file must not stop the second from running, so the
+          # exit codes are collected explicitly and the step exits with them at the end.
+          set +e
+          # Two files, run one after the other on the same customer project: the AI-build handover first (regression),
+          # then the Website Delivery tab's externally hosted website, which supersedes it and is what the project
+          # is left showing. Each file's result counts; neither can hide the other's failure.
           node --no-warnings --test --test-concurrency=1 tests/e2e/staging-website-delivery.e2e.ts 2>&1 | tee delivery-e2e.log
           rc=${PIPESTATUS[0]}
+          node --no-warnings --test --test-concurrency=1 tests/e2e/staging-website-delivery-external.e2e.ts 2>&1 | tee delivery-external-e2e.log
+          rc2=${PIPESTATUS[0]}
+          [ "$rc2" -eq 0 ] || rc=$rc2
+          cat delivery-external-e2e.log >> delivery-e2e.log
           # A SKIPPED check is UNDETERMINED, and this run exists to determine something. Several of these tests
           # skip themselves when the scanner or the runner has not answered within their patience, and node:test
           # exits 0 for a skip -- so this workflow could report GREEN having established nothing about the upload
@@ -85,7 +95,7 @@ jobs:
             grep -E '^ok [0-9]+ - .* # SKIP' delivery-e2e.log | cut -c1-400
             rc=1
           fi
-          if ! grep -qE '^# fail 0$' delivery-e2e.log; then
+          if [ "$(grep -cE '^# fail 0$' delivery-e2e.log)" -ne 2 ]; then
             echo "::error title=Website delivery::the test run did not report '# fail 0':"
             grep -E '^# (tests|pass|fail|skipped) ' delivery-e2e.log || echo "  (no counts were printed at all)"
             rc=1
