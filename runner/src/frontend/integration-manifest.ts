@@ -75,6 +75,20 @@ export interface AcceptanceProbe {
   body?: Record<string, unknown>;
   /** The status this request must get. */
   expect: number;
+  /**
+   * Text that must appear in the response body, and text that must not.
+   *
+   * Status codes alone could not express most of what the criteria actually say. "After a successful submission
+   * the page renders a confirmation message and the form is no longer present" is a statement about the response
+   * BODY, so it carried no probe, stayed UNDETERMINED for ever, and -- since undetermined is never a pass -- the
+   * functional gate could not close on a site whose every other check passed. These make such a criterion
+   * executable without softening it: the prose still says what it means, this says how to check it.
+   *
+   * Matching is plain case-sensitive substring, against the response text. Nothing is interpreted as HTML: a
+   * probe that wants an element names enough of its markup to be unambiguous.
+   */
+  expectBodyContains?: string[];
+  expectBodyAbsent?: string[];
   /** Send it twice and judge the SECOND response: "an email that already exists", "already cancelled". */
   repeat?: boolean;
 }

@@ -144,6 +144,8 @@ export function checkConformance(o: {
   repo: string;
   manifest: IntegrationManifest & ManifestContract;
   baselinePackage?: Record<string, unknown> | null;
+  /** Where the built site is served from, relative to the repo. The build regenerates it. */
+  outputRoot?: string | null;
   runtime?: RuntimeEvidence;
 }): ConformanceReport {
   const { manifest: m } = o;
@@ -344,6 +346,31 @@ export function checkConformance(o: {
         violation("config", "script-wrong",
           `The contract requires \`${name}\` to be \`${rule}\`; it is \`${now ?? "(missing)"}\`.`,
           `Set the \`${name}\` script to \`${rule}\`.`, "source", "package.json");
+      }
+    }
+
+    // THE STARTED FILE MAY NOT LIVE IN THE BUILD OUTPUT.
+    //
+    // The driver runs the build and then the start script, in that order. A bundler empties its output
+    // directory first -- vite does by default whenever outDir is inside the project -- so a server authored
+    // there is deleted before anything can start it. Conformance cannot even see the file, because the output
+    // directory is skipped when sources are read.
+    //
+    // Measured, and it cost a whole Northgate build: the start script ran `dist/server.js`, the first cycle
+    // failed on that file being CommonJS inside a `"type": "module"` package, and the next two cycles failed with
+    // MODULE_NOT_FOUND because the rebuild had removed it. Model B was told `it does not work` each time and
+    // rewrote a file the very next step erased.
+    let outDir = o.outputRoot ?? "";
+    if (outDir.startsWith("./")) outDir = outDir.slice(2);
+    while (outDir.endsWith("/")) outDir = outDir.slice(0, -1);
+    if (outDir) {
+      for (const name of ["start", "api", "serve"]) {
+        const cmd = scripts[name];
+        if (!cmd || !cmd.includes(outDir + "/")) continue;
+        violation("config", "start-in-build-output",
+          `The ${name} script is ${cmd}, which runs a file inside ${outDir} -- the build output. The build regenerates that directory and deletes whatever was written there, and the driver builds before it starts, so the file is gone before anything can run it.`,
+          `Keep the server's own source outside ${outDir} -- a server/ directory at the project root is the usual place -- and point ${name} at it there. ${outDir} holds generated files only.`,
+          "source", "package.json");
       }
     }
 
