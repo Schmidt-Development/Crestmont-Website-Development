@@ -89,7 +89,9 @@ test("[LEGAL-005] default (not configured) adds no tax anywhere and documents ke
   assert.match(html, /not a tax invoice; tax configuration is not yet finalized/);
   assert.doesNotMatch(html, /data-testid="tax-breakdown"/);
   const pdf = await pdfText(await cu.c.get(`/portal/billing/invoices/${inv.id}/pdf`));
-  assert.doesNotMatch(pdf, /Subtotal|Sales tax/);
+  // Phase 8.4: the invoice always shows its subtotal; with no tax configured the tax line says so and no tax is invented.
+  assert.doesNotMatch(pdf, /Sales tax/);
+  assert.match(pdf, /\(No tax applied\) Tj/);
   // A Stripe Tax "planned" flag alone, or a registration with no jurisdiction, still adds nothing.
   const owner = await staff(t, "owner");
   assert.equal((await owner.c.post("/staff/settings/tax", { registered: "1", stripe_tax_planned: "1", taxable: ["business"] })).status, 303);

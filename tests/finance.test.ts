@@ -115,7 +115,9 @@ test("[PORTAL-008] billing page lists orders, invoices, receipts, subscriptions 
   const at = new Date().toISOString();
   await t.db.prepare(`INSERT INTO subscriptions (id, organization_id, product_id, status, current_period_end, created_at, updated_at) VALUES ('sub_p', ?, 'professional', 'past_due', ?, ?, ?)`).bind(cu.organizationId, at, at, at).run();
   const page = await (await cu.c.get("/portal/billing")).text();
-  for (const re of [/Starter package/, /\$123\.45/, /Professional maintenance/, /Past Due/, /payment failed/i, new RegExp(s.ord)]) assert.match(page, re);
+  for (const re of [/Starter package/, /\$123\.45/, /Professional maintenance/, /Past Due/, /payment failed/i, /Invoice \d{3,}/, /Receipt \d{3,}/]) assert.match(page, re);
+  // Phase 8.2: orders are listed by what was bought, never by their internal id (ids may appear only inside link URLs).
+  assert.doesNotMatch(page.replace(/<[^>]*>/g, " "), new RegExp(s.ord), "no internal order id as visible text");
   assert.doesNotMatch(page, /Pay now/, "no pay button without Stripe");
   assert.equal((await cu.c.post(`/portal/billing/invoices/${s.inv}/pay`)).status, 409);
   // Billing portal requires configuration.

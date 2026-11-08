@@ -16,7 +16,7 @@ import { DRAFT_BANNER } from "../content/legal.ts";
 import * as ag from "../services/agreements.ts";
 import { loadReceipt, businessIdentity, type ReceiptData } from "../services/receipts.ts";
 import { taxStatement, taxLabel } from "../services/tax.ts";
-import { usd } from "../services/finance-documents.ts";
+import { usd, longDate } from "../services/finance-documents.ts";
 import * as pricing from "../services/pricing-approvals.ts";
 import { audit } from "../services/security.ts";
 
@@ -101,34 +101,53 @@ ${org ? "" : html`<section class="card stack"><h2 style="font-size:1.2rem">Store
 
 // ───────────────────────── PAY-005 receipts ─────────────────────────
 
-const MILESTONE_LABEL: Record<string, string> = { full: "Payment in full", deposit_50: "50% deposit", design_25: "25% design milestone", prelaunch_25: "25% pre-launch", change_order: "Change order", subscription: "Subscription" };
-
-function receiptDocument(ctx: AppContext, r: ReceiptData, backHref: string): SafeHtml {
+/**
+ * Phase 8: the receipt as a customer-facing document (white paper, black and gold, the same layout as the PDF).
+ * It carries the human-readable numbers only. Staff additionally get a collapsed "Technical details" section with
+ * the internal and Stripe references; customers never do.
+ */
+function receiptDocument(ctx: AppContext, r: ReceiptData, backHref: string, staff: boolean): SafeHtml {
   const id = businessIdentity(ctx.settings);
-  const ref = r.payment.stripe_payment_intent_id ?? null;
+  const facts: [string, string][] = [["Receipt number", r.receiptNumber], ["Payment date", longDate(r.payment.created_at)], ["Invoice", r.invoice ? r.invoice.label : "No invoice linked"], ["Status", r.statusLabel]];
+  const details: [string, string | SafeHtml][] = [
+    ["Payment method", r.paymentMethod ?? "Recorded by Crestmont"],
+    ["Payment status", r.statusLabel],
+    ...(r.dispute ? [["Dispute", `${usd(r.dispute.amount_cents)} disputed on ${longDate(r.dispute.created_at)} (${label(r.dispute.status)})`] as [string, string]] : []),
+    ["Associated invoice", r.invoice ? `${r.invoice.label} (invoice total ${usd(r.invoice.amount_cents)}, issued ${longDate(r.invoice.created_at)})` : "No invoice linked"],
+    ...(r.tax ? [["Of which sales tax", html`${r.tax.byJurisdiction.map((j) => html`<span data-testid="receipt-tax">${taxLabel(j)}: ${usd(j.taxCents)}</span><br>`)}`] as [string, SafeHtml]] : []),
+  ];
+  const tech: [string, string | SafeHtml][] = [
+    ["Internal payment id", html`<code>${r.payment.id}</code>`], ["Legacy receipt reference", html`<code>${r.legacyReference}</code>`],
+    ["Stripe payment intent", r.payment.stripe_payment_intent_id ? html`<code>${r.payment.stripe_payment_intent_id}</code>` : "Not recorded"],
+    ["Stripe charge", r.payment.stripe_charge_id ? html`<code>${r.payment.stripe_charge_id}</code>` : "Not recorded"],
+    ["Internal invoice id", r.invoice ? html`<code>${r.invoice.id}</code>` : "—"],
+    ["Stripe Checkout session", r.invoice?.stripe_checkout_session_id ? html`<code>${r.invoice.stripe_checkout_session_id}</code>` : "Not recorded"],
+    ["Stripe invoice", r.invoice?.stripe_invoice_id ? html`<code>${r.invoice.stripe_invoice_id}</code>` : "—"],
+    ["Order", r.order ? html`<code>${r.order.id}</code> (${label(r.order.kind)}, total ${formatCents(r.order.total_cents)})` : "—"],
+  ];
   return html`<div class="no-print row" style="margin-bottom:1rem">${linkButton("Back", backHref, "ghost", "sm")}
 <a class="btn btn--primary btn--sm" href="${ctx.url.pathname}/pdf" data-pdf>Download PDF</a>
 <a class="btn btn--secondary btn--sm" href="${ctx.url.pathname}?view=print">Print version</a></div>
-<article class="card receipt stack" data-testid="receipt">
-<div class="row row--between"><div><div class="eyebrow">Payment receipt</div><h1 style="margin:0">${r.receiptNumber}</h1></div>
-<div style="text-align:right"><strong>${id.tradingName}</strong><br>
-${id.legalName ? html`<span>${id.legalName}</span><br>` : html`<span class="faint" data-testid="legal-name-pending">The legal business name will appear here once the legal entity is established.</span><br>`}
-${id.address ? html`<span>${id.address}</span><br>` : html`<span class="faint">A registered business address will appear here once established.</span><br>`}
-<span>${id.billingEmail}</span></div></div>
-${dl([
-  ["Receipt number", r.receiptNumber], ["Billed to", r.organization.name], ["Payment date", formatDateTime(r.payment.created_at)],
-  ["Amount paid", html`<strong>${formatCents(r.payment.amount_cents)}</strong> USD`], ["Payment status", label(r.payment.status)],
-  ...(r.refundedCents ? [["Refunded", formatCents(r.refundedCents)] as [string, string]] : []),
-  ["Invoice", r.invoice ? `${r.invoice.id} — ${r.invoice.description ?? MILESTONE_LABEL[r.invoice.milestone_kind ?? ""] ?? "Invoice"}` : "No invoice linked"],
-  ["Invoice amount", r.invoice ? formatCents(r.invoice.amount_cents) : "—"],
-  ...(r.tax ? [["Of which sales tax", html`${r.tax.byJurisdiction.map((j) => html`<span data-testid="receipt-tax">${taxLabel(j)}: ${usd(j.taxCents)}</span><br>`)}`] as [string, SafeHtml]] : []),
-  ["Invoice issued", formatDate(r.invoice?.created_at)],
-  ["Order", r.order ? `${r.order.id} (${label(r.order.kind)}, total ${formatCents(r.order.total_cents)})` : "—"],
-  ["Stripe payment reference", ref ?? "Not recorded"], ["Stripe charge", r.payment.stripe_charge_id ?? "Not recorded"],
-  ["Stripe checkout session", r.invoice?.stripe_checkout_session_id ?? "Not recorded"], ["Internal payment ID", r.payment.id],
-])}
-<p class="faint">This receipt confirms a payment recorded from a Stripe payment confirmation. ${taxStatement(r.tax)}</p>
-</article>`;
+<article class="fin-doc" data-testid="receipt" aria-label="${r.receiptLabel} from ${id.tradingName}">
+<header class="fin-doc__head"><div><span class="fin-doc__mark">CRESTMONT</span><span class="fin-doc__sub">WEBSITE DEVELOPMENT</span>
+<p class="fin-doc__entity">${id.legalName ? html`Operated by ${id.legalName}<br>` : ""}${id.address ? html`${id.address}<br>` : ""}${id.billingEmail}</p></div>
+<div class="fin-doc__title"><h1>Receipt</h1><p class="fin-doc__number" data-testid="receipt-number">${r.receiptLabel}</p></div></header>
+<section class="fin-doc__parties"><div><h2 class="fin-doc__label">Received from</h2><p class="fin-doc__party">${r.organization.name}</p></div>
+<dl class="fin-doc__facts">${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl></section>
+${r.statusNote ? html`<p class="fin-doc__notice" data-testid="receipt-status-note">${r.statusNote}</p>` : ""}
+<div class="fin-doc__amount"><div><p class="fin-doc__label">Amount paid</p><strong data-testid="receipt-amount">${usd(r.payment.amount_cents)} USD</strong></div><div><p class="fin-doc__label">Paid on</p><strong style="font-size:1.05rem">${longDate(r.payment.created_at)}</strong></div></div>
+<table class="fin-doc__table"><thead><tr><th scope="col">Service</th><th scope="col" class="num">Amount (USD)</th></tr></thead><tbody>
+<tr><td>${r.service}</td><td class="num">${usd(r.payment.amount_cents)}</td></tr></tbody></table>
+<table class="fin-doc__totals"><tbody><tr class="is-strong"><th scope="row">Total paid</th><td>${usd(r.payment.amount_cents)}</td></tr>
+${r.refunds.map((rf) => html`<tr><th scope="row">Refunded ${longDate(rf.at)}</th><td>${usd(-rf.amount_cents)}</td></tr>`)}
+${r.refundedCents ? html`<tr class="is-highlight"><th scope="row">Net amount after refunds</th><td>${usd(r.payment.amount_cents - r.refundedCents)}</td></tr>` : ""}</tbody></table>
+<section class="fin-doc__section"><h2 class="fin-doc__label">Payment details</h2><dl class="fin-doc__details">${details.map(([k, v]) => html`<dt>${k}</dt><dd>${v}</dd>`)}</dl></section>
+<footer class="fin-doc__foot"><p>This receipt confirms a payment received by Crestmont Website Development, as confirmed by our payment processor, Stripe.${r.tax ? html` ${taxStatement(r.tax)}` : ""}</p>
+<p>Questions about this payment? Contact ${id.billingEmail} and quote ${r.receiptLabel}.</p><p class="fin-doc__thanks">Thank you for your business.</p>
+<p>${[id.tradingName, id.legalName].filter(Boolean).join(" · ")}</p></footer>
+</article>
+${staff ? html`<details class="card fin-doc__tech no-print" data-testid="technical-details"><summary>Technical details (staff only)</summary>
+<p class="faint">Internal and payment-processor references for reconciliation, support and audit. They never appear on the customer's receipt.</p>${dl(tech)}</details>` : ""}`;
 }
 
 function printShell(ctx: AppContext, title: string, body: SafeHtml) {
@@ -147,9 +166,9 @@ async function receiptRoute(ctx: AppContext, paymentId: string, staff: boolean) 
     r = await loadReceipt(ctx.db, paymentId, org.organizationId); // 404 for any other organization's payment
     back = r.invoice ? `/portal/billing/invoices/${r.invoice.id}` : "/portal/billing";
   }
-  const doc = receiptDocument(ctx, r, back);
-  if (ctx.url.searchParams.get("view") === "print") return printShell(ctx, `Receipt ${r.receiptNumber}`, doc);
-  const title = `Receipt ${r.receiptNumber}`;
+  const doc = receiptDocument(ctx, r, back, staff);
+  if (ctx.url.searchParams.get("view") === "print") return printShell(ctx, r.receiptLabel, doc);
+  const title = r.receiptLabel;
   return staff ? staffPage(ctx, title, doc) : portalPage(ctx, title, doc);
 }
 

@@ -7,7 +7,8 @@
 // caller's (default US Letter, 612 × 792).
 
 export type Rgb = readonly [number, number, number];
-export interface TextOpts { size?: number; bold?: boolean; color?: Rgb; align?: "left" | "right" | "center" }
+/** `charSpace`: extra space between characters in points (PDF Tc), used for tracked uppercase labels. */
+export interface TextOpts { size?: number; bold?: boolean; color?: Rgb; align?: "left" | "right" | "center"; charSpace?: number }
 
 // Glyph widths (1/1000 em) for WinAnsi 32–126 from the Adobe Core 14 AFM files.
 const HELV = [278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556,
@@ -48,11 +49,12 @@ export function pdfString(s: string): string {
   return o + ")";
 }
 
-export function textWidth(s: string, size: number, bold = false): number {
+export function textWidth(s: string, size: number, bold = false, charSpace = 0): number {
   const table = bold ? HELV_BOLD : HELV;
   let w = 0;
-  for (const b of winAnsiBytes(s)) w += b >= 32 && b <= 126 ? table[b - 32] : (HIGH_WIDTH[b]?.[bold ? 1 : 0] ?? 556);
-  return (w * size) / 1000;
+  const bytes = winAnsiBytes(s);
+  for (const b of bytes) w += b >= 32 && b <= 126 ? table[b - 32] : (HIGH_WIDTH[b]?.[bold ? 1 : 0] ?? 556);
+  return (w * size) / 1000 + (bytes.length > 1 ? charSpace * (bytes.length - 1) : 0);
 }
 
 /** Greedy word wrap to a maximum width; a single over-long word is hard-broken. */
@@ -82,14 +84,19 @@ const rgb = (c: Rgb) => c.map((v) => num(v)).join(" ");
 
 export class PdfPage {
   readonly ops: string[] = [];
+  /** Character spacing (Tc) currently in effect. Tc is graphics state: it survives ET, so it is reset explicitly. */
+  private charSpace = 0;
   readonly width: number; readonly height: number;
   constructor(width: number, height: number) { this.width = width; this.height = height; }
 
   text(x: number, y: number, s: string, o: TextOpts = {}): this {
     const size = o.size ?? 10;
-    const w = o.align && o.align !== "left" ? textWidth(s, size, o.bold) : 0;
+    const cs = o.charSpace ?? 0;
+    const w = o.align && o.align !== "left" ? textWidth(s, size, o.bold, cs) : 0;
     const tx = o.align === "right" ? x - w : o.align === "center" ? x - w / 2 : x;
-    this.ops.push(`BT /${o.bold ? "F2" : "F1"} ${num(size)} Tf ${rgb(o.color ?? [0, 0, 0])} rg ${num(tx)} ${num(y)} Td ${pdfString(s)} Tj ET`);
+    const tc = cs !== this.charSpace ? `${num(cs)} Tc ` : "";
+    this.charSpace = cs;
+    this.ops.push(`BT /${o.bold ? "F2" : "F1"} ${num(size)} Tf ${tc}${rgb(o.color ?? [0, 0, 0])} rg ${num(tx)} ${num(y)} Td ${pdfString(s)} Tj ET`);
     return this;
   }
 
@@ -201,19 +208,30 @@ export class PdfFlow {
     }
   }
 
-  /** A table with a header row (repeated on each new page), wrapped cells and right-aligned numeric columns. */
-  table(cols: TableColumn[], rows: string[][], o: { size?: number; headerFill?: Rgb; rule?: Rgb } = {}) {
-    const size = o.size ?? 9, leading = size * 1.4, pad = 4;
+  /**
+   * A table with a header row (repeated on each new page), wrapped cells and right-aligned numeric columns.
+   * `headerFill: null` draws an unfilled header between a top rule (`headerRule`) and a bottom rule (`headerAccent`)
+   * in `headerText` colour; the default is the original solid dark header with white text. `headerSize` and
+   * `headerCharSpace` style the header labels; `rowLeading` is the line height as a multiple of `size`.
+   */
+  table(cols: TableColumn[], rows: string[][], o: { size?: number; headerFill?: Rgb | null; headerText?: Rgb; headerRule?: Rgb; headerAccent?: Rgb; headerSize?: number; headerCharSpace?: number; rule?: Rgb; color?: Rgb; rowLeading?: number } = {}) {
+    const size = o.size ?? 9, leading = size * (o.rowLeading ?? 1.4), pad = 4;
+    const hSize = o.headerSize ?? size, hLeading = hSize * 1.4;
     const header = () => {
-      this.ensure(leading + pad * 2);
-      this.page.rect(this.margin, this.y - leading - pad, this.contentWidth, leading + pad, o.headerFill ?? [0.07, 0.07, 0.07]);
+      this.ensure(hLeading + pad * 2 + leading);
+      if (o.headerFill === null) {
+        this.page.line(this.margin, this.y, this.margin + this.contentWidth, this.y, { width: 0.8, color: o.headerRule ?? [0.07, 0.07, 0.07] });
+      } else {
+        this.page.rect(this.margin, this.y - hLeading - pad, this.contentWidth, hLeading + pad, o.headerFill ?? [0.07, 0.07, 0.07]);
+      }
       let x = this.margin;
-      this.y -= leading;
+      this.y -= hLeading + (o.headerFill === null ? 2 : 0);
       for (const c of cols) {
-        this.page.text(c.align === "right" ? x + c.width - pad : x + pad, this.y - 1, c.header, { size, bold: true, color: [1, 1, 1], align: c.align === "right" ? "right" : "left" });
+        this.page.text(c.align === "right" ? x + c.width - pad : x + pad, this.y - 1, c.header, { size: hSize, bold: true, color: o.headerText ?? [1, 1, 1], align: c.align === "right" ? "right" : "left", charSpace: o.headerCharSpace });
         x += c.width;
       }
       this.y -= pad;
+      if (o.headerFill === null) this.page.line(this.margin, this.y, this.margin + this.contentWidth, this.y, { width: 0.8, color: o.headerAccent ?? [0.07, 0.07, 0.07] });
     };
     header();
     for (const r of rows) {
@@ -223,7 +241,7 @@ export class PdfFlow {
       let x = this.margin;
       cells.forEach((lines, i) => {
         const c = cols[i];
-        lines.forEach((l, j) => this.page.text(c.align === "right" ? x + c.width - pad : x + pad, this.y - leading * (j + 1), l, { size, align: c.align === "right" ? "right" : "left" }));
+        lines.forEach((l, j) => this.page.text(c.align === "right" ? x + c.width - pad : x + pad, this.y - leading * (j + 1), l, { size, align: c.align === "right" ? "right" : "left", color: o.color }));
         x += c.width;
       });
       this.y -= h;

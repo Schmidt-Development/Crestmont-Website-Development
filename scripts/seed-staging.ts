@@ -127,7 +127,12 @@ db.raw.prepare(`INSERT INTO messages (id, organization_id, project_id, author_us
 const SKIP = new Set(["d1_migrations", "sqlite_sequence", "sessions", "rate_limits", "security_events", "auth_tokens", "email_deliveries", "email_messages", "ingestion_status", "_cf_KV",
   "build_settings", "build_project_controls", "build_briefs", "build_jobs", "build_runs", "build_events", "build_requirements", "build_runners",
   // Derived by triggers from contacts (migrations/0048): re-created with fresh ids when the contacts rows are applied.
-  "contact_identities", "contact_identity_links"]);
+  "contact_identities", "contact_identity_links",
+  // Phase 8 document numbers (migrations/0100) are allocated by triggers on the target database when the invoices and
+  // payments rows are applied, so a re-seed continues the existing sequences instead of colliding with them.
+  "receipts", "document_counters"]);
+/** Columns allocated on the target database (see SKIP): never exported. */
+const DERIVED_COLUMNS: Record<string, ReadonlySet<string>> = { invoices: new Set(["invoice_number"]) };
 const tables = (db.raw.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all() as { name: string }[]).map((r) => r.name).filter((t) => !SKIP.has(t));
 const deps = new Map(tables.map((t) => [t, new Set((db.raw.prepare(`PRAGMA foreign_key_list("${t}")`).all() as { table: string }[]).map((f) => f.table).filter((x) => x !== t && tables.includes(x)))]));
 const ordered: string[] = [];
@@ -146,7 +151,7 @@ const lines = ["-- Crestmont STAGING preview seed (sample data, generated " + ne
 let rows = 0;
 for (const t of ordered) {
   for (const r of db.raw.prepare(`SELECT * FROM "${t}"`).all() as Record<string, unknown>[]) {
-    const cols = Object.keys(r);
+    const cols = Object.keys(r).filter((c) => !DERIVED_COLUMNS[t]?.has(c));
     lines.push(`INSERT OR IGNORE INTO "${t}" (${cols.map((c) => `"${c}"`).join(", ")}) VALUES (${cols.map((c) => value(t, c, r[c])).join(", ")});`);
     rows++;
   }
