@@ -336,3 +336,44 @@ test("[DL-011] the design-lock definition is pinned: changing it invalidates eve
     signatureHash(sig),
     "200px less content, with everything below it reflowed, is the same design");
 });
+
+test("[DL-012] a page declared to change its content is allowed to move, but not to change its design", () => {
+  // Three consecutive real builds failed here. The visual gate passed at cycle 1, before Model B had written a
+  // backend, and failed at cycle 2 once the backend worked -- on `index at tablet [layout]: section spacing
+  // changed by 8616px; footer by 43px` -- while conformance and the functional gate both passed. The two gates
+  // could never hold at the same time, so the build could never finish.
+  //
+  // Data arriving where a placeholder was makes a page taller and everything below it sits lower. The contract
+  // already declares that this page's content changes; refusing it for the spacing that change causes asks for a
+  // contradiction.
+  const b = base();
+  const moved = sig({
+    landmarks: [
+      { sel: "header", x: 0, y: 0, w: 1440, h: 88 },
+      { sel: "main", x: 0, y: 88, w: 1440, h: 11800 },
+      { sel: "footer", x: 0, y: 11931, w: 1440, h: 240 },
+    ],
+    docHeight: 12171,
+  });
+  const declared = [{ page: "index", expect: "content" as const, reason: "firm figures are read from the database" }];
+
+  const forgiven = compareToBaseline(b, [moved], { renders: [shot("index", "desktop", "bbb")], declared });
+  assert.equal(forgiven.ok, true, forgiven.findings.map((f) => `${f.kind} [${f.aspects.join(",")}] ${f.detail}`).join(" | "));
+  assert.ok(forgiven.findings.every((f) => f.kind === "declared-content"),
+    "a declared page that only moved must not be reported as design drift");
+
+  // Undeclared, the same movement is still drift. The declaration is what makes the difference, not the size.
+  const undeclared = compareToBaseline(b, [moved], { renders: [shot("index", "desktop", "bbb")] });
+  assert.equal(undeclared.ok, false, "without a declaration the same movement is still a change nobody authorised");
+
+  // And a declaration is not a licence. Colours, type and structure are as locked as they ever were.
+  for (const [what, over] of [
+    ["palette", { palette: ["rgb(0, 122, 255)", "rgb(232, 220, 200)", "rgb(217, 131, 36)", "rgb(255, 255, 255)"] }],
+    ["fonts", { fonts: ["Comic Sans MS", "Inter"] }],
+    ["skeleton", { skeleton: ["header.nav", "main.stack", "section.hero", "footer.foot"] }],
+  ] as [string, Partial<DesignSignature>][]) {
+    const r = compareToBaseline(b, [sig({ ...moved, ...over })], { renders: [shot("index", "desktop", "bbb")], declared });
+    assert.equal(r.ok, false, `a declared content change must not excuse a ${what} change`);
+    assert.ok(r.findings.some((f) => f.kind === "design-drift"), `${what}: ${r.findings.map((f) => f.kind).join(",")}`);
+  }
+});

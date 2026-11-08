@@ -82,6 +82,11 @@ content is written by its own JavaScript; the check now uses four. The `article.
 while the DOM is still being written — which is why height stability alone was insufficient and why `settle` now
 waits for DOM quiescence (no mutations for 400ms, bounded at 4s) rather than for longer.
 
+**Determinism, on better evidence** (`settle` with DOM quiescence): four import runs of the same bytes all
+measured `b2dd67f236668efb`. Four is better than the two that were wrongly called conclusive, and still not proof —
+what makes it more than coincidence is that the mechanism (waiting for mutations to stop) addresses the cause the
+drift finding named (`article.pcard` elements built on `DOMContentLoaded`).
+
 ## Standing observations
 
 - **Model A and Model B output varies between identical runs.** Iteration 3 produced a working backend; iteration 4

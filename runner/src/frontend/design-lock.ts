@@ -329,6 +329,28 @@ export function compareToBaseline(
 
     const { aspects, detail } = lockedAspects(base, cur);
     if (aspects.length) {
+      // A PAGE DECLARED TO CHANGE ITS CONTENT WILL MOVE. That is arithmetic, not drift.
+      //
+      // Data arriving where a placeholder was makes the page taller, so the landmarks below it sit lower. The
+      // declaration already says this page's content changes; refusing it for the spacing that change causes
+      // asks for a contradiction. Measured across three consecutive runs: the visual gate passed at cycle 1 with
+      // no backend and failed at cycle 2 once the backend worked, on `index at tablet [layout]: section spacing
+      // changed by 8616px; footer by 43px` -- while conformance and the functional gate both passed. The two
+      // gates could never hold at once.
+      //
+      // Only `layout` is forgiven, and only on a declared page. Palette, fonts and skeleton still bite: iteration
+      // 8's regression was `[skeleton, layout]` with four article.pcard elements gone, and skeleton catches that.
+      // So the approved design -- its colours, its typography, its structure -- is as locked as it was, and what
+      // is no longer called drift is the vertical rhythm of content the contract asked for.
+      const dc = declared.get(base.page);
+      const onlyLayout = aspects.every((a) => a === "layout");
+      if (dc && dc.expect === "content" && onlyLayout) {
+        findings.push({
+          kind: "declared-content", page: base.page, viewport: base.viewport, aspects,
+          detail: `the page moved as the declared content changed${dc.reason ? ` (${dc.reason})` : ""}: ${detail.join("; ")}; colours, type and structure are unchanged`,
+        });
+        continue;
+      }
       findings.push({ kind: "design-drift", page: base.page, viewport: base.viewport, aspects, detail: detail.join("; ") });
       continue;
     }
