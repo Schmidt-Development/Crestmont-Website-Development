@@ -75,6 +75,15 @@ let customerA: Account | null = null;
 let customerB: Account | null = null;
 let projectA: { id: string; name: string } | null = null;
 let jobId: string | null = null;
+/**
+ * Set only once a website has actually been assigned and made visible.
+ *
+ * The first real run reported three failures with one cause: staging had no finished build, so [WDE-02] failed
+ * and [WDE-04] and [WDE-06] then failed for want of a website to open. Three symptoms read as three defects.
+ * The later checks now skip on this instead -- which still fails the workflow, because the skip guard treats an
+ * undetermined check as undetermined, but it fails saying one thing rather than three.
+ */
+let delivered = false;
 
 test("[WDE-01] two existing customer accounts and an existing project are present on staging", { skip: unset }, async () => {
   const all = accounts();
@@ -138,11 +147,13 @@ test("[WDE-03] staff assign the finished website to the existing project", { ski
   const after = await owner.locator("main").innerText();
   assert.match(after, /Already delivered/i, `the delivery was not recorded: ${after.slice(0, 500)}`);
   assert.match(after, /Available to customer/i, `and it should be visible to the customer: ${after.slice(0, 500)}`);
+  delivered = true;
   await owner.close();
 });
 
 test("[WDE-04] the customer opens the website from their own portal", { skip: unset }, async (t) => {
   if (!customerA || !projectA) return t.skip("no customer project was established");
+  if (!delivered) return t.skip("nothing was delivered, so there is no website to open — see [WDE-02]");
   const page = await signIn(customerA);
   await page.goto(`${BASE}/portal/projects/${projectA.id}`, { waitUntil: "domcontentloaded" });
   const text = await page.locator("main").innerText();
@@ -195,6 +206,7 @@ test("[WDE-05] another customer can reach neither the project nor the website", 
 
 test("[WDE-06] a tampered preview capability is refused", { skip: unset }, async (t) => {
   if (!customerA || !projectA) return t.skip("no customer project was established");
+  if (!delivered) return t.skip("nothing was delivered, so there is no capability to tamper with — see [WDE-02]");
   const page = await signIn(customerA);
   await page.goto(`${BASE}/portal/projects/${projectA.id}`, { waitUntil: "domcontentloaded" });
   const href = await page.locator('a:has-text("View website")').getAttribute("href");
