@@ -134,6 +134,8 @@ export const INVOICE_KINDS = ["full", "deposit_50", "design_25", "prelaunch_25",
 export interface InvoiceListRow {
   id: string; organization_id: string; org_name: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string; description: string | null;
   created_at: string; paid_at: string | null; due_at: string | null; stripe_invoice_id: string | null; stripe_invoice_status: string | null; stripe_checkout_session_id: string | null;
+  /** Phase 8.3 customer-facing number ("Invoice 001"); null for drafts. */
+  invoice_number: number | null;
   /** Comma-separated ids of the invoice's non-failed payments (each has a receipt). */
   payment_ids: string | null; paid_cents: number;
 }
@@ -141,7 +143,13 @@ export async function listInvoices(db: Db, f: { status?: string; kind?: string; 
   const conds: string[] = [], binds: unknown[] = [];
   if (f.status) { conds.push(`i.status = ?`); binds.push(f.status); }
   if (f.kind) { conds.push(`i.milestone_kind = ?`); binds.push(f.kind); }
-  if (f.q) { const l = likePattern(f.q); conds.push(`(o.name LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\' OR i.id LIKE ? ESCAPE '\\' OR i.stripe_invoice_id LIKE ? ESCAPE '\\')`); binds.push(l, l, l, l); }
+  if (f.q) {
+    const l = likePattern(f.q);
+    // "Invoice 007", "007" or "7" also finds the invoice by its customer-facing number.
+    const n = /^(?:invoice\s*)?0*(\d{1,9})$/i.exec(f.q.trim());
+    conds.push(`(o.name LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\' OR i.id LIKE ? ESCAPE '\\' OR i.stripe_invoice_id LIKE ? ESCAPE '\\'${n ? " OR i.invoice_number = ?" : ""})`);
+    binds.push(l, l, l, l, ...(n ? [Number(n[1])] : []));
+  }
   if (f.range) { conds.push(`i.created_at >= ? AND i.created_at < ?`); binds.push(f.range.fromIso, f.range.toIso); }
   return (await db.prepare(`SELECT i.*, o.name AS org_name,
         (SELECT group_concat(p.id) FROM payments p WHERE p.invoice_id = i.id AND p.status <> 'failed') AS payment_ids,
@@ -150,8 +158,8 @@ export async function listInvoices(db: Db, f: { status?: string; kind?: string; 
     .bind(...binds, f.limit + 1, f.offset).all<InvoiceListRow>()).results;
 }
 export function invoicesListCsv(rows: InvoiceListRow[]): string {
-  return toCsv(["invoice_id", "issued_date", "customer", "kind", "description", "amount_cents", "amount_usd", "status", "paid_cents", "paid_date", "due_date", "project_id", "order_id", "payment_ids", "stripe_invoice", "stripe_invoice_status"],
-    rows.map((i) => [i.id, i.created_at.slice(0, 10), i.org_name, i.milestone_kind, i.description, i.amount_cents, dollars(i.amount_cents), i.status, i.paid_cents, i.paid_at?.slice(0, 10) ?? "", i.due_at?.slice(0, 10) ?? "", i.project_id, i.order_id, (i.payment_ids ?? "").replace(/,/g, " "), i.stripe_invoice_id, i.stripe_invoice_status]));
+  return toCsv(["invoice_id", "invoice_number", "issued_date", "customer", "kind", "description", "amount_cents", "amount_usd", "status", "paid_cents", "paid_date", "due_date", "project_id", "order_id", "payment_ids", "stripe_invoice", "stripe_invoice_status"],
+    rows.map((i) => [i.id, i.invoice_number ? String(i.invoice_number).padStart(3, "0") : "", i.created_at.slice(0, 10), i.org_name, i.milestone_kind, i.description, i.amount_cents, dollars(i.amount_cents), i.status, i.paid_cents, i.paid_at?.slice(0, 10) ?? "", i.due_at?.slice(0, 10) ?? "", i.project_id, i.order_id, (i.payment_ids ?? "").replace(/,/g, " "), i.stripe_invoice_id, i.stripe_invoice_status]));
 }
 
 // ── profitability (FIN-002, FIN-003) ──
