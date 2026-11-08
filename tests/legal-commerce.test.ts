@@ -167,7 +167,7 @@ test("[LEGAL-003] when the rendered text changes (business legal name set), the 
 
 // ───────────────────────── PAY-005 / AUTH-008 ─────────────────────────
 
-test("[PAY-005] printable receipt: stable unique number, payment/invoice/Stripe refs, honest business identity, print view; linked from billing and invoice", async () => {
+test("[PAY-005] printable receipt: stable unique number, customer-facing numbers only (internal/Stripe refs for staff), honest business identity, print view; linked from billing and invoice", async () => {
   const t = await app(true);
   const a = await customerClient(t, "rcpt@lc.example", "Receipt Co");
   const p1 = await seedPayment(t.db, a.organizationId);
@@ -179,11 +179,14 @@ test("[PAY-005] printable receipt: stable unique number, payment/invoice/Stripe 
   const r1 = await a.c.get(`/portal/billing/receipts/${p1.pay}`);
   assert.equal(r1.status, 200);
   const h1 = await r1.text();
-  const num1 = /CWD-R-\d{6}/.exec(h1)![0];
+  // Phase 8: the receipt carries "Receipt 001" and the invoice's "Invoice 001"; internal and Stripe ids are staff-only.
+  const rnum = /data-testid="receipt-number">(Receipt \d{3,})</;
+  const num1 = rnum.exec(h1)![1];
   assert.match(h1, /\$999/);
-  assert.match(h1, new RegExp(p1.pi));
-  assert.match(h1, new RegExp(p1.inv));
-  assert.match(h1, /cs_test_seed/);
+  assert.match(h1, /Invoice \d{3,}/);
+  // Visible text only: ids still appear inside link URLs (the routes need them), never as displayed values.
+  const visible = h1.replace(/<[^>]*>/g, " ");
+  for (const hidden of [p1.pi, p1.inv, p1.pay, "cs_test_seed", "ch_test_", "ord_", "CWD-R-"]) assert.ok(!visible.includes(hidden), `customer receipt hides ${hidden}`);
   // BLK-006 / IDENT-001: the operating entity is recorded (Talent Revenue Systems LLC), so a receipt prints it
   // instead of the "not established yet" placeholder. The brand stays on the customer-facing title.
   assert.match(h1, /Talent Revenue Systems LLC/);
@@ -192,8 +195,8 @@ test("[PAY-005] printable receipt: stable unique number, payment/invoice/Stripe 
   assert.match(h1, new RegExp(`/portal/billing/receipts/${p1.pay}/pdf`));
   assert.match(h1, /Print version/);
   // Stable across views; unique across payments.
-  assert.equal(/CWD-R-\d{6}/.exec(await (await a.c.get(`/portal/billing/receipts/${p1.pay}`)).text())![0], num1);
-  const num2 = /CWD-R-\d{6}/.exec(await (await a.c.get(`/portal/billing/receipts/${p2.pay}`)).text())![0];
+  assert.equal(rnum.exec(await (await a.c.get(`/portal/billing/receipts/${p1.pay}`)).text())![1], num1);
+  const num2 = rnum.exec(await (await a.c.get(`/portal/billing/receipts/${p2.pay}`)).text())![1];
   assert.notEqual(num1, num2);
   // Print view: standalone document with the print stylesheet.
   const pv = await (await a.c.get(`/portal/billing/receipts/${p1.pay}?view=print`)).text();
@@ -208,7 +211,11 @@ test("[PAY-005] printable receipt: stable unique number, payment/invoice/Stripe 
   const owner = await staffClient(t, "owner");
   const sr = await owner.c.get(`/staff/finance/receipts/${p1.pay}`);
   assert.equal(sr.status, 200);
-  assert.match(await sr.text(), new RegExp(num1));
+  const sh = await sr.text();
+  assert.match(sh, new RegExp(num1));
+  // Staff keep every internal and Stripe reference, in a collapsed "Technical details" section.
+  assert.match(sh, /<details[^>]*data-testid="technical-details"><summary>Technical details/);
+  for (const ref of [p1.pi, p1.inv, p1.pay, "cs_test_seed", "CWD-R-"]) assert.ok(sh.includes(ref), `staff receipt keeps ${ref}`);
   const support = await staffClient(t, "support");
   assert.equal((await support.c.get(`/staff/finance/receipts/${p1.pay}`)).status, 403);
   assert.equal((await owner.c.get(`/staff/finance/receipts/pay_missing`)).status, 404);

@@ -50,7 +50,8 @@ export interface TemplateData {
   verification: { name: string | null; confirmUrl: string };
   /** Order confirmation (no call site yet: payment confirmation is sent as `receipt`). */
   purchase: { orderDescription: string; amountCents: number; url: string };
-  receipt: { amountCents: number; next: "onboarding" | "project" | "billing"; url: string };
+  /** Phase 8: `receiptLabel`/`invoiceLabel` are the customer-facing numbers; `receiptUrl` opens the receipt in the portal. */
+  receipt: { amountCents: number; next: "onboarding" | "project" | "billing"; url: string; receiptLabel?: string; invoiceLabel?: string; receiptUrl?: string };
   onboarding: ProjectBase & { event: "completed" };
   project_update:
     | ProjectBase & { event: "status_changed"; from: string; to: string }
@@ -151,6 +152,8 @@ export interface TemplateData {
 
 export interface MailContent {
   subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string };
+  /** Secondary links shown under the paragraphs (e.g. the receipt document and its PDF). */
+  links?: { label: string; url: string }[];
   /** The one line shown as the in-app notification. Defaults to the last paragraph; set it when the last paragraph is
    *  supporting detail (a deadline, a disclaimer) rather than what the notification is about. */
   inApp?: string;
@@ -205,11 +208,14 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
     description: "Payment received (sent from the verified Stripe webhook only).",
     render: (d) => ({
       subject: "Payment received — Crestmont", heading: "Thank you — your payment was received",
-      paragraphs: [`We received your payment of ${money(d.amountCents)}.`, d.next === "onboarding" ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals."
+      paragraphs: [`We received your payment of ${money(d.amountCents)}${d.invoiceLabel ? ` for ${d.invoiceLabel}` : ""}.`,
+        ...(d.receiptLabel && d.receiptUrl ? [`Your receipt, ${d.receiptLabel}, is ready in your customer portal, where you can also download it as a PDF.`] : []),
+        d.next === "onboarding" ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals."
         : d.next === "project" ? "Your project is set up with the website intake you completed. Your project manager reviews the scope with you next." : "Your project record has been updated."],
+      ...(d.receiptLabel && d.receiptUrl ? { links: [{ label: `View ${d.receiptLabel}`, url: d.receiptUrl }, { label: `Download ${d.receiptLabel} (PDF)`, url: `${d.receiptUrl}/pdf` }] } : {}),
       cta: { label: d.next === "onboarding" ? "Start onboarding" : d.next === "project" ? "View your project" : "View billing", url: d.url },
     }),
-    samples: [{ amountCents: 250000, next: "project", url: "https://example.com/portal/projects/prj_sample" }, { amountCents: 250000, next: "onboarding", url: "https://example.com/portal/projects/prj_sample/onboarding" }, { amountCents: 62500, next: "billing", url: "https://example.com/portal/billing" }],
+    samples: [{ amountCents: 250000, next: "project", url: "https://example.com/portal/projects/prj_sample", receiptLabel: "Receipt 001", invoiceLabel: "Invoice 001", receiptUrl: "https://example.com/portal/billing/receipts/pay_sample" }, { amountCents: 250000, next: "onboarding", url: "https://example.com/portal/projects/prj_sample/onboarding" }, { amountCents: 62500, next: "billing", url: "https://example.com/portal/billing" }],
   },
   onboarding: {
     name: "onboarding", category: "transactional", audience: "staff",
@@ -727,6 +733,7 @@ export function renderLayout(c: MailContent, opts: { category: MailCategory; ide
   const marketing = opts.category === "marketing";
   if (marketing && !opts.unsubscribeUrl) throw new Error("Marketing email requires an unsubscribe link");
   const p = c.paragraphs.map((x) => `<p style="margin:0 0 16px;line-height:1.6;color:#e8e4d8">${escapeHtml(x)}</p>`).join("");
+  const links = (c.links ?? []).map((l) => `<p style="margin:0 0 10px;line-height:1.6"><a href="${escapeHtml(httpUrl(l.url))}" style="color:#c9a54c">${escapeHtml(l.label)}</a></p>`).join("");
   const cta = c.cta
     ? `<p style="margin:24px 0"><a href="${escapeHtml(httpUrl(c.cta.url))}" style="display:inline-block;background:#c9a54c;color:#0b0b0c;text-decoration:none;padding:12px 22px;border-radius:4px;font-weight:600">${escapeHtml(c.cta.label)}</a></p>`
     : "";
@@ -738,11 +745,11 @@ export function renderLayout(c: MailContent, opts: { category: MailCategory; ide
 <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#141416;border:1px solid #3a3222">
 <tr><td style="padding:28px 32px;border-bottom:1px solid #3a3222;color:#c9a54c;font-size:20px;letter-spacing:.08em">CRESTMONT<span style="display:block;font-size:11px;letter-spacing:.2em;color:#8d887c;margin-top:4px">WEBSITE DEVELOPMENT</span></td></tr>
 <tr><td style="padding:32px;font-family:Helvetica,Arial,sans-serif;font-size:15px">
-<h1 style="margin:0 0 20px;font-family:Georgia,serif;font-weight:normal;color:#fff;font-size:24px">${escapeHtml(c.heading)}</h1>${p}${cta}
+<h1 style="margin:0 0 20px;font-family:Georgia,serif;font-weight:normal;color:#fff;font-size:24px">${escapeHtml(c.heading)}</h1>${p}${links}${cta}
 </td></tr>
 <tr><td data-footer style="padding:20px 32px;border-top:1px solid #3a3222;color:#8d887c;font-family:Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6">Crestmont Website Development<br>${identityLines.map(escapeHtml).join("<br>")}<br>${escapeHtml(purpose)}${unsub}</td></tr>
 </table></td></tr></table></body></html>`;
-  const text = [c.heading, "", ...c.paragraphs, ...(c.cta ? ["", `${c.cta.label}: ${httpUrl(c.cta.url)}`] : []), "", "—",
+  const text = [c.heading, "", ...c.paragraphs, ...(c.links ?? []).map((l) => `${l.label}: ${httpUrl(l.url)}`), ...(c.cta ? ["", `${c.cta.label}: ${httpUrl(c.cta.url)}`] : []), "", "—",
     "Crestmont Website Development", ...identityLines, purpose, ...(marketing ? [`Unsubscribe: ${httpUrl(opts.unsubscribeUrl!)}`] : [])].join("\n");
   return { subject: oneLine(c.subject), html, text };
 }

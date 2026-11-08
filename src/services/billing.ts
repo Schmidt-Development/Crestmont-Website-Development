@@ -157,10 +157,10 @@ async function recordCheckoutSession(db: Db, invoiceId: string, sessionId: strin
   await db.prepare(`UPDATE invoices SET stripe_checkout_session_id = ? WHERE id = ?`).bind(sessionId, invoiceId).run();
 }
 
-export interface CustomerInvoice { id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; subtotal_cents: number | null; tax_cents: number; tax_detail_json: string | null; status: string; description: string | null; created_at: string; paid_at: string | null; due_at: string | null; stripe_checkout_session_id: string | null; stripe_invoice_status: string | null; stripe_hosted_invoice_url: string | null }
+export interface CustomerInvoice { id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; subtotal_cents: number | null; tax_cents: number; tax_detail_json: string | null; status: string; description: string | null; created_at: string; paid_at: string | null; due_at: string | null; stripe_checkout_session_id: string | null; stripe_invoice_status: string | null; stripe_hosted_invoice_url: string | null; invoice_number: number | null }
 
 export async function customerInvoice(db: Db, organizationId: string, invoiceId: string): Promise<CustomerInvoice> {
-  const inv = await db.prepare(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at, paid_at, due_at, stripe_checkout_session_id, stripe_invoice_status, stripe_hosted_invoice_url FROM invoices WHERE id = ? AND organization_id = ?`)
+  const inv = await db.prepare(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at, paid_at, due_at, stripe_checkout_session_id, stripe_invoice_status, stripe_hosted_invoice_url, invoice_number FROM invoices WHERE id = ? AND organization_id = ?`)
     .bind(invoiceId, organizationId).first<CustomerInvoice>();
   if (!inv) throw new HttpError(404, "Invoice not found.");
   return inv;
@@ -236,9 +236,10 @@ export async function billingPortalUrl(ctx: AppContext, organizationId: string):
 export async function customerBilling(db: Db, organizationId: string) {
   const q = <T>(sql: string) => db.prepare(sql).bind(organizationId).all<T>().then((r) => r.results);
   return {
-    orders: await q<{ id: string; kind: string; status: string; total_cents: number; created_at: string; product_id: string | null }>(`SELECT id, kind, status, total_cents, created_at, product_id FROM orders WHERE organization_id = ? ORDER BY created_at DESC`),
-    invoices: await q<CustomerInvoice>(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at, paid_at, due_at, stripe_checkout_session_id, stripe_invoice_status, stripe_hosted_invoice_url FROM invoices WHERE organization_id = ? AND status <> 'draft' ORDER BY created_at DESC`),
-    payments: await q<{ id: string; invoice_id: string | null; amount_cents: number; status: string; created_at: string; description: string | null; refundable: number }>(`SELECT p.id, p.invoice_id, p.amount_cents, p.status, p.created_at, i.description,
+    orders: await q<{ id: string; kind: string; status: string; total_cents: number; created_at: string; product_id: string | null; product_name: string | null; product_kind: string | null }>(`SELECT o.id, o.kind, o.status, o.total_cents, o.created_at, o.product_id, pr.name AS product_name, pr.kind AS product_kind FROM orders o LEFT JOIN products pr ON pr.id = o.product_id WHERE o.organization_id = ? ORDER BY o.created_at DESC`),
+    invoices: await q<CustomerInvoice>(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at, paid_at, due_at, stripe_checkout_session_id, stripe_invoice_status, stripe_hosted_invoice_url, invoice_number FROM invoices WHERE organization_id = ? AND status <> 'draft' ORDER BY created_at DESC`),
+    payments: await q<{ id: string; invoice_id: string | null; amount_cents: number; status: string; created_at: string; description: string | null; refundable: number; receipt_seq: number | null; invoice_number: number | null }>(`SELECT p.id, p.invoice_id, p.amount_cents, p.status, p.created_at, i.description, i.invoice_number,
+        (SELECT r.seq FROM receipts r WHERE r.payment_id = p.id AND p.status <> 'failed' AND p.provider <> 'simulated') AS receipt_seq,
         CASE WHEN p.status = 'succeeded' AND p.provider <> 'simulated' AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.payment_id = p.id AND r.status NOT IN ('denied','failed')) THEN 1 ELSE 0 END AS refundable
       FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id WHERE p.organization_id = ? ORDER BY p.created_at DESC`),
     subscriptions: await q<{ id: string; product_id: string; status: string; current_period_end: string | null; created_at: string }>(`SELECT id, product_id, status, current_period_end, created_at FROM subscriptions WHERE organization_id = ? ORDER BY created_at DESC`),
