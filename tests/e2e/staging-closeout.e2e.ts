@@ -92,7 +92,8 @@ async function startCheckout(p: Page): Promise<void> {
   assert.match(await text(p), /Essential — \$99\/month/, "the Founder-established Essential price ($99/month)");
   await p.locator("input[name=terms]").check();
   await p.locator('form[action="/checkout/maintenance/essential"] button[type=submit]').click();
-  await p.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 60_000 });
+  await p.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 60_000 })
+    .catch(async () => assert.fail(`Checkout did not reach Stripe (at ${p.url()}): ${(await text(p, "body").catch(() => "")).slice(0, 300)}`));
   assert.match(p.url(), /\/c\/pay\/cs_test_/, "a Stripe TEST-mode Checkout session (never live)");
 }
 async function fillCard(p: Page, number: string): Promise<void> {
@@ -143,9 +144,18 @@ test("[PAY-004] LG-02 every publish path is refused before the gate: handoff pub
 test("[PAY-004] LG-03 the customer signs the maintenance agreement in the portal; signing alone does not unlock publishing", { skip: unset }, async () => {
   const p = await signIn(customer());
   await p.goto(projectUrl());
-  await nav(p, p.locator("[data-launch-gate]").getByRole("link", { name: "Sign your maintenance agreement" }));
-  await p.locator("input[name=agree]").check();
-  await nav(p, p.getByRole("button", { name: "Sign the maintenance agreement" }));
+  // The link is asserted, then followed by its href: a click that produced no navigation timed out on staging run
+  // 42514856681 with no clue why. A failure now says where the browser was and what it showed.
+  const sign = p.locator("[data-launch-gate]").getByRole("link", { name: "Sign your maintenance agreement" });
+  assert.equal(await sign.count(), 1, `the launch-gate card links to the agreement: ${(await text(p, "[data-launch-gate]").catch(() => "(no card)")).slice(0, 300)}`);
+  await p.goto(new URL((await sign.getAttribute("href"))!, BASE).href);
+  assert.match(new URL(p.url()).pathname, /\/maintenance-agreement$/);
+  const agree = p.locator("input[name=agree]");
+  assert.equal(await agree.count(), 1, `the agreement form is shown: ${(await text(p).catch(() => "")).slice(0, 300)}`);
+  await agree.check();
+  await p.getByRole("button", { name: "Sign the maintenance agreement" }).click();
+  await p.waitForURL((u: URL) => u.pathname === `/portal/projects/${fx().projectId}`, { timeout: 60_000 })
+    .catch(async () => assert.fail(`signing did not return to the project (at ${p.url()}): ${(await text(p).catch(() => "")).slice(0, 300)}`));
   await p.goto(projectUrl());
   const card = await text(p, "[data-launch-gate]");
   assert.match(card, /Maintenance agreement signed/);

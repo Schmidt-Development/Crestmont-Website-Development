@@ -13,7 +13,7 @@
 import type { Db } from "../lib/db.ts";
 import type { Env } from "../app/context.ts";
 import { retellKey, keysAmbiguous } from "../adapters/retell-workspaces.ts";
-import { loadSalesSettings, salesOutboundSwitch, callbackSwitch, leadFacts, gateFor } from "./sales-outbound.ts";
+import { loadSalesSettings, salesOutboundSwitch, callbackSwitch, leadFacts, gateFor, CONSENTED_LEAD_IDS } from "./sales-outbound.ts";
 import { voiceBudget, type VoiceBudget } from "./voice-budget.ts";
 
 /** Open CRM stages a sales call may be placed for (same list as the engine's candidate query). */
@@ -54,17 +54,16 @@ export interface OutboundStatus {
 
 const n = async (db: Db, sql: string, ...b: unknown[]) => (await db.prepare(sql).bind(...b).first<{ n: number }>())?.n ?? 0;
 
-/** Leads with documented AI-calling consent that are open in the CRM, not merged, and not yet in a cold call series. */
-const CANDIDATES = `FROM leads l WHERE l.merged_into_lead_id IS NULL AND l.stage IN (${OPEN_IN})
-  AND EXISTS (SELECT 1 FROM sales_call_consents sc WHERE sc.revoked_at IS NULL AND (sc.lead_id = l.id OR sc.phone_e164 IN (SELECT phone_e164 FROM research_prospects WHERE crm_lead_id = l.id)))
-  AND NOT EXISTS (SELECT 1 FROM sales_calls c WHERE c.lead_id = l.id AND c.mode = 'cold')`;
+/** Leads with documented AI-calling consent that are open in the CRM, not merged, and not yet in a cold call series.
+ *  Driven from the consents (CONSENTED_LEAD_IDS, evaluated once), never from all leads: see sales-outbound.ts. */
+const CONSENTED_OPEN = `FROM leads l WHERE l.id IN (${CONSENTED_LEAD_IDS}) AND l.merged_into_lead_id IS NULL AND l.stage IN (${OPEN_IN})`;
+const CANDIDATES = `${CONSENTED_OPEN} AND NOT EXISTS (SELECT 1 FROM sales_calls c WHERE c.lead_id = l.id AND c.mode = 'cold')`;
 
 export async function outboundStatus(db: Db, env: Env, now: Date, periodDays = 30): Promise<OutboundStatus> {
   const at = now.toISOString(), since = new Date(now.getTime() - periodDays * 86_400_000).toISOString();
   const s = await loadSalesSettings(db);
   const [cold, cb] = await Promise.all([salesOutboundSwitch(db, env), callbackSwitch(db, env)]);
-  const consented = await n(db, `SELECT COUNT(*) AS n FROM leads l WHERE l.merged_into_lead_id IS NULL AND l.stage IN (${OPEN_IN})
-      AND EXISTS (SELECT 1 FROM sales_call_consents sc WHERE sc.revoked_at IS NULL AND (sc.lead_id = l.id OR sc.phone_e164 IN (SELECT phone_e164 FROM research_prospects WHERE crm_lead_id = l.id)))`);
+  const consented = await n(db, `SELECT COUNT(*) AS n ${CONSENTED_OPEN}`);
   const open = await n(db, `SELECT COUNT(*) AS n FROM leads WHERE merged_into_lead_id IS NULL AND stage IN (${OPEN_IN})`);
   const counts = {
     eligible: await n(db, `SELECT COUNT(*) AS n ${CANDIDATES}`),

@@ -93,6 +93,21 @@ export async function openMaintenanceActivation(db: Db, mail: LifecycleCtx | nul
  * launch (an open activation) and only to that plan or a higher one — never a silent downgrade.
  */
 export async function maintenanceCheckoutBlock(db: Db, organizationId: string, planId: MaintenanceId): Promise<string | null> {
+  // A project waiting at the launch gate (an open activation) decides first, whatever its order was -- a package or an
+  // accepted custom quote. The agreement is signed BEFORE the subscription (launch-gate.ts). This used to be checked
+  // only for paid PACKAGE orders, so a quote-based project could reach Stripe Checkout unsigned (found on staging by
+  // tests/e2e/staging-closeout.e2e.ts, 2026-11-08). Publishing itself was never exposed: the gate still required the
+  // signature.
+  const open = await db.prepare(`SELECT plan_id, status, project_id FROM maintenance_activations WHERE organization_id = ? AND status IN ('due','awaiting_plan_verification') ORDER BY opened_at DESC LIMIT 1`)
+    .bind(organizationId).first<{ plan_id: MaintenanceId; status: string; project_id: string }>();
+  if (open) {
+    if (MAINTENANCE_ORDER.indexOf(planId) < MAINTENANCE_ORDER.indexOf(open.plan_id)) return `Your website package requires the ${MAINTENANCE_PLANS[open.plan_id].name} plan or higher.`;
+    const { maintenanceAgreementSigned } = await import("./launch-gate.ts");
+    if (!(await maintenanceAgreementSigned(db, organizationId, open.project_id))) {
+      return "Please sign your maintenance agreement first: open your project in the customer portal and choose \u201cSign your maintenance agreement\u201d.";
+    }
+    return null;
+  }
   const committed = await db.prepare(`SELECT o.maintenance_plan_id FROM orders o WHERE o.organization_id = ? AND o.kind = 'package' AND o.status IN ('paid','partially_paid') AND o.maintenance_plan_id IS NOT NULL ORDER BY o.created_at DESC LIMIT 1`)
     .bind(organizationId).first<{ maintenance_plan_id: MaintenanceId }>();
   if (!committed) return null;
