@@ -45,6 +45,8 @@ const env: Env = {
   PORTFOLIO_DEMO_ORIGINS: process.env.PORTFOLIO_DEMO_ORIGINS,
   // Optional: renders the Turnstile widget like staging (development accepts any token when no secret is set).
   TURNSTILE_SITE_KEY: process.env.TURNSTILE_SITE_KEY,
+  // Signs build-preview capabilities, so a stored snapshot (e.g. the delivery E2E fixture) can be opened locally.
+  BUILD_PREVIEW_FILE_SECRET: process.env.BUILD_PREVIEW_FILE_SECRET,
   overrides: { storage },
 };
 

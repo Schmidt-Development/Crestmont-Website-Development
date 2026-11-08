@@ -1,0 +1,17 @@
+/* Northwind Pottery Studio — synthetic E2E delivery fixture. The E2E reads these exact values back. */
+:root { --clay: #8a4b2a; --cream: #f6efe6; --ink: #2b211c; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: var(--cream); line-height: 1.5; }
+.fixture-banner { background: #1f2937; color: #fff; font: 600 14px/1.4 system-ui, sans-serif; text-align: center; padding: 6px 12px; }
+.site-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; border-bottom: 1px solid #e3d6c6; }
+.brand { display: flex; gap: 10px; align-items: center; color: var(--ink); text-decoration: none; font-weight: 700; }
+nav a { margin-left: 16px; color: var(--clay); }
+.hero { display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: center; padding: 48px 24px; background: rgb(138, 75, 42); color: #fff; }
+.hero img { max-width: 100%; height: auto; border-radius: 8px; }
+.cta { background: #fff; color: var(--clay); border: 0; padding: 12px 20px; border-radius: 6px; font-weight: 700; cursor: pointer; }
+.secondary { background: var(--clay); color: #fff; border: 0; padding: 8px 14px; border-radius: 6px; cursor: pointer; }
+.panel { padding: 24px; margin: 24px; background: #fff; border-radius: 8px; }
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; padding: 24px; }
+.features article { background: #fff; padding: 16px; border-radius: 8px; }
+.site-footer { padding: 24px; font-size: 14px; color: #6b5a4e; }
+@media (max-width: 640px) { .hero { grid-template-columns: 1fr; } }

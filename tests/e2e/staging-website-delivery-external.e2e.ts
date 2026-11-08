@@ -38,7 +38,24 @@ function accounts(): Account[] {
 
 let browser: Awaited<ReturnType<typeof launchBrowser>>;
 before(async () => { if (!unset) browser = await launchBrowser(); });
-after(async () => { await browser?.close(); });
+after(async () => {
+  // Leave the demo customer's project as this run found it: archive the website this run delivered, if it is still
+  // the live one. Archiving is the product's own audited, reversible act -- the versions stay in the history and can
+  // be restored -- so nothing is deleted. A cleanup problem is reported, never allowed to change the results above.
+  if (browser && newestDeliveryId) {
+    try {
+      const page = await signIn(owner());
+      await page.goto(`${BASE}/staff/website-delivery/${newestDeliveryId}`, { waitUntil: "domcontentloaded" });
+      const archive = page.locator('form[action$="/archive"] button');
+      if (await archive.count()) {
+        await Promise.all([page.waitForNavigation(), archive.first().click()]);
+        console.log(`  cleanup: archived this run's delivery ${newestDeliveryId} (kept in the version history)`);
+      }
+      await page.context().close();
+    } catch (e) { console.log(`  cleanup could not archive ${newestDeliveryId}: ${(e as Error).message.slice(0, 200)}`); }
+  }
+  await browser?.close();
+});
 
 // LOCAL DRY RUNS ONLY: a sandbox without internet access can set E2E_LOCAL_STUB_EXAMPLE_COM=1 to answer example.com
 // from a stub, so the rest of the flow can be exercised. The staging workflow never sets it, and a run that does is
@@ -84,7 +101,15 @@ let customerA: Account | null = null;
 let customerB: Account | null = null;
 let projectA: { id: string; name: string } | null = null;
 let deliveryId: string | null = null;
+/** The newest version this run created (its first, then its revision), for the cleanup above. */
+let newestDeliveryId: string | null = null;
 let shared = false;
+/**
+ * The version number this run's first website got. Versions are numbered PER PROJECT and continue across every
+ * delivery the project has had -- an AI-build delivery, an earlier run -- so it is read from the page, never assumed
+ * to be 1. (Assuming 1 passed exactly once, on a project with no history, and would have failed on every later run.)
+ */
+let firstVersion = 0;
 
 test("[WDX-E01] two existing staging customer accounts and an existing project", { skip: unset }, async () => {
   const customers = accounts().filter((a) => /customer/i.test(a.role));
@@ -141,6 +166,9 @@ test("[WDX-E03] staff add the hosted website to the existing project as a draft,
   const path = new URL(page.url()).pathname;
   deliveryId = /^\/staff\/website-delivery\/(wdl_[0-9a-f]+)$/.exec(path)?.[1] ?? null;
   assert.ok(deliveryId, `saved, and taken to the delivery's page (${path}): ${(await page.locator("main").innerText()).slice(0, 400)}`);
+  newestDeliveryId = deliveryId;
+  firstVersion = Number(/^v(\d+)$/.exec((await page.locator('main dt:text-is("Version") + dd').first().innerText()).trim())?.[1] ?? 0);
+  assert.ok(firstVersion >= 1, "the delivery page shows the version number this website was given");
   let text = await page.locator("main").innerText();
   assert.match(text, /Draft/);
   assert.match(text, new RegExp(RUN));
@@ -156,7 +184,7 @@ test("[WDX-E03] staff add the hosted website to the existing project as a draft,
   text = await page.locator("main").innerText();
   assert.match(text, /Visible to customer/, `shared: ${text.slice(0, 400)}`);
   shared = true;
-  console.log(`  delivery ${deliveryId} (version 1) shared: ${V1}`);
+  console.log(`  delivery ${deliveryId} (version ${firstVersion}) shared: ${V1}`);
   await page.context().close();
 });
 
@@ -168,7 +196,7 @@ test("[WDX-E04] the correct customer sees the website and View Website opens the
   assert.equal(await section.count(), 1, "the Your website section is on the customer's existing project page");
   const text = await section.innerText();
   assert.match(text, new RegExp(NAME));
-  assert.match(text, /Version 1/);
+  assert.match(text, new RegExp(`Version ${firstVersion}\\b`));
   assert.doesNotMatch(await page.locator("body").innerText(), new RegExp(INTERNAL), "staff-only notes are not shown");
   assert.equal(await page.locator("iframe").count(), 0, "the website is not framed");
 
@@ -190,7 +218,7 @@ test("[WDX-E05] the customer requests changes and staff see the feedback", { ski
   await page.goto(`${BASE}/portal/projects/${projectA.id}`, { waitUntil: "domcontentloaded" });
   await page.fill("#f-website-note", feedback);
   await Promise.all([page.waitForNavigation(), page.locator('button:has-text("Request Changes")').click()]);
-  assert.match(await page.locator("[data-your-website]").innerText(), /You asked for changes to version 1/);
+  assert.match(await page.locator("[data-your-website]").innerText(), new RegExp(`You asked for changes to version ${firstVersion}\\b`));
   await page.context().close();
 
   const staff = await signIn(owner());
@@ -203,7 +231,7 @@ test("[WDX-E05] the customer requests changes and staff see the feedback", { ski
   await staff.context().close();
 });
 
-test("[WDX-E06] staff share a revised version 2; the customer approves it; staff see the approval and the history", { skip: unset }, async (t) => {
+test("[WDX-E06] staff share a revised version; the customer approves it; staff see the approval and the history", { skip: unset }, async (t) => {
   if (!shared || !customerA || !projectA || !deliveryId) return t.skip("nothing was shared — see [WDX-E03]");
   const staff = await signIn(owner());
   await staff.goto(`${BASE}/staff/website-delivery/${deliveryId}`, { waitUntil: "domcontentloaded" });
@@ -211,22 +239,23 @@ test("[WDX-E06] staff share a revised version 2; the customer approves it; staff
   await Promise.all([staff.waitForNavigation(), staff.locator('#replace button[name=intent][value=share]').click()]);
   const v2Id = /\/staff\/website-delivery\/(wdl_[0-9a-f]+)$/.exec(new URL(staff.url()).pathname)?.[1];
   assert.ok(v2Id && v2Id !== deliveryId, "a new version was created rather than the old one edited");
+  newestDeliveryId = v2Id!;
 
   const cust = await signIn(customerA);
   await cust.goto(`${BASE}/portal/projects/${projectA.id}`, { waitUntil: "domcontentloaded" });
   assert.equal(await cust.locator("[data-website-link]").getAttribute("href"), V2, "the customer now sees version 2");
-  assert.match(await cust.locator("[data-your-website]").innerText(), /Version 2/);
+  assert.match(await cust.locator("[data-your-website]").innerText(), new RegExp(`Version ${firstVersion + 1}\\b`), "the revision is the next version");
   await Promise.all([cust.waitForNavigation(), cust.locator('button:has-text("Approve Website")').click()]);
-  assert.match(await cust.locator("[data-your-website]").innerText(), /You approved version 2/);
+  assert.match(await cust.locator("[data-your-website]").innerText(), new RegExp(`You approved version ${firstVersion + 1}\\b`));
   await cust.context().close();
 
   await staff.goto(`${BASE}/staff/website-delivery/${v2Id}`, { waitUntil: "domcontentloaded" });
   const text = await staff.locator("main").innerText();
-  assert.match(text, /The customer approved version 2/);
+  assert.match(text, new RegExp(`The customer approved version ${firstVersion + 1}\\b`));
   const history = await staff.locator("main table").last().innerText();
-  assert.match(history, /v2/);
-  assert.match(history, /v1/);
-  assert.match(history, /Changes requested/, "version 1 keeps its own decision in the history");
+  assert.match(history, new RegExp(`\\bv${firstVersion + 1}\\b`));
+  assert.match(history, new RegExp(`\\bv${firstVersion}\\b`));
+  assert.match(history, /Changes requested/, "the first version keeps its own decision in the history");
   assert.match(history, new RegExp(`${RUN}-v1`));
   await staff.context().close();
 });
