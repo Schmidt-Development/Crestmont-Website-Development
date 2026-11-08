@@ -40,7 +40,10 @@ test("[IM-001] a well-formed plan validates, and the schema version is not optio
   const r = valid(manifest());
   assert.equal(r.ok, true, describeManifestProblems(r.problems));
   assert.ok(r.manifest, "the validated manifest is handed back");
-  assert.deepEqual(r.problems, []);
+  // Nothing REJECTED. A warning is allowed and expected: this fixture states its criteria in prose without
+  // probes, which the runner now says out loud because the functional gate will report each one undetermined.
+  assert.deepEqual(r.problems.filter((p) => p.severity === "reject"), []);
+  assert.equal(r.ok, true);
 
   assert.equal(valid({ ...manifest(), schema: "crestmont.integration-manifest/2" }).ok, false, "a version this code does not understand is not guessed at");
   assert.ok(codes(valid({ ...manifest(), schema: undefined }).problems).includes("schema"));
@@ -70,7 +73,7 @@ test("[IM-003] an operation nobody could verify is rejected, not planned", () =>
   const noAcceptance = valid(manifest([op({ acceptance: [] })]));
   assert.equal(noAcceptance.ok, false);
   assert.ok(codes(noAcceptance.problems).includes("no-acceptance"));
-  assert.match(noAcceptance.problems[0].detail, /no way to tell whether it works/);
+  assert.match(noAcceptance.problems.find((p) => p.code === "no-acceptance")!.detail, /no way to tell whether it works/);
 
   assert.ok(codes(valid(manifest([op({ acceptance: ["   "] })])).problems).includes("no-acceptance"), "whitespace is not a criterion");
 
@@ -88,7 +91,10 @@ test("[IM-003] an operation nobody could verify is rejected, not planned", () =>
   // A data write with no table named is a warning: the plan is still executable, just vaguer than it should be.
   const vague = valid(manifest([op({ dataModel: undefined })]));
   assert.equal(vague.ok, true, "a warning does not block the plan");
-  assert.deepEqual(codes(vague.problems), ["no-data-model"]);
+  // One REJECTION, and it is the data model. The prose criteria also draw a no-probe warning, which is a
+  // different statement about a different thing and does not stop the plan.
+  assert.ok(codes(vague.problems).includes("no-data-model"), codes(vague.problems).join(","));
+  assert.deepEqual(codes(vague.problems.filter((p) => p.severity === "reject")), [], "neither of these stops the plan");
 });
 
 test("[IM-004] duplicate ids, dangling dependencies and dependency loops are all caught", () => {

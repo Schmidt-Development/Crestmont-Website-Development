@@ -320,7 +320,7 @@ function dockerEnvForReaper(): Record<string, string> {
  * call goes through the same inference scheduler as every other Model A session: drafting a contract takes a turn
  * on the one GPU lane, it does not open a second one.
  */
-function contractAuthorFor(
+export function contractAuthorFor(
   cfg: RunnerConfig,
   scheduler: InferenceScheduler | null,
   logger: Logger,

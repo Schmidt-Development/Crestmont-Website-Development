@@ -65,10 +65,13 @@ import { assertIsolation, createWorkspace } from "../runner/src/workspace.ts";
 import { JobSandbox, cliDockerExecutor } from "../runner/src/sandbox.ts";
 import { importFrontend } from "../runner/src/frontend/workflow.ts";
 import { runDesignLockedJob, writeEvidence, MAX_REPAIR_CYCLES } from "../runner/src/frontend/design-locked-job.ts";
+import { draftAndSubmitContract, CONTRACT_ATTEMPTS } from "../runner/src/frontend/contract-author.ts";
+import { contractAuthorFor } from "../runner/src/main.ts";
 import { collectSnapshot } from "../runner/src/orchestrator/snapshot.ts";
 import { LocalProvider } from "../runner/src/providers/local.ts";
 import { RunTracker, StopSwitch } from "../runner/src/agent.ts";
 import { validateManifest, completeness, describeContract } from "../runner/src/frontend/integration-manifest.ts";
+import type { IntegrationManifest, ManifestContract } from "../runner/src/frontend/integration-manifest.ts";
 import { zipDirectory, makeZip } from "../runner/test/fixtures/zip-writer.ts";
 
 const argv = process.argv.slice(2);
@@ -272,7 +275,7 @@ async function main(): Promise<number> {
   // omitted it and fell back to 32768: with a seven-page artifact and a seven-operation contract, Model B spent
   // its whole budget re-reading files after each context reset — 28 resets, 661k input tokens, nothing written.
   // Under-configuring the window does not test the model, it tests the window.
-  process.env.LOCAL_MODEL_CONTEXT_TOKENS = process.env.LOCAL_MODEL_CONTEXT_TOKENS ?? "65536";
+  process.env.LOCAL_MODEL_CONTEXT_TOKENS = process.env.LOCAL_MODEL_CONTEXT_TOKENS ?? "131072";
   // Mirrors runner.env on Node 1. The skills directory is required configuration even for a stage that only
   // builds and measures, because loadConfig validates the whole configuration at once.
   process.env.SKILLS_SOURCE_DIR = process.env.SKILLS_SOURCE_DIR ?? "C:\\CrestmontRunner\\skills";
@@ -397,22 +400,58 @@ async function main(): Promise<number> {
     "a design-locked project was allowed to generate its own design");
 
   // The manifest is a contract, and it is checked before any model is asked to satisfy it.
-  // The contract this script checks is a FIXTURE one, written beside the artifact. In production Model A drafts
-  // it and the platform validates it; this script does not exercise that. An artifact with no fixture contract --
-  // the Founder's own uploads have none -- therefore has nothing to check here, and that is said rather than
-  // thrown: the run used to die with ENOENT after a clean import and approval, losing the evidence it had earned.
-  if (!existsSync(path.join(FIXTURE, "integration-manifest.json"))) {
-    check("MANIFEST-VALID", "undetermined",
-      `no integration-manifest.json beside this artifact, so no contract was checked here. In production Model A authors it; this script reads a fixture one.`);
-    return finish(1);
+  // ── MODEL A WRITES THE CONTRACT ───────────────────────────────────────────────────────────────────────────
+  //
+  // The architecture is that Model A determines the backend requirements from the MEASURED design, the platform
+  // validates that draft independently, and only then does Model B implement against it. This script used to read
+  // a hand-written contract from beside the fixture, so the automatic authoring path -- the thing a customer
+  // upload actually depends on -- was never exercised here, and an artifact with no fixture contract (which is
+  // every real upload) could not be run at all.
+  //
+  // The validator is the platform's own, over the real signed channel, and it refuses a draft whose criteria
+  // nothing can check. That refusal is fed back as corrections, up to CONTRACT_ATTEMPTS times.
+  let manifest: IntegrationManifest & ManifestContract;
+  const fixtureContract = path.join(FIXTURE, "integration-manifest.json");
+
+  if (existsSync(fixtureContract)) {
+    manifest = JSON.parse(readFileSync(fixtureContract, "utf8"));
+    manifest.designFingerprint = baseline.fingerprint;
+    manifest.artifactSha = artifact.sha256;
+    const validated = validateManifest(manifest, { approvedPages: imported.report.routes.map((r) => r.page), designFingerprint: baseline.fingerprint, artifactSha: artifact.sha256 });
+    expect("MANIFEST-VALID", validated.ok,
+      `the fixture contract validates against the measured pages: ${manifest.operations.length} operation(s)`,
+      `the fixture contract is not a valid contract: ${JSON.stringify(validated.problems).slice(0, 600)}`);
+    check("CONTRACT-AUTHOR", "pass", "a fixture contract was supplied, so Model A was not asked to draft one");
+  } else {
+    const author = contractAuthorFor(cfg, null, logger)(importWs.repo);
+    const drafted = await draftAndSubmitContract({
+      author,
+      input: {
+        projectId, artifactSha: artifact.sha256, designFingerprint: baseline.fingerprint,
+        routes: imported.report.routes, interactions: imported.report.interactions,
+      },
+      attempts: CONTRACT_ATTEMPTS,
+      onAttempt: (r) => log(`the platform's validator refused the draft (attempt ${r.attempt}): ${r.problems.slice(0, 3).join(" | ").slice(0, 400)}`),
+      submit: async (r) => (await client.submitFrontendContract({
+        projectId, manifest: r.manifest, attempt: r.attempt, attemptsAllowed: r.attemptsAllowed,
+        authorModel: cfg.models.mode === "dual" ? cfg.models.a.tag : cfg.local.model,
+      })) ?? { recorded: false, problems: [] },
+    });
+
+    expect("CONTRACT-AUTHOR", drafted.recorded,
+      `Model A drafted a contract the platform's own validator accepted, on attempt ${drafted.attempts} of ${CONTRACT_ATTEMPTS}`,
+      `Model A could not produce a contract the validator would accept in ${drafted.attempts} attempt(s): ${drafted.problems.slice(0, 5).join(" | ").slice(0, 700)}`);
+    if (!drafted.recorded) return finish(1);
+
+    const recorded = await DL.activeContract(t.db, projectId);
+    if (!recorded) { check("MANIFEST-VALID", "fail", "the platform reported the contract recorded but none is active"); return finish(1); }
+    manifest = JSON.parse(recorded.manifest_json) as IntegrationManifest & ManifestContract;
+    const probes = manifest.operations.reduce((n, op) => n + (op.acceptanceProbes ?? []).length, 0);
+    const criteria = manifest.operations.reduce((n, op) => n + op.acceptance.length, 0);
+    check("MANIFEST-VALID", "pass",
+      `the contract Model A wrote was validated independently and recorded: ${manifest.operations.length} operation(s), ${criteria} acceptance criteria, ${probes} executable probe(s)`);
+    writeFileSync(path.join(OUT, "model-a-contract.json"), JSON.stringify(manifest, null, 2));
   }
-  const manifest = JSON.parse(readFileSync(path.join(FIXTURE, "integration-manifest.json"), "utf8"));
-  manifest.designFingerprint = baseline.fingerprint;
-  manifest.artifactSha = artifact.sha256;
-  const validated = validateManifest(manifest, { approvedPages: imported.report.routes.map((r) => r.page), designFingerprint: baseline.fingerprint, artifactSha: artifact.sha256 });
-  expect("MANIFEST-VALID", validated.ok,
-    `the contract validates against the measured pages: ${manifest.operations.length} operation(s)`,
-    `the manifest is not a valid contract: ${JSON.stringify(validated.problems).slice(0, 600)}`);
   const complete = completeness(manifest);
   expect("MANIFEST-COMPLETE", complete.ok,
     `every operation has what it needs; ${complete.missing.length} recorded gap(s)`,

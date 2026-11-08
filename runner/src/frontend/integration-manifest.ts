@@ -28,6 +28,9 @@ export type OperationKind = (typeof OPERATION_KINDS)[number];
  */
 export const RELEASE_GATED: readonly OperationKind[] = ["payment", "auth", "email", "upload", "admin"];
 
+/** Kinds the independent acceptance driver can exercise over HTTP, so their criteria must carry probes. */
+export const PROBEABLE: readonly OperationKind[] = ["data-read", "data-write", "form-submit", "search", "auth", "payment", "upload"];
+
 export interface IntegrationOperation {
   /** Stable across segments, so a long task can report progress against a plan rather than restating it. */
   id: string;
@@ -234,6 +237,20 @@ export function validateManifest(
     // be verified against an endpoint the contract never agreed to.
     const probes = Array.isArray(op.acceptanceProbes) ? op.acceptanceProbes : [];
     const declaredPaths = new Set(((man as { apis?: { path?: unknown }[] }).apis ?? []).map((a) => String(a?.path ?? "")));
+    // A PROBE MAY ALSO TARGET A PAGE OF THE APPROVED DESIGN.
+    //
+    // Most acceptance criteria are about what the page SHOWS -- that the form is still there after a submission,
+    // that a confirmation replaced it -- and the executable form of that is a GET of the page with
+    // expectBodyContains / expectBodyAbsent. The page is not an API, so requiring every probe to name a declared
+    // api path made those criteria unprobeable while another rule demanded they be probed: Model A drafted
+    // page probes three times and was refused three times for pointing at "/". The driver already GETs "/" to
+    // decide the application started, so the page is a surface it can exercise.
+    const pagePaths = new Set<string>();
+    for (const p of o.approvedPages ?? []) {
+      if (p === "index") { pagePaths.add("/"); pagePaths.add("/index.html"); }
+      pagePaths.add(`/${p}`);
+      pagePaths.add(`/${p}.html`);
+    }
     const seenCriteria = new Set<number>();
     for (const [n, pr] of probes.entries()) {
       const at = `${where} probe ${n + 1}`;
@@ -251,8 +268,8 @@ export function validateManifest(
       if (!Number.isInteger(pr.expect) || pr.expect < 100 || pr.expect > 599) {
         reject("probe-status", `${at} must expect an HTTP status, not ${String(pr.expect)}`, op.id);
       }
-      if (!isStr(pr.path) || !declaredPaths.has(pr.path)) {
-        reject("probe-path", `${at} probes ${String(pr.path)}, which is not one of the declared apis`, op.id);
+      if (!isStr(pr.path) || !(declaredPaths.has(pr.path) || pagePaths.has(pr.path))) {
+        reject("probe-path", `${at} probes ${String(pr.path)}, which is neither one of the declared apis nor a page of the approved design (${[...pagePaths].slice(0, 6).join(", ")})`, op.id);
       }
     }
 
@@ -289,6 +306,34 @@ export function validateManifest(
       if (!ids.has(d)) reject("unknown-dependency", `operation "${op.id}" depends on "${d}", which is not in the plan`, op.id);
     }
   }
+  // EVERY CRITERION OF AN HTTP-SERVED OPERATION NEEDS A PROBE, which is the same bar the platform applies to a
+  // contract Model A drafts. It is here as well because a contract can reach a build through more than one door:
+  // the platform validates what Model A writes, and this validates whatever is handed to the runner.
+  // A WARNING here, a REFUSAL on the platform. The platform validates a draft at the moment Model A writes it,
+  // which is the only moment it can be corrected -- so that is where the bar is enforced. The runner is handed
+  // contracts the platform already accepted, including ones recorded before this rule existed, and refusing
+  // those at build time would break builds over a contract nobody can now change. So: say it loudly, build
+  // anyway, and let the gate report the undetermined criteria it is going to report.
+  //
+  // Measured, and it cost a 40-minute build: the northgate contract declares 28 acceptance criteria and probes
+  // 10 of them. The functional gate reports every unprobed criterion as UNDETERMINED, undetermined is never a
+  // pass, and no repair can invent a probe -- so 18 of them sat unmoved through all four cycles and the gate
+  // could not close however good the implementation was. Cycle 3 was ONE failure away otherwise.
+  for (const op of ops) {
+    if (!PROBEABLE.includes(op.kind)) continue;
+    const probed = new Set((op.acceptanceProbes ?? []).map((p) => p.criterion));
+    const unprobed = (op.acceptance ?? []).map((_t, i) => i).filter((i) => !probed.has(i));
+    if (unprobed.length) {
+      warn("no-probe",
+        `a ${op.kind} operation is served over HTTP, so every one of its acceptance criteria needs an acceptanceProbe. `
+        + `${unprobed.length} of ${(op.acceptance ?? []).length} has none (${unprobed.map((i) => `acceptance[${i}]`).join(", ")}). `
+        + `A criterion about what the page shows is probeable with expectBodyContains / expectBodyAbsent; a property `
+        + `no request can observe is not an acceptance criterion and belongs under missing. Without a probe it is `
+        + `reported UNDETERMINED for ever, and the functional gate can never close.`,
+        op.id);
+    }
+  }
+
   const cycle = findCycle(ops);
   if (cycle) reject("dependency-cycle", `these operations depend on each other in a loop, so none can start: ${cycle.join(" → ")}`);
 
