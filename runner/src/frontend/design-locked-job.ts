@@ -745,6 +745,24 @@ function nextPrompt(conf: ConformanceReport, functional: CycleRecord["functional
     parts.push(functional.ran
       ? "**Do this:** fix the failing behaviour. Do not weaken the check to make it pass."
       : "**Do this:** write a runnable acceptance check that exercises each acceptance criterion against the real application, and make it pass. A criterion nobody can run is not satisfied.");
+    // WHERE THE MISSING TEXT ALREADY LIVES.
+    //
+    // A probe that wants text out of the approved page is checking that the page is still SERVED as approved. A
+    // failure reading `the response does not contain "<b>28</b>"` therefore usually means the opposite of what it
+    // sounds like: not that something is missing from the backend, but that the approved markup was taken out of
+    // the frontend -- replaced, typically, by a placeholder the JavaScript fills in from the new API. That is a
+    // change to an approved frontend, which is the one thing this architecture forbids, and it fails the check
+    // precisely because it happened. Measured: a build removed `<b>28</b>` to inject the figure dynamically and
+    // four probes went from passing to failing in one cycle.
+    //
+    // So the brief says where the text is, rather than leaving the model to infer it from a quoted string.
+    if (functional.ran && (functional.failed ?? 0) > 0) {
+      parts.push("");
+      parts.push("**Before you change anything:** if the text a probe says is missing is text that the APPROVED frontend"
+        + " already contains, nothing is missing from your backend -- that text has been taken out of the page. Put it back"
+        + " and serve the approved file unchanged. Add the API beside it; do not replace server-rendered markup with a"
+        + " placeholder your script fills in, because the probe is checking that the approved page is still served.");
+    }
     parts.push("");
   }
   return parts.length > preamble ? parts.join("\n") : null;

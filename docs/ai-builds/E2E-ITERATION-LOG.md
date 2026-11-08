@@ -24,6 +24,8 @@ are resolved in round two).
 
 | 10 | `6fb4c2a` | `GATE-VISUAL` — `index at tablet [layout]: section spacing changed by 8616px` | **the two gates could not hold at once.** The visual gate passed at cycle 1 (no backend) and failed at cycle 2 once the backend worked, because data arriving where a placeholder was makes the page taller — and a `design-drift` finding was raised for the layout consequence of a content change the contract *declares*. The only way Model B could satisfy both was to stop the data arriving | a drift finding whose aspects are **only** `layout`, on a page whose content change is declared, is reported as the declared change. Palette, fonts and skeleton stay locked | `[DL-012]` |
 
+| 11 | `6fb4c2a` | `GATE-VISUAL` — **0 drift findings**, 1 interactive state changed; `GATE-FUNCTIONAL` — a real Model B defect | the layout fix worked. The remaining visual item is the same defect in the other channel: interactive-state screenshot hashes captured before Model B existed, compared against the same states once the backend works. An inert form against a working one must differ — that difference is the work | the declaration that covers the resting page covers its states; on an undeclared page a changed state is still a failure. Also unblocks the loop: cycle 2 had scored identically to cycle 1 and stopped with two of four cycles unspent | `[DL-012]` covers the principle |
+
 ## Results by iteration
 
 **Iteration 3** (`876a33f`) — 28 passed, 2 failed, 1 undetermined.
