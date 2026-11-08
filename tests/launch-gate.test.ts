@@ -115,6 +115,15 @@ test("[PAY-004] launch gate: every incomplete state is blocked; only a signed ag
   await blocked("initial payment failed / subscription incomplete", "maintenance:subscription_not_active");
   await blocked("initial payment failed", "maintenance:initial_payment_not_verified");
   assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM maintenance_activations WHERE project_id = ?`, projectId)).status, "due", "an incomplete subscription does not complete the activation");
+  // A failed FIRST payment is not a renewal failure (found on staging, 2026-11-08): the subscription stays incomplete
+  // (so a new Checkout is not refused as "already active"), no seven-day suspension clock starts, and the customer is
+  // told the subscription did not start rather than that a plan payment failed.
+  const afterFail = await one<{ status: string; payment_failed_at: string | null }>(t.db, `SELECT status, payment_failed_at FROM subscriptions WHERE stripe_subscription_id = 'sub_gate'`);
+  assert.equal(afterFail.status, "incomplete");
+  assert.equal(afterFail.payment_failed_at, null, "no suspension clock for a subscription that never started");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'payment.initial_failed' AND subject_id = 'sub_gate'`).first());
+  assert.equal(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'payment.failed' AND subject_id = 'sub_gate'`).first(), null);
+  assert.match((await customer.get(`/portal/projects/${projectId}`)).status === 200 ? await (await customer.get(`/portal/projects/${projectId}`)).text() : "", /Activate your maintenance subscription/, "the customer can try again");
 
   // 4. Out of order: the first invoice's payment arrives BEFORE the subscription turns active. Still blocked (Stripe
   //    has not reported the subscription active), and nothing is lost.
@@ -238,4 +247,29 @@ test("[PAY-004] launch gate: no release path can bypass it — deployment record
   assert.equal(act.trigger, "ready_for_review", "the activation was opened at review, before launch");
   // Staff see the plain-English launch status.
   assert.match(await (await staff.get(`/staff/projects/${projectId}?tab=approvals`)).text(), /Launch status:.*Website approved for publishing/s);
+});
+
+test("[PAY-004] launch gate: a quote-based project cannot reach maintenance Checkout before the agreement is signed (found on staging)", async () => {
+  // Custom work arrives through an accepted quote (orders.kind = 'quote'), not a package. The agreement-first order was
+  // enforced only for package orders, so this customer reached Stripe Checkout unsigned. Payments are configured here
+  // (a fake adapter that records the request), so a 409 can only come from the agreement rule.
+  const created: unknown[] = [];
+  const payments = { configured: true, mode: "test" as const, async createCheckout(r: unknown) { created.push(r); return { id: "cs_test_q", url: "https://checkout.stripe.com/c/pay/cs_test_q" }; },
+    async createBillingPortal() { return { url: "https://billing.stripe.com/p/x" }; }, async createRefund() { return { id: "re_x", status: "succeeded" }; } };
+  const t = await createTestApp({ STRIPE_WEBHOOK_SECRET: WHSEC, overrides: { payments } as never });
+  const cu = await createCustomer(t.db, `quote${++seq}@fixture.example`, "Fixture Quote Customer LLC");
+  const at = nowIso(), pid = newId("prj");
+  await t.db.prepare(`INSERT INTO projects (id, organization_id, name, status, revision_allowance, payment_schedule, created_at, updated_at) VALUES (?,?, 'Custom site', 'customer_review', 2, 'milestone_50_25_25', ?, ?)`).bind(pid, cu.organizationId, at, at).run();
+  await t.db.prepare(`INSERT INTO maintenance_activations (id, organization_id, project_id, order_id, plan_id, status, trigger, opened_at, created_at, updated_at) VALUES (?,?,?, NULL, 'essential', 'due', 'ready_for_review', ?, ?, ?)`).bind(newId("mact"), cu.organizationId, pid, at, at, at).run();
+  const c = await t.client().login(cu.email);
+  const before = await c.post("/checkout/maintenance/essential", { terms: "1" });
+  assert.equal(before.status, 409);
+  assert.match(await before.text(), /sign your maintenance agreement first/i);
+  assert.equal(created.length, 0, "no Stripe Checkout session was created");
+  // After signing, the same request goes to Stripe.
+  await c.post(`/portal/projects/${pid}/maintenance-agreement`, { agree: "1" });
+  const after = await c.post("/checkout/maintenance/essential", { terms: "1" });
+  assert.equal(after.status, 303);
+  assert.match(after.headers.get("location") ?? "", /^https:\/\/checkout\.stripe\.com\//);
+  assert.equal(created.length, 1);
 });

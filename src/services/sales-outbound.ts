@@ -686,14 +686,23 @@ async function dispatchMode(d: SalesQueueDeps, s: SalesSettings, mode: OutboundM
  * Each candidate is queued once (its series carries its own retries); the compliance gate decides at queue time and
  * again right before the dial, so a lead that is not eligible is recorded as blocked with its reasons.
  */
+/**
+ * The leads that have documented, unrevoked AI-calling consent: a consent recorded on the lead, or on a number one of
+ * its research records carries. Uncorrelated on purpose: it is evaluated ONCE from the small side (consents, then their
+ * phone matches through idx_research_prospects_phone) and leads are looked up by primary key. The earlier form joined
+ * every open lead to every consent with a correlated research_prospects subquery, ~8.6 s of D1 time at staging scale
+ * (36,780 leads, 120 consents), which exhausted D1's 10-second resource window and made the pages behind it 500.
+ */
+export const CONSENTED_LEAD_IDS = `SELECT sc.lead_id FROM sales_call_consents sc WHERE sc.revoked_at IS NULL AND sc.lead_id IS NOT NULL
+  UNION SELECT rp.crm_lead_id FROM sales_call_consents sc JOIN research_prospects rp ON rp.phone_e164 = sc.phone_e164 WHERE sc.revoked_at IS NULL AND rp.crm_lead_id IS NOT NULL`;
+
 export async function topUpColdCandidates(db: Db, s: SalesSettings, now: Date): Promise<number> {
   const remaining = coldDailyLimit(s) - (await dialsToday(db, now)).cold;
   const queued = (await db.prepare(`SELECT COUNT(*) AS n FROM sales_calls WHERE mode = 'cold' AND status = 'queued'`).first<{ n: number }>())!.n;
   const want = Math.min(Math.max(0, remaining - queued), s.max_dials_per_run * 3);
   if (want <= 0) return 0;
-  const rows = (await db.prepare(`SELECT DISTINCT l.id FROM leads l
-      JOIN sales_call_consents sc ON sc.revoked_at IS NULL AND (sc.lead_id = l.id OR sc.phone_e164 IN (SELECT phone_e164 FROM research_prospects WHERE crm_lead_id = l.id))
-      WHERE l.merged_into_lead_id IS NULL AND l.stage IN ('new','qualified','quote_required','quote_sent','negotiation')
+  const rows = (await db.prepare(`SELECT l.id FROM leads l
+      WHERE l.id IN (${CONSENTED_LEAD_IDS}) AND l.merged_into_lead_id IS NULL AND l.stage IN ('new','qualified','quote_required','quote_sent','negotiation')
         AND NOT EXISTS (SELECT 1 FROM sales_calls c WHERE c.lead_id = l.id AND c.mode = 'cold')
       ORDER BY l.created_at LIMIT ?`).bind(want).all<{ id: string }>()).results;
   let n = 0;

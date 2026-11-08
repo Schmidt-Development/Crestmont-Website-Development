@@ -158,6 +158,20 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
       }
       case "invoice.payment_failed": {
         const sub = invoiceSubscription(o);
+        // The FIRST invoice of a subscription failing means the subscription never started (Stripe: "incomplete"). It is
+        // not a renewal failure: no seven-day suspension clock (there is no live website to suspend), the customer is
+        // told the payment did not go through, and Checkout may be tried again (an incomplete subscription does not
+        // block a new one; Stripe expires it after 23 hours). Renewals below are unchanged (Clarification 1).
+        if (sub && s(o, "billing_reason") === "subscription_create") {
+          const paid = await db.prepare(`SELECT 1 FROM subscription_initial_payments WHERE stripe_subscription_id = ? AND reversed_at IS NULL`).bind(sub).first();
+          if (!paid) {
+            await db.prepare(`UPDATE subscriptions SET status = 'incomplete', updated_at = ? WHERE stripe_subscription_id = ? AND status <> 'active'`).bind(nowIso(), sub).run();
+            const to0 = s(o, "customer_email");
+            if (to0) await sendMail(ctx, { template: "failed_payment", to: to0, idempotencyKey: `failed-initial:${evt.id}`, data: { kind: "initial_subscription", url: `${ctx.baseUrl}/portal/projects` } });
+            await audit(db, { actorKind: "webhook", action: "payment.initial_failed", subjectType: "subscription", subjectId: sub, details: { event: evt.id } });
+            break;
+          }
+        }
         if (sub) await db.prepare(`UPDATE subscriptions SET status = 'past_due', updated_at = ? WHERE stripe_subscription_id = ?`).bind(nowIso(), sub).run();
         // Clarification 1: the first unresolved failure starts the seven-day clock before hosting may be suspended.
         const clock = sub ? await recordPaymentFailure(db, sub, new Date(evt.created ? evt.created * 1000 : Date.now())) : null;

@@ -85,7 +85,7 @@ export interface TemplateData {
   invoice: ProjectBase & { milestone: string; hostedInvoiceUrl?: string | null };
   /** `kind`: "plan" = maintenance renewal (invoice.payment_failed); "checkout" = a delayed checkout payment failed (CREST-GAP-083). */
   /** "suspension_notice" = the pre-suspension reminder; "suspended" = the Owner suspended hosting (clarifications 1–2). */
-  failed_payment: { url: string; kind?: "plan" | "checkout" | "suspension_notice" | "suspended"; suspendAfter?: string };
+  failed_payment: { url: string; kind?: "plan" | "checkout" | "initial_subscription" | "suspension_notice" | "suspended"; suspendAfter?: string };
   subscription_update: { planName: string; status: string; url: string };
   support_ticket:
     | { event: "received"; name: string; subject: string; ticketRef: string; hoursNotice: string; url: string }
@@ -334,6 +334,11 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       paragraphs: [`Your maintenance plan payment is still unpaid. If it remains unpaid${d.suspendAfter ? ` on ${d.suspendAfter}` : " seven days after it first failed"}, your website hosting may be suspended.`,
         "Suspension never deletes your website or data, and hosting is restored when the payment goes through. If something is wrong, reply to this email."],
       cta: { label: "Update payment method", url: d.url },
+    }) : d.kind === "initial_subscription" ? ({
+      subject: "Your maintenance subscription did not start", heading: "Your first maintenance payment did not go through",
+      paragraphs: ["Your bank did not complete the first payment for your maintenance plan, so nothing was charged and the subscription has not started.",
+        "Your website goes live once the first payment is confirmed. You can activate the subscription again from your project page, with another payment method if needed."],
+      cta: { label: "Open your project", url: d.url },
     }) : ({
       subject: "Action needed: payment failed", heading: "Your payment did not go through",
       paragraphs: d.kind === "checkout"
@@ -343,7 +348,8 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       cta: { label: d.kind === "checkout" ? "Pay from your portal" : "Update payment method", url: d.url },
     }),
     samples: [{ url: "https://example.com/portal/billing" }, { url: "https://example.com/portal/billing/invoices/inv_preview", kind: "checkout" },
-      { url: "https://example.com/portal/billing", kind: "suspension_notice", suspendAfter: "2026-11-09" }, { url: "https://example.com/portal/billing", kind: "suspended" }],
+      { url: "https://example.com/portal/billing", kind: "suspension_notice", suspendAfter: "2026-11-09" }, { url: "https://example.com/portal/billing", kind: "suspended" },
+      { url: "https://example.com/portal/projects", kind: "initial_subscription" }],
   },
   subscription_update: {
     name: "subscription_update", category: "transactional", audience: "customer",
