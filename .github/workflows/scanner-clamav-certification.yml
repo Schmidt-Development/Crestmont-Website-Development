@@ -82,8 +82,10 @@ jobs:
             echo "- engine: \`$(cat engine.txt)\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The repository has no package-lock.json (zero runtime dependencies), so `npm ci` refused to run and this job
+      # had never certified anything (first dispatch: run 42522838789). Same tooling, same way, as ci.yml.
       - name: Install dev tooling
-        run: npm ci --ignore-scripts
+        run: npm install --no-save --ignore-scripts typescript@5 @types/node@22
 
       - name: Typecheck
         run: npx tsc -p tsconfig.json --noEmit
