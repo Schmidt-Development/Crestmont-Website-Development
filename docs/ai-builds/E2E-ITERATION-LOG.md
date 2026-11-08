@@ -1,0 +1,54 @@
+# Artifact Builder — E2E iteration log
+
+One row per real end-to-end run of `scripts/design-locked-e2e.ts --stage full`. Kept so a diagnosis is made once:
+after a context reset or a new session, read this before re-deriving anything.
+
+Fixture unless stated: the Founder's own `01-vesper-rowe-law.zip` — one self-contained HTML document, 174 KB,
+one Google Fonts stylesheet and three Unsplash photographs (ten pinned assets once the stylesheet's woff2 files
+are resolved in round two).
+
+| # | Commit | Failed checks | Root cause | Fix | Regression test |
+|---|--------|---------------|-----------|-----|-----------------|
+| 1 | `19c6a5c` | `SCAN-CLEAN` undetermined | clamd listens on `scan_net` and publishes no host port, but the harness runs the scanner in-process on the host | throwaway clamd on `127.0.0.1:3310` reusing the signature volume; the hardened stack untouched | — (environment, not code) |
+| 2 | `cf0568a` | `CONTRACT-AUTHOR` | the e2e read a **fixture** contract and required a `package.json`, so neither Model A authoring nor the single-document shape had ever run here | wired real Model A authoring; a directory with an HTML document is a frontend | `[SIMPLE-*]`, `ASSETS-ACQUIRED` |
+| 3 | `876a33f` | `CONTRACT-AUTHOR` ×3 attempts | **contradiction**: every criterion had to carry a probe, and a page-content probe GETs the page, which is not in `apis` — Model A drafted the right thing and was refused | a probe may name a page of the approved design | `[DLC-12]` |
+| 3 | `876a33f` | Model B `max_turns` 60/60/60, **13 context resets** | `OLLAMA_NUM_PARALLEL=2` halved the window; models advertise 262144, runner ran 65536 | 1 sequence × 131072 — same KV allocation, usable window ~55k → ~119k | verified by `/api/ps`: `ctx=131072`, 25.5 GB |
+| 4 | `412091b` | `GATE-VISUAL` — approved `b2dd67f23666`, measured `5eaa292fbefd` | `5eaa292fbefd` is this artifact's fingerprint **without** its assets: the import had a resolver, the build had none, so the gate compared a page with its fonts against a page without them | one resolver, passed to both `importFrontend` and `runDesignLockedJob` | — |
+| 5 | `d108065` | — (workflow change) | uploading authorized backend construction, skipping the preview the step exists for | upload authorizes nothing; one `approve-and-build` action, idempotent, holds the decision while preparation finishes | `[SIMPLE-01]`…`[SIMPLE-05]` |
+| 6 | `d108065` | `loop detected: run_command repeated 4x` | `git log` ×6 then `ls .git` ×4: the workspace is a repository with **no commits** (the design-locked path never makes one), so git fails the same way in production | the prompt says there is no history to read; the e2e initialises the repo like the runner | `[DLJ-*]`, `[INT-*]` pass |
+| 7 | `d108065` | `GATE-VISUAL` — approved `973c825990b3` vs measured `b2dd67f23666` | **the measurement is not deterministic**: four images carry `loading="lazy"` and part of the page is written by its own JavaScript, so `waitUntil: load` + `fonts.ready` + a flat 250ms measured one of two resting states, 12207px apart | a bounded `settle()` before every measurement and screenshot: images made eager and scrolled past, awaited and decoded, fonts awaited, document height held still across two samples | two imports of the same bytes must agree on the fingerprint |
+
+## Results by iteration
+
+**Iteration 3** (`876a33f`) — 28 passed, 2 failed, 1 undetermined.
+Model A accepted on attempt 1 (1 operation, 3 criteria, 3 probes). Model B: phases `success` at 55 / 29 / 18 turns,
+**0 context resets**. `GATE-CONFORMANCE` passed. **`GATE-FUNCTIONAL` passed — 7 contract checks against the running
+application.** Only `GATE-VISUAL` failed, on the asset mismatch above.
+
+**Iteration 4** (`412091b`) — 27 passed, 3 failed, 1 undetermined.
+Model A accepted on attempt 1 (1 operation, 5 criteria, 5 probes — a *different*, larger contract than iteration 3
+from the same artifact). Model B: 2 cycles, **2 file changes**, phase ended `loop`. No server was written, so
+`GATE-FUNCTIONAL` could not evaluate. This is **run-to-run variance in the local models**, not a regression from
+the asset fix.
+
+**Iteration 5** (`d108065`) — 28 passed, 2 failed, 1 undetermined.
+Model A accepted on attempt 3 of 3 (1 operation, 4 criteria, 4 probes). Model B: 3 cycles, 8 file changes, **no
+loop detection** — the git fix held. `GATE-CONFORMANCE` passed. **`GATE-FUNCTIONAL` passed — 8 contract checks
+against the running application**, the second time in five runs that the generated backend worked. Only
+`GATE-VISUAL` failed, and its own message gave the cause away: it had measured `b2dd67f23666`, which is the value
+iteration 3's import produced from these same bytes. Both sides pinned 10 of 10 assets, 1359 KB, so the asset set
+was identical and what differed was the rendering itself.
+
+## Standing observations
+
+- **Model A and Model B output varies between identical runs.** Iteration 3 produced a working backend; iteration 4
+  produced none from the same bytes. Any claim that the builder "works" has to account for this, and the honest
+  statement is a success *rate*, not a success.
+- `node server.js & sleep …` ran **38 times** in iteration 4's phase. Not yet diagnosed; next in the loop.
+- The visual gate reports `findings: undefined` when it did not run, and `gateScore` scores that as `1`. A
+  "visual 1" in a stop message therefore means *did not run*, not *one finding* — this cost a wrong diagnosis once.
+- Staging Worker `f0b8a7b2-77a6-467e-a39d-4cec55cf341b`; runner image `sha256:4a8367f4…`, reporting `slots: 4`,
+  `gpu.maxConcurrent: 1`, `paidProviderAllowed: false`.
+- Law Firm 02 (`prj_e302b182025b36d4ae905630`, artifact `fa_45741ac8e5c6c26c684e46a0`) waits on one
+  staff-authenticated `retry-import`. Its four asset rows still read "blocked by the egress allowlist" from the
+  pre-fix Worker; the deployed Worker now has the fix.
