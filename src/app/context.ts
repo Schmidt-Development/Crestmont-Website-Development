@@ -132,6 +132,8 @@ export interface Env {
   FOUNDER_EMAIL?: string;
   /** Where Founder appointment notifications go (src/services/founder-notifications.ts); defaults to the Founder's address. */
   FOUNDER_NOTIFY_EMAIL?: string;
+  /** Internal operations mailbox override (internal-notify.ts); defaults to crestmontwebsitedevelopment@gmail.com. */
+  INTERNAL_NOTIFY_EMAIL?: string;
   FILES?: unknown;             // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */
