@@ -310,6 +310,13 @@ test("[REAL-012] nothing is measured before the page has come to rest", async ()
   assert.match(src, /document\.fonts\.ready/, "a fallback face measures differently from the real one");
   assert.match(src, /if \(now === last\) return \{ settled: true/, "the document height has to stop moving");
   assert.match(src, /settled: false/, "and a page that never settles is reported, not waited on for ever");
+  // Height stability alone passed while the DOM was still being written: the law firm page builds its cards on
+  // DOMContentLoaded and sizes them in requestAnimationFrame, so four article.pcard elements were present in one
+  // measurement and absent in another. Waiting longer would be a guess; waiting for mutations to stop is the
+  // condition that was actually meant.
+  assert.match(src, /new MutationObserver/, "the DOM has to stop changing, not merely the height");
+  assert.match(src, /childList: true, subtree: true/, "and that means the whole tree, not just the top level");
+  assert.ok(src.includes("setTimeout(finish, 4000)"), "bounded, so a clock or a carousel is measured rather than waited on");
 
   // THE INVARIANT: every page load is followed by settling. A goto without one is a measurement of whatever
   // happened to be painted, which is the bug.

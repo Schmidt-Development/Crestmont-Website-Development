@@ -20,6 +20,8 @@ are resolved in round two).
 
 | 8 | `bdb9c81` | `GATE-VISUAL` — approved `b2dd67f23666` vs measured `973c825990b3` | the gate compared the build's measurement against the baseline measured during **import** — a different container — so an environment difference was permanent drift blamed on Model B. Each path was now individually deterministic, which is what made the systematic difference visible | the gate compares against this build's own measurement of the unmodified artifact (`before`, already passed in and used only for state changes); divergence from the approved design stays reported by the drift check that owns that question | `[DLJ-17]` |
 
+| 9 | `1682f9f` | `GATE-VISUAL` — "the rendering changed but nothing in the integration manifest said this page would change" | Model A declared `firm-figures-read` on `index`, kind `data-read`, serving `GET /api/firm-figures`, with **`expectChange: "none"`**. A data-read puts backend data on a page, so making it work is exactly what changes the rendering — the gate was told the page would look the same and reported the data arriving as drift | the validator refuses `expectChange: "none"` for `data-read` and `search`, naming the consequence; Model A's schema says which value to use and why | `[IM-014]` |
+
 ## Results by iteration
 
 **Iteration 3** (`876a33f`) — 28 passed, 2 failed, 1 undetermined.
@@ -49,6 +51,36 @@ third working backend in six runs. `GATE-VISUAL` failed with approved `b2dd67f23
 was deterministic by now, so the difference was systematic between import and build, which is what led to the
 gate fix above. Eliminated along the way, cheaply and then reverted: the git repository in the build workspace was
 **not** the cause — an import with git initialised still measured `b2dd67f236668efb`.
+
+**Iteration 7** (`1682f9f`) — 28 passed, 2 failed, 1 undetermined. **The environment drift is gone**: no
+"renders a different design from the one approved", no 12207px deltas. Per cycle:
+
+| cycle | conformance | functional | visual |
+|---|---|---|---|
+| 1 | ok | no server yet | 3 findings |
+| 2 | ok | no server yet | **ok — the approved design held across 3 page views** |
+| 3 | ok | **ok — 10 contract checks passed** | 2 findings |
+
+Every gate has now passed. Never simultaneously — which is what the `expectChange` fix above addresses. Model A
+accepted on attempt 2 (1 operation, 6 criteria, 6 probes).
+
+**Iteration 8** (`1682f9f`) — 28 passed, 2 failed, 1 undetermined. Per cycle:
+
+| cycle | conformance | functional | visual |
+|---|---|---|---|
+| 1 | ok | no server yet | 1 — an interactive state hash changed, zero drift findings |
+| 2 | ok | **ok** | **1** — `index at tablet [layout]: section spacing` |
+| 3 | ok | ok | 4 — regressed; `6 element(s) gone (article.pcard ×4)` |
+
+The closest the builder has come: cycle 2 had conformance and functional passing with the visual gate **one finding**
+away. But this run's import measured `9591851fd93af2b9` — a **third** value.
+
+**Correction, recorded because it was reported as settled.** Iteration 7's "DETERMINISTIC: b2dd67f236668efb" was
+based on two runs. A third run falsified it. Two agreeing runs are not evidence of determinism for a page whose
+content is written by its own JavaScript; the check now uses four. The `article.pcard` elements are built on
+`DOMContentLoaded` and sized by `requestAnimationFrame`, so the document height can hold still for two samples
+while the DOM is still being written — which is why height stability alone was insufficient and why `settle` now
+waits for DOM quiescence (no mutations for 400ms, bounded at 4s) rather than for longer.
 
 ## Standing observations
 

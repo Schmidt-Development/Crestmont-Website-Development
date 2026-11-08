@@ -528,6 +528,28 @@ const SETTLE = `async () => {
   }));
   if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) { /* ignore */ } }
 
+  // Height stability alone was not enough, and iteration 8 said why: four article.pcard elements present in one
+  // measurement and absent in another, and a tablet-only section spacing shift. Those cards are built by the
+  // page's own JavaScript on DOMContentLoaded and sized by requestAnimationFrame, so the document height can hold
+  // still for two samples while the DOM is still being written. Waiting longer would be guessing; waiting for the
+  // DOM to stop changing is the actual condition.
+  //
+  // So: no DOM mutations for a quiet window, then the height held across samples. Both bounded.
+  await new Promise((resolve) => {
+    let quiet;
+    let mutations = 0;
+    const obs = new MutationObserver(() => {
+      mutations++;
+      clearTimeout(quiet);
+      quiet = setTimeout(finish, 400);
+    });
+    const finish = () => { try { obs.disconnect(); } catch (e) { /* already gone */ } resolve(mutations); };
+    obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+    quiet = setTimeout(finish, 400);
+    // Never wait on a page that mutates for ever (a clock, a carousel, a polling widget).
+    setTimeout(finish, 4000);
+  });
+
   // The height has to stop moving. Two equal samples a frame apart, up to a bounded number of tries.
   let last = -1;
   for (let i = 0; i < 20; i++) {
