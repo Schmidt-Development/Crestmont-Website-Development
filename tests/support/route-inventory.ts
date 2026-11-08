@@ -250,6 +250,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /portal/projects/:id/onboarding": cust(P("project"), act("onboarding.draft_saved")),
   // The customer's own verdict on the website delivered to their project. Their act, recorded as theirs.
   "POST /portal/projects/:id/website/decision": cust(P("project"), act("website_delivery.customer_decision")),
+  // Launch gate step 1: the customer administrator signs the maintenance agreement for their project.
+  "GET /portal/projects/:id/maintenance-agreement": cust(P("project")),
+  "POST /portal/projects/:id/maintenance-agreement": cust(P("project"), act("agreements.accepted"), { admin: true }),
   "GET /portal/files": cust(),
   "POST /portal/files": cust(undefined, act("file.uploaded")),
   "GET /portal/projects/:id/files": cust(P("project")),
@@ -496,6 +499,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/employees/invitations/:id/revoke": staff(rolesWith("employee.manage"), P("invitation"), act("invitation.revoked")),
   "POST /staff/employees/:id/role": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.role_changed")),
   "POST /staff/employees/:id/disable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.disabled")),
+  "POST /staff/employees/:id/remove": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.removed")),
   "POST /staff/employees/:id/enable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.enabled")),
   "POST /staff/employees/:id/mfa-reset": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.mfa_reset")),
   "GET /staff/employees/:id/offboarding": staff(rolesWith("employee.manage"), P("staffUser")),

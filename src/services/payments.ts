@@ -169,6 +169,19 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
         if (sub) await db.prepare(`UPDATE subscriptions SET status = 'active', updated_at = ? WHERE stripe_subscription_id = ? AND status = 'past_due'`).bind(nowIso(), sub).run();
         // Clarification 1–2: payment clears the failure episode and restores suspended hosting (nothing was deleted).
         if (sub) await recordPaymentRecovered(ctx, sub);
+        // Launch gate (launch-gate.ts): the FIRST paid invoice of a subscription is the verified initial payment. Only
+        // this signed event writes it -- never a Checkout redirect. A $0 (trial) invoice is not a payment. Keyed by the
+        // Stripe subscription id, so it holds whichever of subscription.created / invoice.paid arrives first, and a
+        // duplicate delivery changes nothing.
+        const reason = s(o, "billing_reason");
+        const paidCents = n(o, "amount_paid") ?? 0;
+        if (sub && paidCents > 0 && (reason === "subscription_create" || reason === null)) {
+          const at = nowIso();
+          const paidAt = n((o.status_transitions ?? {}) as Obj, "paid_at");
+          await db.prepare(`INSERT INTO subscription_initial_payments (stripe_subscription_id, stripe_invoice_id, stripe_payment_intent_id, amount_cents, paid_at, event_id, created_at)
+                            VALUES (?,?,?,?,?,?,?) ON CONFLICT(stripe_subscription_id) DO NOTHING`)
+            .bind(sub, String(o.id), invoicePaymentIntent(o), paidCents, paidAt ? new Date(paidAt * 1000).toISOString() : at, evt.id, at).run();
+        }
         // PAY-006: a Stripe Invoice created for a milestone invoice (src/services/stripe-invoices.ts).
         const local = meta(o).crestmont_invoice_id;
         if (local) {
@@ -216,6 +229,8 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
           }
           const refundId = latest?.id ?? null;
           await db.prepare(`UPDATE payments SET status = ? WHERE stripe_payment_intent_id = ?`).bind(refunded >= total ? "refunded" : "partially_refunded", pi).run();
+          // A fully refunded FIRST maintenance payment closes the launch gate again (launch-gate.ts).
+          if (refunded >= total) await db.prepare(`UPDATE subscription_initial_payments SET reversed_at = ?, reversal_reason = 'refunded' WHERE stripe_payment_intent_id = ? AND reversed_at IS NULL`).bind(nowIso(), pi).run();
           // Platform refund requests this Stripe refund belongs to: the one the issue step already recorded, or else one
           // approved request (or failed issue) completed by it — issued from the Stripe Dashboard, or by the issue step
           // whose Stripe call has not returned yet. stripe_refund_id is UNIQUE, so exactly one request is claimed.
@@ -252,6 +267,12 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
       case "charge.dispute.closed": {
         const pi = s(o, "payment_intent");
         const pay = pi ? await db.prepare(`SELECT id, organization_id FROM payments WHERE stripe_payment_intent_id = ?`).bind(pi).first<{ id: string; organization_id: string }>() : null;
+        // A disputed FIRST maintenance payment closes the launch gate until the dispute is won (launch-gate.ts).
+        if (pi) {
+          const won = evt.type === "charge.dispute.closed" && s(o, "status") === "won";
+          if (won) await db.prepare(`UPDATE subscription_initial_payments SET reversed_at = NULL, reversal_reason = NULL WHERE stripe_payment_intent_id = ? AND reversal_reason = 'disputed'`).bind(pi).run();
+          else await db.prepare(`UPDATE subscription_initial_payments SET reversed_at = ?, reversal_reason = 'disputed' WHERE stripe_payment_intent_id = ? AND reversed_at IS NULL`).bind(nowIso(), pi).run();
+        }
         const due = n((o.evidence_details ?? {}) as Obj, "due_by");
         // The PaymentIntent is kept so a dispute that arrives before its payment (events are unordered) is linked when the
         // payment is recorded (linkDisputesForPayment).

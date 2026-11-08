@@ -1,4 +1,5 @@
 // Staff delivery: lifecycle, tasks/dependencies, assignments, release readiness, deployment, inactivity, dashboards.
+import { satisfyLaunchGate } from "./support/launch-gate.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, lastEmail, TEST_PASSWORD } from "./support/app.ts";
@@ -166,8 +167,10 @@ test("[PM-006] release readiness blocks deployment until all internal and custom
 
   const panel = await (await pmC.get(`/staff/projects/${pid}?tab=approvals`)).text();
   assert.match(panel, /1\. Engineering completion/);
-  assert.match(panel, /7\. Deployment authorization/);
-  assert.match(panel, /Blocked: 6 check\(s\) outstanding/);
+  assert.match(panel, /7\. Maintenance agreement signed and first subscription payment verified/);
+  assert.match(panel, /8\. Deployment authorization/);
+  assert.match(panel, /Blocked: 7 check\(s\) outstanding/);
+  assert.match(panel, /Launch status:.*Website ready — waiting for the maintenance agreement to be signed/s);
   const tooEarly = await pmC.post(`/staff/projects/${pid}/deployments`, { url: "https://acme.example" });
   assert.equal(tooEarly.status, 409);
   assert.match(await tooEarly.text(), /engineering_complete/);
@@ -191,7 +194,12 @@ test("[PM-006] release readiness blocks deployment until all internal and custom
   assert.match(await unpaid.text(), /payment:/);
   const invs = (await db.prepare(`SELECT id, amount_cents FROM invoices WHERE project_id = ? AND status = 'open'`).bind(pid).all<{ id: string; amount_cents: number }>()).results;
   for (const i of invs) await markInvoicePaid(db, i.id, { amountCents: i.amount_cents, paymentIntentId: `pi_test_${i.id}` });
-  // Deposit (inserted 'paid' by fixture), design and pre-launch now paid.
+  // Deposit (inserted 'paid' by fixture), design and pre-launch now paid -- and still blocked: the customer has not
+  // signed the maintenance agreement or paid the first maintenance month (launch gate, Founder directive 2026-11-08).
+  const noMaintenance = await pmC.post(`/staff/projects/${pid}/approvals`, { kind: "deployment_authorized", decision: "approved" });
+  assert.equal(noMaintenance.status, 409);
+  assert.match(await noMaintenance.text(), /maintenance:agreement_not_signed/);
+  await satisfyLaunchGate(db, pid);
   assert.equal((await pmC.post(`/staff/projects/${pid}/approvals`, { kind: "deployment_authorized", decision: "approved" })).status, 303);
   // An unpaid change order blocks again.
   const coInv = newId("inv");
@@ -204,9 +212,10 @@ test("[PM-006] release readiness blocks deployment until all internal and custom
   assert.equal((await status(db, pid)).status, "deployment");
   const dep = await db.prepare(`SELECT url, commit_sha FROM customer_deployments WHERE project_id = ?`).bind(pid).first<{ url: string; commit_sha: string }>();
   assert.deepEqual({ ...dep }, { url: "https://acme.example", commit_sha: "abc1234" });
-  // FD-27: the launch opens the maintenance step. This fixture project has no package order with a committed plan, so the
-  // Owner is told instead of a plan being guessed.
-  assert.ok(await db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'maintenance.activation_missing_plan' AND subject_id = ?`).bind(pid).first(), "launch hook ran");
+  // Reaching customer review opened the maintenance step. This fixture project has no package order with a committed
+  // plan, so the Owner was told instead of a plan being guessed.
+  assert.ok(await db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'maintenance.activation_missing_plan' AND subject_id = ?`).bind(pid).first(), "review hook ran");
+  assert.ok((await db.prepare(`SELECT launched_at FROM maintenance_activations WHERE project_id = ?`).bind(pid).first<{ launched_at: string | null }>())?.launched_at, "the launch is recorded on the activation");
   // Closure checklist: the handoff must be published before the project can be completed.
   const blocked = await pmC.post(`/staff/projects/${pid}/status`, { to: "completed" });
   assert.equal(blocked.status, 409);

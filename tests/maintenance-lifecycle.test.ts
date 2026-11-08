@@ -1,4 +1,5 @@
-// FD-27 (billing starts at approved launch) and Founder clarifications 1–2 (seven-day failed-payment suspension after
+// Maintenance activation (Founder directive 2026-11-08, superseding FD-27's "billing starts at approved launch": the
+// agreement and the first payment now come BEFORE launch -- see tests/launch-gate.test.ts) and Founder clarifications 1–2 (seven-day failed-payment suspension after
 // notice, never deleting data, restored on payment). TEST DATA only: Stripe events are SIGNED FIXTURES and email goes to
 // the development outbox.
 import { test } from "node:test";
@@ -14,6 +15,7 @@ import {
   suspendHosting, SUSPENSION_GRACE_DAYS,
 } from "../src/services/maintenance-lifecycle.ts";
 import { renderTemplate } from "../src/services/mailer.ts";
+import { signMaintenanceAgreement } from "./support/launch-gate.ts";
 import { OutboxEmail } from "../src/adapters/email.ts";
 
 const mctx = (db: Env["DB"]) => ({ db, email: new OutboxEmail(db), baseUrl: "http://crestmont.test" });
@@ -39,10 +41,10 @@ async function paidPackage(db: Env["DB"], plan = "professional") {
   return { cu, projectId, orderId: o.orderId };
 }
 
-test("[PAY-004] FD-27: before launch a package customer cannot start the maintenance subscription; nothing is billed", async () => {
+test("[PAY-004] before the website is ready for review a package customer cannot start the maintenance subscription; nothing is billed", async () => {
   const t = await createTestApp();
   const { cu } = await paidPackage(t.db);
-  assert.match((await maintenanceCheckoutBlock(t.db, cu.organizationId, "professional"))!, /starts when you approve and launch/);
+  assert.match((await maintenanceCheckoutBlock(t.db, cu.organizationId, "professional"))!, /available when your completed website is ready for your review/);
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) n FROM subscriptions`)).n, 0);
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) n FROM maintenance_activations`)).n, 0);
 });
@@ -75,7 +77,10 @@ test("[PAY-004] FD-27 / FD-05: launch opens one activation for the committed pla
   assert.equal(again!.trigger, "deployment_recorded");
   assert.match((await one<{ body: string }>(t.db, `SELECT body FROM notifications WHERE user_id = ? AND kind = 'maintenance_activation'`, owner.id)).body, /awaiting operational verification/);
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) n FROM subscriptions`)).n, 0, "no subscription was created");
-  // Once launched, the customer may choose the committed plan or higher; never lower.
+  // The maintenance agreement is signed BEFORE the subscription can be started (launch gate order)...
+  assert.match((await maintenanceCheckoutBlock(t.db, cu.organizationId, "executive"))!, /sign your maintenance agreement first/i);
+  await signMaintenanceAgreement(t.db, projectId, cu.id);
+  // ...and then the customer may choose the committed plan or higher; never lower.
   assert.equal(await maintenanceCheckoutBlock(t.db, cu.organizationId, "executive"), null);
   assert.match((await maintenanceCheckoutBlock(t.db, cu.organizationId, "professional"))!, /requires the Executive plan or higher/);
   } finally { plan.entitlementsStatus = saved; }

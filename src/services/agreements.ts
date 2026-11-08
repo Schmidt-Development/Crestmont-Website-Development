@@ -48,6 +48,8 @@ export const ACCEPTANCE_SETS = {
   /** CREST-GAP-033: a quoted standard package is governed by the package documents, not the custom development agreement. */
   package_quote_acceptance: ["development_agreement", "terms_of_service", "refund_policy", "data_processing_addendum"],
   maintenance_checkout: ["maintenance_agreement", "terms_of_service", "support_policy", "cancellation_policy", "data_processing_addendum"],
+  /** Launch gate step 1 (launch-gate.ts): the customer signs the maintenance agreement for one project (context_id). */
+  maintenance_agreement: ["maintenance_agreement"],
 } as const satisfies Record<string, readonly AgreementKind[]>;
 export type AcceptanceContext = keyof typeof ACCEPTANCE_SETS;
 

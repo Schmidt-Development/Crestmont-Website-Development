@@ -162,20 +162,25 @@ test("phase 1 certification: the complete non-AI customer journey, with its fail
   assert.deepEqual(plans.map((p) => p.entitlementsStatus), ["approved", "approved", "approved"]);
   const hosting = await (await t.client().get("/hosting-maintenance")).text();
   for (const price of ["$99", "$199", "$299"]) assert.ok(hosting.includes(price), `maintenance page shows ${price}`);
-  // FD-27: maintenance billing starts at the approved launch, never before it.
+  // The journey has reached customer review, which opened the maintenance activation (launch gate). The subscription
+  // still cannot start: the customer signs the maintenance agreement first.
   const plan = plans.find((p) => p.id === "professional")!;
   const early = await c.post(`/checkout/maintenance/${plan.id}`, { terms: "1" });
-  assert.equal(early.status, 409, "before launch the maintenance subscription cannot start");
-  assert.match(await early.text(), /starts when you approve and launch/);
-  assert.equal(await count(t, `SELECT COUNT(*) AS n FROM subscriptions WHERE organization_id = ?`, org.id), 0, "nothing billed before launch");
-  // The launch itself (final approval → recorded deployment) is certified by the browser journey; here it is
-  // recorded through the same service that path calls, so the activation exists for the committed plan.
-  const act = await openMaintenanceActivation(t.db, null, pid, "deployment_recorded");
+  assert.equal(early.status, 409, "the maintenance subscription cannot start before the agreement is signed");
+  assert.match(await early.text(), /sign your maintenance agreement first/i);
+  assert.equal(await count(t, `SELECT COUNT(*) AS n FROM subscriptions WHERE organization_id = ?`, org.id), 0, "nothing billed yet");
+  // One activation per project, for the committed plan; calling the service again returns the same one.
+  const act = await openMaintenanceActivation(t.db, null, pid, "ready_for_review");
+  assert.equal(act?.trigger, "ready_for_review", "opened when the website became ready for review, not at launch");
   assert.equal(act?.plan_id, "professional");
   assert.equal(act?.status, "due");
   const mPage = await c.get(`/checkout/maintenance/${plan.id}`);
   assert.equal(mPage.status, 200);
   assert.match(await mPage.text(), /\/month/);
+  // Launch gate order: the maintenance agreement is signed (in the portal) before the subscription can start.
+  assert.equal((await c.post(`/checkout/maintenance/${plan.id}`, { terms: "1" })).status, 409, "no subscription before the agreement is signed");
+  assert.equal((await c.post(`/portal/projects/${pid}/maintenance-agreement`, { agree: "1" })).status, 303);
+  assert.ok(await count(t, `SELECT COUNT(*) AS n FROM agreement_acceptances WHERE organization_id = ? AND context_type = 'maintenance_agreement' AND context_id = ?`, org.id, pid) >= 1, "the signature is recorded against this project");
   assert.equal((await c.post(`/checkout/maintenance/${plan.id}`, {})).status, 422, "no subscription without accepting the maintenance terms");
   const sub = await c.post(`/checkout/maintenance/${plan.id}`, { terms: "1" });
   assert.equal(sub.status, 303);

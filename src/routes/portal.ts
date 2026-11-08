@@ -6,6 +6,10 @@ import { html, formatCents, formatDate, formatDateTime, label, safeUrl, type Saf
 import { HttpError, htmlResponse, redirect, str } from "../app/http.ts";
 import { customerWebsiteSection } from "./website-delivery.ts";
 import * as WD from "../services/website-delivery.ts";
+import { launchEligibility, maintenanceAgreementSigned } from "../services/launch-gate.ts";
+import { effectivePrice } from "../services/pricing-approvals.ts";
+import { can } from "../domain/authz.ts";
+import { recordAcceptance } from "../services/agreements.ts";
 import { requireCustomerOrg, requireStaff } from "../app/app.ts";
 import { appLayout, publicLayout } from "../ui/layout.ts";
 import { portalNav, staffNav } from "./nav.ts";
@@ -83,6 +87,13 @@ async function requiredActions(ctx: AppContext, org: Org, projectId?: string): P
   for (const c of cos) out.push({ text: `Change order (${formatCents(c.price_cents)}) awaiting approval — ${c.name}`, href: `/portal/projects/${c.pid}/revisions` });
   const handoffs = (await ctx.db.prepare(`SELECT p.id, p.name FROM handoffs h JOIN projects p ON p.id = h.project_id WHERE p.organization_id = ? ${scope} AND h.published_at IS NOT NULL AND h.accepted_at IS NULL`).bind(...b()).all<{ id: string; name: string }>()).results;
   for (const h of handoffs) if (!approvals.some((a) => a.id === h.id && a.kind === "final_acceptance")) out.push({ text: `Review your handoff and record final acceptance — ${h.name}`, href: `/portal/projects/${h.id}/handoff` });
+  // Launch gate (launch-gate.ts): the maintenance agreement and the first subscription payment come before launch.
+  const reviewing = (await ctx.db.prepare(`SELECT p.id, p.name FROM projects p JOIN maintenance_activations a ON a.project_id = p.id WHERE p.organization_id = ? ${scope} AND a.status IN ('due','active')`).bind(...b()).all<{ id: string; name: string }>()).results;
+  for (const p of reviewing) {
+    const gate = await launchEligibility(ctx.db, p.id);
+    if (gate.customerActions.includes("sign_agreement")) out.push({ text: `Pending action: Sign your maintenance agreement — ${p.name}`, href: `/portal/projects/${p.id}/maintenance-agreement` });
+    if (gate.customerActions.includes("activate_subscription") && gate.planId) out.push({ text: `Pending action: Activate your maintenance subscription — ${p.name}`, href: `/checkout/maintenance/${gate.planId}` });
+  }
   const paused = (await ctx.db.prepare(`SELECT p.id, p.name FROM projects p WHERE p.organization_id = ? ${scope} AND p.status = 'paused'`).bind(...b()).all<{ id: string; name: string }>()).results;
   for (const p of paused) out.push({ text: `${p.name} is paused — send a message to restart it`, href: `/portal/projects/${p.id}/messages` });
   return out;
@@ -99,6 +110,32 @@ async function taskCounts(ctx: AppContext, projectId: string) {
 function actionList(actions: CustomerAction[]): SafeHtml {
   if (!actions.length) return html`<p class="muted">Nothing needs your attention right now.</p>`;
   return html`<ul class="checklist">${actions.map((a) => html`<li><a href="${safeUrl(a.href)}">${a.text}</a></li>`)}</ul>`;
+}
+
+/**
+ * "Before your website goes live": the two required customer actions and their status (launch-gate.ts). Shown once the
+ * website is ready for review and the maintenance activation is open; each pending line disappears by itself once the
+ * step is done and verified (the subscription only when Stripe's signed webhook confirms the first payment).
+ */
+async function maintenanceLaunchCard(ctx: AppContext, projectId: string): Promise<SafeHtml> {
+  const g = await launchEligibility(ctx.db, projectId);
+  if (!g.activationStatus || g.activationStatus === "cancelled") return html``;
+  const step = (k: string) => g.steps.find((x) => x.key === k)!;
+  const signed = step("agreement_signed"), sub = step("subscription_active"), paid = step("initial_payment_verified");
+  const row = (done: boolean, title: string, detail: string, action?: SafeHtml) =>
+    html`<li>${badge(done ? "ok" : "pending", done ? "Done" : "Pending")} <strong>${title}</strong><br><span class="faint">${detail}</span>${action ? html`<br>${action}` : ""}</li>`;
+  return html`<section class="card" data-launch-gate style="margin-bottom:1.5rem">
+<h2 class="card__title">Before your website goes live</h2>
+<p class="muted">Your website is published once your maintenance agreement is signed and your first monthly maintenance payment is confirmed${g.planName ? ` (${g.planName} plan)` : ""}.</p>
+<ul class="checklist">
+${row(signed.done, signed.done ? "Maintenance agreement signed" : "Pending action: Sign your maintenance agreement", signed.detail,
+    !signed.done ? linkButton("Sign your maintenance agreement", `/portal/projects/${projectId}/maintenance-agreement`, "primary", "sm") : undefined)}
+${row(sub.done && paid.done, sub.done && paid.done ? "Maintenance subscription active" : "Pending action: Activate your maintenance subscription",
+    sub.done && paid.done ? paid.detail : !signed.done ? "Available after you sign the maintenance agreement." : sub.done ? paid.detail : sub.detail,
+    signed.done && g.customerActions.includes("activate_subscription") && g.planId ? linkButton("Activate your maintenance subscription", `/checkout/maintenance/${g.planId}`, "primary", "sm") : undefined)}
+</ul>
+${g.eligible ? alert("success", "Everything is in place. Your website can now be published.") : ""}
+</section>`;
 }
 
 // ───────────── Routes ─────────────
@@ -201,8 +238,10 @@ ${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = not
     // section mints its own preview link each time this page is read, so a link cannot outlive the page it came
     // from, and it is only ever minted for a delivery on a project this customer's organisation owns.
     const website = await customerWebsiteSection(ctx, org.organizationId, proj.id);
+    const launchCard = await maintenanceLaunchCard(ctx, proj.id);
     const body = html`${pageHead(proj.name, undefined, `${packageName(proj.product_id)} · ${proj.id}`)}${projectTabs(ctx, proj.id)}
 ${website}
+${launchCard}
 <div class="kpis">${kpi("Status", P.labelStatus(proj.status))}${kpi("Task progress", tc.total ? `${tc.done} / ${tc.total}` : "Not planned yet", tc.total ? `${pct}% complete` : "Your team adds tasks after scope review", tc.total ? pct : undefined)}
 ${kpi("Revisions used", `${usage.used} / ${proj.revision_allowance}`, usage.total > usage.used ? `${usage.total - usage.used} billable round(s)` : "Included rounds")}
 ${kpi("Estimated completion", lastDue ? fmtDay(lastDue) : proj.target_launch_at ? fmtDay(proj.target_launch_at) : "Not scheduled yet", lastDue ? "Based on milestone due dates" : undefined)}</div>
@@ -257,6 +296,40 @@ ${rec && !done ? html`<p class="faint">Draft last saved ${formatDateTime(rec.upd
       kind: "success",
       text: decision === "approved" ? "Thank you — you approved the website. Your project team has been told." : "Thank you — your requested changes were sent to your project team.",
     });
+  });
+
+  // Launch gate step 1: the customer signs the maintenance agreement for this project. Recorded through the same
+  // versioned, hash-pinned acceptance as every other agreement (agreements.ts), scoped to the project.
+  const agreementPage = async (ctx: AppContext, org: Org, id: string) => {
+    const proj = await P.getOrgProject(ctx.db, org.organizationId, id);
+    const g = await launchEligibility(ctx.db, proj.id);
+    const signed = await maintenanceAgreementSigned(ctx.db, org.organizationId, proj.id);
+    const price = g.planId ? (await effectivePrice(ctx.db, "maintenance", g.planId, ctx.now())).cents : null;
+    const body = html`${pageHead("Sign your maintenance agreement", undefined, proj.name)}${projectTabs(ctx, proj.id)}
+<section class="card stack" style="max-width:760px">
+${signed ? alert("success", html`Signed by ${signed.by} on ${formatDate(signed.signedAt)}. Next: <a href="/portal/projects/${proj.id}">activate your maintenance subscription</a>.`)
+  : !g.activationStatus ? alert("info", "Your maintenance agreement becomes available when your completed website is ready for your review.")
+  : html`<p>Every Crestmont website is hosted and maintained under a monthly maintenance plan. Before your website goes live, please read and sign the maintenance agreement${g.planName ? html` for the <strong>${g.planName}</strong> plan${price !== null ? html` (${formatCents(price)} per month)` : ""}` : ""}.</p>
+<p><a href="/legal/maintenance-agreement" target="_blank" rel="noopener">Read the full Maintenance Agreement</a> · <a href="/legal/cancellation" target="_blank" rel="noopener">Cancellation policy</a> · <a href="/legal/support" target="_blank" rel="noopener">Support policy</a></p>
+<p class="faint">Signing does not charge you. You activate the monthly subscription in the next step, through Stripe's secure checkout.</p>
+<form method="post" action="/portal/projects/${proj.id}/maintenance-agreement" class="stack">${csrf(ctx)}
+${checkbox("agree", "I have read and agree to the Maintenance Agreement on behalf of my organization.", { required: true })}
+<div class="form-actions">${button("Sign the maintenance agreement")}</div></form>`}
+</section>`;
+    return page(ctx, "Maintenance agreement", body);
+  };
+  r.get("/portal/projects/:id/maintenance-agreement", async (ctx, p) => agreementPage(ctx, requireCustomerOrg(ctx), p.id));
+  r.post("/portal/projects/:id/maintenance-agreement", async (ctx, p) => {
+    const org = requireCustomerOrg(ctx);
+    const proj = await P.getOrgProject(ctx.db, org.organizationId, p.id);
+    if (!can(ctx.actor!, "customer.billing", { organizationId: org.organizationId })) throw new HttpError(403, "Only an account administrator can sign the maintenance agreement for this organization.");
+    const g = await launchEligibility(ctx.db, proj.id);
+    if (!g.activationStatus || g.activationStatus === "cancelled") throw new HttpError(409, "The maintenance agreement becomes available when your completed website is ready for your review.");
+    if (await maintenanceAgreementSigned(ctx.db, org.organizationId, proj.id)) return redirect(ctx, `/portal/projects/${proj.id}`, { kind: "info", text: "Your maintenance agreement is already signed." });
+    const f = await ctx.form();
+    if (!f.get("agree")) return redirect(ctx, `/portal/projects/${proj.id}/maintenance-agreement`, { kind: "error", text: "Tick the box to confirm you agree to the Maintenance Agreement." });
+    await recordAcceptance(ctx, { userId: ctx.user!.id, organizationId: org.organizationId, context: "maintenance_agreement", contextId: proj.id });
+    return redirect(ctx, `/portal/projects/${proj.id}`, { kind: "success", text: "Thank you — your maintenance agreement is signed. Next, activate your maintenance subscription." });
   });
 
   r.get("/portal/projects/:id/onboarding", async (ctx, p) => onboardingPage(ctx, requireCustomerOrg(ctx), p.id));

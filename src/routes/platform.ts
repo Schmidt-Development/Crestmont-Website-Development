@@ -377,7 +377,15 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
 <section class="card"><h2 class="card__title">Recent activity</h2>${table(activity, [{ header: "When", cell: (a) => formatDateTime(a.created_at) }, { header: "Action", cell: (a) => html`<code>${a.action}</code>` }, { header: "Subject", cell: (a) => `${a.subject_type}${a.subject_id ? ` ${a.subject_id}` : ""}` }], { empty: html`<p class="muted">No recorded activity.</p>` })}
 <p><a href="/staff/audit?actor=${encodeURIComponent(s.email)}">Full history in the audit log</a></p></section></div>
 <section class="card" style="margin-top:1.5rem"><h2 class="card__title">Offboarding</h2>${s.disabled_at ? html`<p>${offPending ? html`${badge("blocked", `${offPending} item${offPending === 1 ? "" : "s"} owner disabled`)} ` : ""}${offPending ? "Open work still needs a new owner." : "No work is waiting for reassignment."}</p>` : html`<p class="muted">When this account is disabled, its open work is queued for reassignment.</p>`}${linkButton(s.disabled_at ? "Open the reassignment queue" : "Preview open work", `/staff/employees/${s.id}/offboarding`, "secondary", "sm")}</section>`;
-    return staffPage(ctx, s.display_name, body, status);
+    const removeCard = !can(ctx.actor!, "employee.manage") || s.id === ctx.user!.id ? html``
+      : html`<section class="card" id="remove" style="margin-top:1.5rem;border-color:var(--danger, #b42318)"><h2 class="card__title">Remove employee</h2>
+<p>Removes ${s.display_name}'s access to Crestmont immediately and signs them out everywhere. Their open tasks, projects, leads and tickets are unassigned and flagged for reassignment. Their past work, activity history and financial records are kept.</p>
+${s.role === "owner" ? html`<p class="faint">Only an Owner can remove an Owner, and the last active Owner can never be removed.</p>` : ""}
+<form method="post" action="/staff/employees/${s.id}/remove" class="stack" data-confirm="Remove ${s.display_name} from Crestmont? They lose access immediately.">${csrf(ctx)}
+${input({ name: "reason", label: "Reason", required: true, maxlength: 300, id: "f-remove-reason" })}
+${input({ name: "confirm", label: "Type REMOVE to confirm", required: true, maxlength: 10, id: "f-remove-confirm", autocomplete: "off" })}
+<div class="row">${button("Remove employee", { variant: "danger" })}</div></form></section>`;
+    return staffPage(ctx, s.display_name, html`${body}${removeCard}`, status);
   };
   r.get("/staff/employees/:id", (ctx, p) => employeeDetail(ctx, p.id));
   r.post("/staff/employees/:id/profile", async (ctx, p) => {
@@ -458,6 +466,25 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
       }
     });
   }
+
+  // Remove an employee (revokes staff access and sessions; keeps every record). Confirmation is required twice: the
+  // browser confirm and a typed REMOVE, so a stray click cannot do it.
+  r.post("/staff/employees/:id/remove", async (ctx, p) => {
+    requireStaff(ctx, "employee.manage");
+    const f = await ctx.form();
+    if (str(f, "confirm").toUpperCase() !== "REMOVE") return redirect(ctx, `/staff/employees/${p.id}#remove`, { kind: "error", text: "Type REMOVE to confirm removing this employee." });
+    try {
+      const res = await emp.removeEmployee(ctx.db, actorOf(ctx), p.id, str(f, "reason"), ctx.ip ?? null);
+      return redirect(ctx, "/staff/employees", { kind: "success", text: `${res.email} was removed. Their access and every session were revoked${res.ended ? `, and ${res.ended} open assignment${res.ended === 1 ? " was" : "s were"} unassigned for reassignment (flagged \u201cowner disabled\u201d)` : ""}. Their history is kept${res.keptIdentity ? "; their access to other organisations is unchanged" : ""}.` });
+    } catch (e) {
+      if (e instanceof emp.EmployeeError) {
+        if (e.status === 403) throw new HttpError(403, e.message);
+        if (e.status === 404) throw new HttpError(404, e.message);
+        return redirect(ctx, `/staff/employees/${p.id}#remove`, { kind: "error", text: e.message });
+      }
+      throw e;
+    }
+  });
 
   // ── Offboarding queue (CREST-GAP-041) ──
   const offboardingPage = async (ctx: AppContext, id: string, errors: string[] = [], status = 200) => {

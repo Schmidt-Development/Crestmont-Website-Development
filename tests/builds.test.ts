@@ -1,5 +1,6 @@
 // AI Builds control plane (paid-intake automation). Every runner interaction here is a CONTROLLED FIXTURE
 // (signed HTTP calls made by the test, no agent, no model). Nothing in this file is a real Claude build.
+import { satisfyLaunchGate } from "./support/launch-gate.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, MemoryStorage, TEST_PASSWORD, type TestClient } from "./support/app.ts";
@@ -1055,6 +1056,11 @@ test("[AIB-006] D5: approval never publishes; a release is prepared, explicitly 
   assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`)), /customer has not reviewed the shared preview/);
   await t.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = NULL WHERE id = ?`).bind(firstJobId).run();
   assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`)), /record why customer review does not apply/);
+  // Founder directive 2026-11-08: nothing is released before the customer signs the maintenance agreement and Stripe
+  // confirms the first maintenance payment (launch-gate.ts).
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "Owner-managed site; reviewed on a call." })), /Maintenance agreement signed — Waiting for the customer to sign/);
+  await t.db.prepare(`UPDATE projects SET status = 'final_approval' WHERE id = ?`).bind(pid).run();
+  await satisfyLaunchGate(t.db, pid);
   // Step 6: prepare v1 (deploys nothing).
   assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "Owner-managed site; reviewed on a call." })).status, 303);
   const v1 = (await t.db.prepare(`SELECT * FROM site_deployments WHERE project_id = ? AND version = 1`).bind(pid).first<{ id: string; state: string; worker_name: string; hostname: string }>())!;

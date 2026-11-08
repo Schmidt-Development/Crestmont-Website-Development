@@ -14,6 +14,7 @@ import {
 } from "../ui/components.ts";
 import { toCsv } from "../services/finance.ts";
 import * as P from "../services/projects.ts";
+import { launchEligibility } from "../services/launch-gate.ts";
 import * as F from "../services/files.ts";
 import * as M from "../services/messages.ts";
 import * as O from "../services/onboarding.ts";
@@ -383,7 +384,9 @@ ${coord ? html`<form method="post" action="/staff/projects/${proj.id}/change-ord
       const requests = (await db.prepare(`SELECT kind, note, created_at, resolved_at FROM approval_requests WHERE project_id = ? ORDER BY created_at DESC`).bind(proj.id).all<{ kind: string; note: string | null; created_at: string; resolved_at: string | null }>()).results;
       const invoices = (await db.prepare(`SELECT id, milestone_kind, amount_cents, status, created_at FROM invoices WHERE project_id = ? ORDER BY created_at`).bind(proj.id).all<{ id: string; milestone_kind: string | null; amount_cents: number; status: string; created_at: string }>()).results;
       const deps = (await db.prepare(`SELECT d.url, d.commit_sha, d.deployed_at, u.display_name FROM customer_deployments d JOIN users u ON u.id = d.deployed_by WHERE d.project_id = ? ORDER BY d.deployed_at DESC`).bind(proj.id).all<{ url: string; commit_sha: string | null; deployed_at: string; display_name: string }>()).results;
+      const gate = await launchEligibility(db, proj.id);
       content = html`<section class="card card--gold"><h2 class="card__title">Customer release readiness</h2><p class="muted">Customer website launch chain (§28). Separate from Crestmont's own platform launch.</p>
+<p data-launch-status><strong>Launch status:</strong> ${badge(gate.eligible ? "pass" : "blocked", gate.status)}</p>
 ${table(rr.checks, [{ header: "Check", cell: (c) => c.label }, { header: "Result", cell: (c) => badge(c.ok ? "pass" : "fail", c.ok ? "Pass" : "Missing") }, { header: "Detail", cell: (c) => c.detail }])}
 <p>${rr.ready ? badge("pass", "Ready to deploy") : badge("blocked", `Blocked: ${rr.checks.filter((c) => !c.ok).length} check(s) outstanding`)}</p>
 ${can(ctx.actor!, "release.payment_exception") ? await paymentExceptionPanel(ctx, proj.id) : ""}</section>

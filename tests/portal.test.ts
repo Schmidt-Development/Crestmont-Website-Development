@@ -1,4 +1,5 @@
 // Customer portal: tenant isolation, onboarding, files, messaging, revisions/change orders, approvals, handoff, team.
+import { satisfyLaunchGate } from "./support/launch-gate.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, lastEmail, TEST_PASSWORD } from "./support/app.ts";
@@ -339,7 +340,14 @@ test("[PORTAL-010] handoff is visible once published and the customer records fi
   const draft = await sc.post(`/staff/projects/${pa}/handoff`, { intent: "draft", website_url: "https://orga.example", documentation: "Editing guide" });
   assert.equal(draft.status, 303);
   assert.match(await (await ca.get(`/portal/projects/${pa}/handoff`)).text(), /Handoff not published yet/, "drafts stay hidden");
-  assert.equal((await sc.post(`/staff/projects/${pa}/handoff`, { intent: "publish", website_url: "https://orga.example", documentation: "Editing guide", access_instructions: "We will send a secure invite to your CMS account.", ownership_notes: "Domain registered to Org A.", training_notes: "30-minute walkthrough recording." })).status, 303);
+  const full = { intent: "publish", website_url: "https://orga.example", documentation: "Editing guide", access_instructions: "We will send a secure invite to your CMS account.", ownership_notes: "Domain registered to Org A.", training_notes: "30-minute walkthrough recording." };
+  // Publishing the handoff hands the website over, so the maintenance launch gate applies (launch-gate.ts).
+  const gated = await sc.post(`/staff/projects/${pa}/handoff`, full);
+  assert.equal(gated.status, 409);
+  assert.match(await gated.text(), /cannot be published yet/);
+  await db.prepare(`UPDATE projects SET status = 'deployment' WHERE id = ?`).bind(pa).run(); // the website has been through review
+  await satisfyLaunchGate(db, pa);
+  assert.equal((await sc.post(`/staff/projects/${pa}/handoff`, full)).status, 303);
   const page = await (await ca.get(`/portal/projects/${pa}/handoff`)).text();
   assert.match(page, /https:\/\/orga\.example/);
   assert.match(page, /secure invite/);

@@ -295,16 +295,16 @@ ${definitions(fin.FINANCE_DEFINITIONS)}
 async function hostingSuspensionPage(ctx: AppContext) {
   requireStaff(ctx, "finance.read");
   const rows = await lifecycle.suspensionCandidates(ctx.db);
-  const acts = (await ctx.db.prepare(`SELECT a.project_id, p.name AS project, o.name AS org, a.plan_id, a.status, a.launched_at FROM maintenance_activations a JOIN projects p ON p.id = a.project_id JOIN organizations o ON o.id = a.organization_id WHERE a.status IN ('due','awaiting_plan_verification') ORDER BY a.launched_at DESC LIMIT 50`)
+  const acts = (await ctx.db.prepare(`SELECT a.project_id, p.name AS project, o.name AS org, a.plan_id, a.status, a.opened_at AS launched_at FROM maintenance_activations a JOIN projects p ON p.id = a.project_id JOIN organizations o ON o.id = a.organization_id WHERE a.status IN ('due','awaiting_plan_verification') ORDER BY a.launched_at DESC LIMIT 50`)
     .all<{ project_id: string; project: string; org: string; plan_id: string; status: string; launched_at: string }>()).results;
   const owner = can(ctx.actor!, "hosting.suspend");
   const now = ctx.now().toISOString();
   return staffPage(ctx, "Hosting & billing status", html`${pageHead("Hosting & billing status", undefined, "Finance")}
-<p class="muted">Recurring maintenance billing starts at approved launch (FD-27). A failed monthly payment that stays unresolved for seven days after notice makes hosting eligible for suspension; suspension is an Owner decision and never deletes a website or data. Payment restores hosting automatically.</p>
-<h2 class="h4">Launched projects awaiting their maintenance plan</h2>
+<p class="muted">The maintenance agreement and the first monthly payment are required before a website can go live; the launch gate enforces it. A failed monthly payment that stays unresolved for seven days after notice makes hosting eligible for suspension; suspension is an Owner decision and never deletes a website or data. Payment restores hosting automatically.</p>
+<h2 class="h4">Websites waiting for their maintenance plan (cannot launch yet)</h2>
 ${table(acts, [{ header: "Project", cell: (a) => html`<a href="/staff/projects/${a.project_id}">${a.project}</a>` }, { header: "Customer", cell: (a) => a.org }, { header: "Plan", cell: (a) => planName(a.plan_id) },
-    { header: "Status", cell: (a) => badge(a.status === "due" ? "awaiting customer" : "awaiting plan verification") }, { header: "Launched", cell: (a) => formatDate(a.launched_at) }],
-    { empty: emptyState("None", "No launched project is waiting for its maintenance plan to start.") })}
+    { header: "Status", cell: (a) => badge(a.status === "due" ? "awaiting customer" : "awaiting plan verification") }, { header: "Opened", cell: (a) => formatDate(a.launched_at) }],
+    { empty: emptyState("None", "No website is waiting for its maintenance plan.") })}
 <h2 class="h4">Failed payments and suspensions</h2>
 ${table(rows, [{ header: "Customer", cell: (r) => html`<a href="/staff/customers/${r.organization_id}">${r.organization}</a>` }, { header: "Plan", cell: (r) => planName(r.product_id) },
     { header: "First failure", cell: (r) => formatDate(r.payment_failed_at) }, { header: "Notice sent", cell: (r) => formatDate(r.suspension_reminder_sent_at) },

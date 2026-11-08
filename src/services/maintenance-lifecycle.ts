@@ -1,11 +1,13 @@
 // Maintenance lifecycle after launch (Founder decisions FD-21, FD-26, FD-27 and clarifications 1–2, 2026-11).
 //
-// Activation (FD-27): recurring maintenance billing starts when the customer approves and launches the completed
-// website — never because development was purchased. The two launch paths (a recorded customer deployment and a
-// verified live release) both require the customer's final launch approval; each calls openMaintenanceActivation(),
-// which records ONE activation per project for the plan committed on the order (orders.maintenance_plan_id). While the
-// plan's benefits are not yet operationally verified (FD-05, clarification 8) the activation waits as
-// "awaiting_plan_verification": nothing is billed and the Owner is told.
+// Activation (Founder directive 2026-11-08, superseding FD-27's "nothing is billed before launch"): the maintenance
+// agreement and the first subscription payment come BEFORE launch. When the completed website is ready for customer
+// review, openMaintenanceActivation() records ONE activation per project for the plan committed on the order
+// (orders.maintenance_plan_id). The customer then signs the maintenance agreement and activates the subscription in
+// Stripe Checkout; the signed webhook marks the activation active and records the verified first payment; and only
+// then does src/services/launch-gate.ts let any release path publish the website. A launch afterwards just stamps
+// `launched_at`. While the plan's benefits are not yet operationally verified (FD-05, clarification 8) the activation
+// waits as "awaiting_plan_verification": nothing is billed, the Owner is told, and the website cannot launch.
 //
 // Failed payments (clarifications 1–2): an unresolved failed monthly payment is recorded with the time of the first
 // failure. Notices go to the customer at failure (day 0) and again before the seven-day threshold. From day seven the
@@ -28,11 +30,11 @@ const DAY_MS = 86_400_000;
 /** What the lifecycle needs: the database, the email adapter and the public base URL (an AppContext satisfies it). */
 export type LifecycleCtx = Pick<AppContext, "db" | "email" | "baseUrl"> & { settings?: Record<string, string> };
 
-export type ActivationTrigger = "deployment_recorded" | "release_live";
+export type ActivationTrigger = "deployment_recorded" | "release_live" | "ready_for_review";
 export interface MaintenanceActivation {
   id: string; organization_id: string; project_id: string; order_id: string | null; plan_id: MaintenanceId;
   status: "due" | "awaiting_plan_verification" | "active" | "cancelled"; trigger: ActivationTrigger;
-  launched_at: string; subscription_id: string | null; activated_at: string | null; cancelled_reason: string | null;
+  opened_at: string; launched_at: string | null; subscription_id: string | null; activated_at: string | null; cancelled_reason: string | null;
 }
 
 function planSellable(id: MaintenanceId): boolean {
@@ -51,12 +53,19 @@ async function customerAdmins(db: Db, organizationId: string): Promise<string[]>
  */
 export async function openMaintenanceActivation(db: Db, mail: LifecycleCtx | null, projectId: string, trigger: ActivationTrigger): Promise<MaintenanceActivation | null> {
   const existing = await db.prepare(`SELECT * FROM maintenance_activations WHERE project_id = ?`).bind(projectId).first<MaintenanceActivation>();
-  if (existing) return existing;
+  if (existing) {
+    // A launch path calling this after the gate let it through records WHEN the website went live; nothing else changes.
+    if (trigger !== "ready_for_review" && !existing.launched_at) {
+      await db.prepare(`UPDATE maintenance_activations SET launched_at = ?, updated_at = ? WHERE id = ? AND launched_at IS NULL`).bind(nowIso(), nowIso(), existing.id).run();
+      return db.prepare(`SELECT * FROM maintenance_activations WHERE id = ?`).bind(existing.id).first<MaintenanceActivation>();
+    }
+    return existing;
+  }
   const p = await db.prepare(`SELECT p.id, p.name, p.organization_id, p.order_id, o.maintenance_plan_id FROM projects p LEFT JOIN orders o ON o.id = p.order_id WHERE p.id = ?`)
     .bind(projectId).first<{ id: string; name: string; organization_id: string; order_id: string | null; maintenance_plan_id: string | null }>();
   if (!p) return null;
   if (!p.maintenance_plan_id || !isMaintenanceId(p.maintenance_plan_id)) {
-    await notifyOwners(db, "maintenance_activation", `${p.name} launched without a committed maintenance plan on its order. Record the plan from the approved quote before billing can start (FD-26/FD-27).`, "project", p.id);
+    await notifyOwners(db, "maintenance_activation", `${p.name} has no committed maintenance plan on its order. Record the plan from the approved quote: the website cannot launch until the customer has signed the maintenance agreement and paid the first month.`, "project", p.id);
     await audit(db, { actorKind: "system", action: "maintenance.activation_missing_plan", subjectType: "project", subjectId: p.id, organizationId: p.organization_id, details: { trigger } });
     return null;
   }
@@ -64,17 +73,17 @@ export async function openMaintenanceActivation(db: Db, mail: LifecycleCtx | nul
   const status = planSellable(plan) ? "due" : "awaiting_plan_verification";
   const at = nowIso();
   const id = newId("mact");
-  const ins = await db.prepare(`INSERT INTO maintenance_activations (id, organization_id, project_id, order_id, plan_id, status, trigger, launched_at, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO NOTHING`)
-    .bind(id, p.organization_id, p.id, p.order_id, plan, status, trigger, at, at, at).run();
+  const ins = await db.prepare(`INSERT INTO maintenance_activations (id, organization_id, project_id, order_id, plan_id, status, trigger, opened_at, launched_at, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO NOTHING`)
+    .bind(id, p.organization_id, p.id, p.order_id, plan, status, trigger, at, trigger === "ready_for_review" ? null : at, at, at).run();
   if (ins.meta.changes !== 1) return db.prepare(`SELECT * FROM maintenance_activations WHERE project_id = ?`).bind(projectId).first<MaintenanceActivation>();
   await audit(db, { actorKind: "system", action: "maintenance.activation_opened", subjectType: "project", subjectId: p.id, organizationId: p.organization_id, details: { activationId: id, planId: plan, status, trigger } });
   if (status === "due") {
     if (mail) for (const to of await customerAdmins(db, p.organization_id)) {
-      await sendMail(mail, { template: "subscription_update", to, idempotencyKey: `mact:${id}:${to}`, data: { planName: MAINTENANCE_PLANS[plan].name, status: "ready to start — your website is live", url: `${mail.baseUrl}/checkout/maintenance/${plan}` } });
+      await sendMail(mail, { template: "subscription_update", to, idempotencyKey: `mact:${id}:${to}`, data: { planName: MAINTENANCE_PLANS[plan].name, status: "ready to start — sign your maintenance agreement and activate your plan so your website can go live", url: `${mail.baseUrl}/portal/projects/${p.id}` } });
     }
   } else {
-    await notifyOwners(db, "maintenance_activation", `${p.name} launched. Its ${MAINTENANCE_PLANS[plan].name} plan cannot be billed yet: the plan's benefits are awaiting operational verification (FD-05).`, "project", p.id);
+    await notifyOwners(db, "maintenance_activation", `${p.name} is ready for its maintenance plan, but its ${MAINTENANCE_PLANS[plan].name} plan cannot be billed yet: the plan's benefits are awaiting operational verification (FD-05). The website cannot launch until the plan can be activated.`, "project", p.id);
   }
   return db.prepare(`SELECT * FROM maintenance_activations WHERE id = ?`).bind(id).first<MaintenanceActivation>();
 }
@@ -87,14 +96,19 @@ export async function maintenanceCheckoutBlock(db: Db, organizationId: string, p
   const committed = await db.prepare(`SELECT o.maintenance_plan_id FROM orders o WHERE o.organization_id = ? AND o.kind = 'package' AND o.status IN ('paid','partially_paid') AND o.maintenance_plan_id IS NOT NULL ORDER BY o.created_at DESC LIMIT 1`)
     .bind(organizationId).first<{ maintenance_plan_id: MaintenanceId }>();
   if (!committed) return null;
-  const act = await db.prepare(`SELECT plan_id, status FROM maintenance_activations WHERE organization_id = ? AND status IN ('due','awaiting_plan_verification') ORDER BY launched_at DESC LIMIT 1`)
-    .bind(organizationId).first<{ plan_id: MaintenanceId; status: string }>();
+  const act = await db.prepare(`SELECT plan_id, status, project_id FROM maintenance_activations WHERE organization_id = ? AND status IN ('due','awaiting_plan_verification') ORDER BY opened_at DESC LIMIT 1`)
+    .bind(organizationId).first<{ plan_id: MaintenanceId; status: string; project_id: string }>();
   if (!act) {
     const live = await db.prepare(`SELECT 1 FROM maintenance_activations WHERE organization_id = ? AND status = 'active'`).bind(organizationId).first();
-    return live ? null : "Your maintenance plan starts when you approve and launch your completed website. Nothing is billed before launch.";
+    return live ? null : "Your maintenance plan becomes available when your completed website is ready for your review.";
   }
   if (MAINTENANCE_ORDER.indexOf(planId) < MAINTENANCE_ORDER.indexOf(act.plan_id)) {
     return `Your website package requires the ${MAINTENANCE_PLANS[act.plan_id].name} plan or higher.`;
+  }
+  // Launch gate order (launch-gate.ts): the maintenance agreement is signed BEFORE the subscription is activated.
+  const { maintenanceAgreementSigned } = await import("./launch-gate.ts");
+  if (!(await maintenanceAgreementSigned(db, organizationId, act.project_id))) {
+    return "Please sign your maintenance agreement first: open your project in the customer portal and choose \u201cSign your maintenance agreement\u201d.";
   }
   return null;
 }
@@ -102,7 +116,7 @@ export async function maintenanceCheckoutBlock(db: Db, organizationId: string, p
 /** Called from the signed Stripe subscription webhook: an active maintenance subscription completes the activation. */
 export async function completeActivationForSubscription(db: Db, organizationId: string, subscriptionRowId: string, productId: string | null, status: string): Promise<void> {
   if (!productId || !isMaintenanceId(productId) || !["active", "trialing"].includes(status)) return;
-  const act = await db.prepare(`SELECT id, plan_id FROM maintenance_activations WHERE organization_id = ? AND status = 'due' ORDER BY launched_at LIMIT 1`).bind(organizationId).first<{ id: string; plan_id: MaintenanceId }>();
+  const act = await db.prepare(`SELECT id, plan_id FROM maintenance_activations WHERE organization_id = ? AND status = 'due' ORDER BY opened_at LIMIT 1`).bind(organizationId).first<{ id: string; plan_id: MaintenanceId }>();
   if (!act || MAINTENANCE_ORDER.indexOf(productId) < MAINTENANCE_ORDER.indexOf(act.plan_id)) return;
   const at = nowIso();
   const r = await db.prepare(`UPDATE maintenance_activations SET status = 'active', subscription_id = ?, activated_at = ?, updated_at = ? WHERE id = ? AND status = 'due'`).bind(subscriptionRowId, at, at, act.id).run();
