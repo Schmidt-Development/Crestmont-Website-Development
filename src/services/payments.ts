@@ -9,6 +9,7 @@ import { notify } from "./notifications.ts";
 import { paymentsMode, expectedLivemode, type PaymentsEnv } from "../domain/payments-mode.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
+import { sendInternalNotification, sendInternalTemplate } from "./internal-notify.ts";
 import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { syncProjectBuildSafe } from "./builds.ts";
 import { invoiceSubscription, invoicePaymentIntent, invoiceCharge, invoiceLacksPaymentLink, subscriptionPeriodEnd, chargeLatestRefund, chargeLacksRefundList, type ChargeRefund } from "../domain/stripe-shapes.ts";
@@ -305,12 +306,9 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
             await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,'dispute_opened','dispute',?,?,?)`)
               .bind(newId("ntf"), u.user_id, evt.data.object.id, body, nowIso()).run();
           }
-          // CREST-GAP-039: the Owner(s) also get an email, once per dispute.
-          const owners = (await db.prepare(`SELECT DISTINCT u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id = 'owner' AND u.disabled_at IS NULL`).all<{ email: string }>()).results;
-          for (const ow of owners) {
-            await sendMail(ctx, { template: "dispute_opened", to: ow.email, idempotencyKey: `dispute:${evt.data.object.id}:${ow.email}`,
-              data: { amountCents: n(o, "amount") ?? 0, evidenceDueBy: due ? new Date(due * 1000).toISOString().slice(0, 10) : null, url: `${ctx.baseUrl}/staff/disputes` } });
-          }
+          // CREST-GAP-039 / Phase 14: one email, once per dispute, to the internal operations mailbox.
+          await sendInternalTemplate(ctx, "dispute", evt.data.object.id, { template: "dispute_opened",
+            data: { amountCents: n(o, "amount") ?? 0, evidenceDueBy: due ? new Date(due * 1000).toISOString().slice(0, 10) : null, url: `${ctx.baseUrl}/staff/disputes` } });
           await audit(db, { actorKind: "webhook", action: "dispute.opened", subjectType: "dispute", subjectId: evt.data.object.id, organizationId: pay?.organization_id ?? null, details: { event: evt.id, amount: n(o, "amount") } });
         }
         break;
@@ -406,6 +404,12 @@ export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" |
     const awaits = p?.status === "scope_review" ? "arrived with the customer's completed website intake and awaits scope review" : "awaits onboarding";
     for (const u of staff) await notify(db, u.user_id, { kind: "project_provisioned", subjectType: "project", subjectId: projectId, body: `Payment confirmed: ${p?.name ?? "a new project"} (${p?.org_name ?? "customer"}) was provisioned and ${awaits}. Assign a project manager.` });
   }
+  // Phase 14.1: Crestmont hears about a new paid website order once, from the verified payment (never from the Checkout
+  // redirect). The key is the invoice, so webhook retries, the repair sweep and duplicate events send nothing more.
+  if (!simulated && inv.order_id && (inv.milestone_kind === "full" || inv.milestone_kind === "deposit_50")) {
+    try { await notifyPaidOrder(ctx, inv as { id: string; organization_id: string; order_id: string; amount_cents: number; milestone_kind: string }, projectId); }
+    catch { /* recorded by the mailer; never blocks the payment's follow-ups */ }
+  }
   // A simulated payment is not a real transaction: no receipt is sent.
   const recipient = simulated || opts.noReceipt ? null : to ?? await orgBillingEmail(db, inv.organization_id);
   // The website intake is normally completed before payment (migration 0089): the receipt then points at the project.
@@ -413,6 +417,27 @@ export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" |
   if (recipient) await sendMail(ctx, { template: "receipt", to: recipient, idempotencyKey: `receipt:${inv.id}`,
     data: { amountCents: inv.amount_cents, next: !projectId ? "billing" : intakeDone ? "project" : "onboarding", url: `${ctx.baseUrl}/portal${!projectId ? "/billing" : intakeDone ? `/projects/${projectId}` : `/projects/${projectId}/onboarding`}` } });
   return { projectId, provisioned };
+}
+
+async function notifyPaidOrder(ctx: Pick<AppContext, "db" | "email" | "baseUrl"> & { env?: AppContext["env"] }, inv: { id: string; organization_id: string; order_id: string; amount_cents: number; milestone_kind: string }, projectId: string | null): Promise<void> {
+  const db = ctx.db;
+  const o = await db.prepare(`SELECT o.kind, o.product_id, o.total_cents, org.name AS business, p.name AS product,
+        (SELECT u.display_name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = o.organization_id AND m.role_id = 'customer_admin' ORDER BY m.created_at LIMIT 1) AS customer,
+        (SELECT MAX(created_at) FROM payments WHERE invoice_id = ? AND status IN ('succeeded','partially_refunded')) AS paid_at
+      FROM orders o JOIN organizations org ON org.id = o.organization_id LEFT JOIN products p ON p.id = o.product_id WHERE o.id = ?`).bind(inv.id, inv.order_id)
+    .first<{ kind: string; product_id: string | null; total_cents: number; business: string; product: string | null; customer: string | null; paid_at: string | null }>();
+  if (!o) return;
+  const pkg = o.product ? `${o.product} website package` : o.kind === "quote" ? "Custom website (accepted proposal)" : "Website order";
+  const deposit = inv.milestone_kind === "deposit_50";
+  await sendInternalNotification(ctx, "paid_order", inv.id, {
+    subject: `New Website Order — Payment Confirmed${o.business ? ` (${o.business})` : ""}`,
+    heading: "New website order: payment confirmed",
+    summary: `Stripe confirmed ${deposit ? "the deposit for" : "payment for"} a new website order. ${projectId ? "The project has been created." : "The project will be created automatically; check the order if it does not appear."}`,
+    facts: [["Customer", o.customer ?? "—"], ["Business", o.business], ["Package", pkg], ["Amount paid", `$${(inv.amount_cents / 100).toFixed(2)}${deposit ? ` (deposit of $${(o.total_cents / 100).toFixed(2)})` : ""}`],
+      ["Payment date", (o.paid_at ?? nowIso()).slice(0, 10)], ["Order reference", inv.order_id]],
+    nextAction: "Assign a project manager and review the customer's website intake.",
+    url: projectId ? `${ctx.baseUrl}/staff/projects/${projectId}` : `${ctx.baseUrl}/staff/finance`, urlLabel: projectId ? "Open the project" : "Open finance",
+  });
 }
 
 async function orgBillingEmail(db: AppContext["db"], organizationId: string): Promise<string | null> {

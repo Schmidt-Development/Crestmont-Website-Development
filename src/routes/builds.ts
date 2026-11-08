@@ -17,6 +17,7 @@ import * as D from "../services/site-delivery.ts";
 import * as W from "../services/build-workers.ts";
 import * as PL from "../services/build-pipeline.ts";
 import { notify } from "../services/notifications.ts";
+import { sendInternalNotification } from "../services/internal-notify.ts";
 import { claimSignatureOnce, securityEvent, audit } from "../services/security.ts";
 import * as DX from "../services/runner-diagnostics.ts";
 import { latestQuality } from "../services/build-quality.ts";
@@ -435,7 +436,15 @@ export function register(r: Router): void {
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
   // Preview lifecycle (protocol v1.2): previews to delete, and the runner's report for each.
   // Customer production delivery (protocol v1.4; Founder decision D5): Owner-authorized releases only.
-  r.post(`${RUNNER}/deployments/claim`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await D.claimDeployment(ctx.db, await runnerBody(ctx), ctx.now()))));
+  r.post(`${RUNNER}/deployments/claim`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await D.claimDeployment(ctx.db, await runnerBody(ctx), ctx.now(), async (i) => {
+    const p = await ctx.db.prepare(`SELECT p.name, o.name AS org FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.id = ?`).bind(i.projectId).first<{ name: string; org: string }>();
+    await sendInternalNotification(ctx, "launch_blocker", i.deploymentId, {
+      subject: `Website launch blocked — ${p?.name ?? "a project"}`, heading: "A website launch was stopped",
+      summary: `The authorized release was cancelled before going live because the launch requirements no longer hold: ${i.status}.`,
+      facts: [["Project", p?.name ?? "—"], ["Customer", p?.org ?? "—"], ["Missing", i.missing.join("; ") || "—"]],
+      nextAction: "Resolve what is missing with the customer, then prepare the release again.", url: `${ctx.baseUrl}/staff/projects/${i.projectId}`, urlLabel: "Open the project",
+    });
+  }))));
   r.post(`${RUNNER}/deployments/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await D.completeDeployment(ctx.db, await runnerBody(ctx), ctx))));
   // Architecture V2 (local orchestrator ⇄ platform): specification, review cycles, integrations, approvals, worker status.
   const leasedBody = async (ctx: AppContext) => { const b = await runnerBody(ctx); return { b, job: await B.leasedJob(ctx.db, b.jobId, b.leaseToken) }; };

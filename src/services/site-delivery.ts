@@ -212,7 +212,7 @@ export async function cancelRelease(c: OwnerCtx, deploymentId: string, reason: s
 
 // ── Runner side (HMAC-signed endpoints) ──
 
-export async function claimDeployment(db: Db, b: Record<string, unknown>, now = new Date()) {
+export async function claimDeployment(db: Db, b: Record<string, unknown>, now = new Date(), onLaunchBlocked?: (i: { deploymentId: string; projectId: string; status: string; missing: string[] }) => Promise<void>) {
   const caps = Array.isArray(b.capabilities) ? b.capabilities.filter((x): x is string => typeof x === "string") : [];
   if (!caps.includes("production-deploy")) return { deployment: null };
   const runnerId = typeof b.runnerId === "string" ? b.runnerId.slice(0, 64) : "";
@@ -231,6 +231,7 @@ export async function claimDeployment(db: Db, b: Record<string, unknown>, now = 
       if (r.meta?.changes) {
         await event(db, d, "authorized", "canceled", `${why}. Prepare the release again once the customer's maintenance subscription is verified.`, { kind: "system" });
         await audit(db, { actorKind: "system", action: "builds.site_release_blocked_by_launch_gate", subjectType: "project", subjectId: d.project_id, organizationId: d.organization_id, details: { deploymentId: d.id, missing: launch.missing } });
+        if (onLaunchBlocked) { try { await onLaunchBlocked({ deploymentId: d.id, projectId: d.project_id, status: launch.status, missing: launch.missing }); } catch { /* the cancellation stands either way */ } }
       }
       return { deployment: null };
     }

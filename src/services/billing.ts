@@ -10,6 +10,7 @@ import { maintenanceCheckoutBlock } from "./maintenance-lifecycle.ts";
 import { createPackageOrder } from "./commerce.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
+import { sendInternalNotification } from "./internal-notify.ts";
 import { effectivePrice, pricedItem } from "./pricing-approvals.ts";
 import { checkoutLinesFor, loadTaxConfig, taxLines } from "./tax.ts";
 import { computeTax } from "../domain/tax.ts";
@@ -274,6 +275,13 @@ export async function requestRefund(ctx: AppContext, user: CheckoutUser, organiz
     await ctx.db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,?,?,?,?,?)`)
       .bind(newId("ntf"), r.user_id, "refund_requested", "refund", id, `New refund request for $${(amount / 100).toFixed(2)} needs review.`, at).run();
   }
+  const org = await ctx.db.prepare(`SELECT name FROM organizations WHERE id = ?`).bind(organizationId).first<{ name: string }>();
+  await sendInternalNotification(ctx, "refund_request", id, {
+    subject: `Refund request — ${org?.name ?? "a customer"}`, heading: "A customer asked for a refund",
+    summary: "Refunds are not guaranteed. Review the request against the refund policy; only the Owner may approve an exception.",
+    facts: [["Customer", user.name ?? user.email], ["Business", org?.name ?? "—"], ["Amount requested", `$${(amount / 100).toFixed(2)}`], ["Requested", at.slice(0, 10)], ["Reason", input.reason.slice(0, 300)]],
+    nextAction: "Review the request, add notes and recommend a decision.", url: `${ctx.baseUrl}/staff/refunds/${id}`, urlLabel: "Review the request",
+  });
   return { ok: true as const, id };
 }
 

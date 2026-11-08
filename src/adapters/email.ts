@@ -61,8 +61,13 @@ export class OutboxEmail implements EmailAdapter {
  */
 const RESERVED = /(\.(test|invalid|example|localhost)|@example\.(com|net|org)|\.example\.(com|net|org))$/i;
 export const DEFAULT_STAGING_ALLOWLIST = "@crestmontwebsitedevelopment.com";
-export function recipientPolicy(env: { ENVIRONMENT: string; EMAIL_RECIPIENT_ALLOWLIST?: string }): (to: string) => string | null {
-  const entries = (env.EMAIL_RECIPIENT_ALLOWLIST ?? DEFAULT_STAGING_ALLOWLIST).split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+/** Same default as src/services/internal-notify.ts (kept here so the adapter does not depend on services). */
+const INTERNAL_MAILBOX = "crestmontwebsitedevelopment@gmail.com";
+export function recipientPolicy(env: { ENVIRONMENT: string; EMAIL_RECIPIENT_ALLOWLIST?: string; INTERNAL_NOTIFY_EMAIL?: string }): (to: string) => string | null {
+  // The internal operations mailbox (Founder directive 2026-11-08) is Crestmont's own inbox, not a customer: staging
+  // may always mail it, so internal notifications can be verified end to end before production.
+  const internal = (env.INTERNAL_NOTIFY_EMAIL?.trim() || INTERNAL_MAILBOX).toLowerCase();
+  const entries = [...(env.EMAIL_RECIPIENT_ALLOWLIST ?? DEFAULT_STAGING_ALLOWLIST).split(","), internal].map((x) => x.trim().toLowerCase()).filter(Boolean);
   return (toRaw: string) => {
     const to = toRaw.trim().toLowerCase();
     if (RESERVED.test(to)) return "Not sent: reserved test address that cannot receive mail.";

@@ -21,7 +21,7 @@ async function setup() {
 const alertMails = async (db: Awaited<ReturnType<typeof setup>>["db"]) =>
   (await db.prepare(`SELECT d.to_email, m.subject, m.text_body FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.template = 'critical_incident' ORDER BY d.rowid`).all<{ to_email: string; subject: string; text_body: string }>()).results;
 
-test("[INFRA-006] ops_alerts emails the Owners for dead-lettered Stripe events, new reconciliation findings, a stuck email queue and failing feeds — once per item", async () => {
+test("[INFRA-006] ops_alerts emails the internal operations mailbox for dead-lettered Stripe events, new reconciliation findings, a stuck email queue and failing feeds — once per item", async () => {
   const t = await setup();
   const db = t.db;
   await db.prepare(`INSERT INTO stripe_events (id, type, stripe_created, payload, status, attempts, received_at) VALUES ('evt_dead_1', 'invoice.paid', 1, '{}', 'dead_letter', 5, ?)`).bind(ago(30)).run();
@@ -41,10 +41,10 @@ test("[INFRA-006] ops_alerts emails the Owners for dead-lettered Stripe events, 
 
   const r1 = await runOpsAlerts(t.ctx);
   assert.equal(r1.raised, 4);
-  assert.equal(r1.recipients, 1, "Owners only (the administrator is not mailed)");
+  assert.equal(r1.recipients, 1, "one recipient: the internal operations mailbox (no staff member is mailed personally)");
   const mails = await alertMails(db);
   assert.equal(mails.length, 4, "one email per category");
-  assert.ok(mails.every((m) => m.to_email === "founder@crestmont.test"));
+  assert.ok(mails.every((m) => m.to_email === "crestmontwebsitedevelopment@gmail.com"));
   assert.ok(mails.some((m) => /dead-letter/.test(m.subject) && /evt_dead_1/.test(m.text_body)));
   assert.ok(mails.some((m) => /reconciliation/i.test(m.subject) && /rcf_1/.test(m.text_body)));
   assert.ok(mails.some((m) => /stuck/.test(m.subject)));

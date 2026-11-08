@@ -28,6 +28,7 @@ import * as mon from "../services/monitoring.ts";
 import * as priv from "../services/privacy.ts";
 import * as voice from "../services/voice.ts";
 import { voiceBudget, setVoiceBudget, VoiceBudgetError } from "../services/voice-budget.ts";
+import { receptionistStatus, type ReceptionistStatus } from "../services/receptionist-status.ts";
 import { syncPrompt, latestPromptSync, type PromptSyncResult } from "../services/voice-prompt-sync.ts";
 import { readBody } from "./api.ts";
 import { ValidationError } from "../lib/validate.ts";
@@ -229,6 +230,17 @@ async function voiceConfigs(ctx: AppContext) {
     .all<{ id: string; version: number; prompt_text: string; change_note: string; created_at: string; active: number; activated_at: string | null; author: string }>()).results;
 }
 
+/** Phase 12: the receptionist's real status in this environment, from the sources it actually uses. */
+function receptionistCard(r: ReceptionistStatus): SafeHtml {
+  const tone = (st: string) => (st === "verified" ? "verified" : st === "failing" ? "failing" : st === "not_configured" ? "not_configured" : "configured_unverified");
+  const rows: [string, ReceptionistStatus["provider"]][] = [["Provider (Retell)", r.provider], ["Phone number", r.phone], ["Agent", r.agent], ["Call events (webhooks)", r.webhooks], ["Usage-cost tracking", r.costs]];
+  return html`<section class="card stack" data-receptionist-status><h2 class="card__title">Receptionist status — ${r.environment}</h2>
+<div class="table-wrap"><table class="table"><caption class="visually-hidden">Receptionist status</caption><tbody>
+${rows.map(([name, x]) => html`<tr data-status-item="${name}"><th scope="row">${name}</th><td>${badge(tone(x.state), x.label)}</td><td class="muted">${x.detail}</td></tr>`)}
+</tbody></table></div>
+<p class="faint">"Verified" needs evidence from ${r.environment} itself: a real signed call or a passing read-only audit of the live Retell setup (Operations → Retell audit). A staging result never proves production, and production calls never prove staging.</p></section>`;
+}
+
 async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instructions: string; note: string }) {
   requireStaff(ctx, "voice.manage");
   const db = ctx.db;
@@ -270,15 +282,7 @@ async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instr
 <p class="faint">${ctx.env.RETELL_INBOUND_API_KEY ? "Activating a version pushes its full prompt (guardrails + instructions) to the Retell LLM behind this environment's agent and reads it back. Publishing an agent version stays a Retell dashboard action." : "Provider not configured: RETELL_INBOUND_API_KEY is not set in this environment (the receptionist workspace key), so nothing can be pushed to Retell."}</p>
 <form method="post" action="/staff/voice/prompt-sync" class="row">${csrf(ctx)}${select({ name: "mode", label: "Action", options: [{ value: "check", label: "Check for drift (read only)" }, { value: "adopt", label: "Adopt the live Retell prompt as the active version (writes nothing to Retell)" }, { value: "push", label: "Push active version to Retell (refused if the prompt was edited in Retell)" }, { value: "push_overwrite", label: "Overwrite Retell with the active version (replaces a dashboard-edited prompt)" }] })}<div class="field">${button("Run", { variant: "secondary", size: "sm" })}</div></form></section></div>`;
   const body = html`${pageHead("AI receptionist", linkButton("Operations: hours, scheduling, outbound", "/staff/voice/operations", "ghost", "sm"), "AI")}
-<div class="grid grid-3">
-<section class="card"><h2 class="card__title">Provider</h2><p>${badge(h("voice")?.status ?? "not_configured")}</p><p class="muted">${h("voice")?.detail ?? ""}</p>
-<p class="faint">Provider evaluation and recommendation awaiting Founder decision: <code>docs/voice/PROVIDER-EVALUATION.md</code> (BLK-009). Crestmont must use its own separate provider workspace; the other business's existing receptionist is never touched.</p></section>
-<section class="card"><h2 class="card__title">Phone number</h2>${ctx.settings["voice.phone_number"]
-  ? html`<p>${badge("configured_unverified", ctx.settings["voice.phone_number"])}</p><p class="muted">Recorded in Business settings. It is not verified as live until signed provider events arrive for real (non-test) calls.</p>`
-  : html`<p>${badge("not_configured", "None recorded")}</p><p class="muted">No receptionist number is recorded in Business settings. Purchasing a number requires Founder approval of the provider recommendation and its cost; this platform never buys numbers.</p>`}</section>
-<section class="card"><h2 class="card__title">Agent</h2>${activeCfg ? html`<p>${badge("active", `Configuration v${activeCfg.version} active`)}</p><p class="muted">Activated ${formatDateTime(activeCfg.activated_at)}. It is not live on any phone line until a provider and number exist.</p>` : html`<p>${badge("not_configured", "No active configuration")}</p><p class="muted">Create and activate a configuration version below.</p>`}</section>
-</div>
-${costCards}
+${receptionistCard(await receptionistStatus(db, ctx.env))}${costCards}
 <div class="kpis grid grid-4" style="margin-top:1.5rem">${kpi("Calls (30 days)", n("real"), `${n("test")} test calls excluded`)}${kpi("Calls with a CRM lead", n("with_lead"))}${kpi("Escalations", n("escalated"))}${kpi("Call errors", n("errors"))}</div>
 <div class="kpis grid grid-4">${kpi("Usage cost (known, 30 days)", microUsd(n("cost_known")), n("cost_unknown") ? `${n("cost_unknown")} calls with unknown cost` : "All call costs known")}</div>
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Outcomes (all real calls)</h2>${outcomes.length ? barChart(outcomes.map((o) => ({ label: label(o.outcome), value: o.n, display: String(o.n) }))) : emptyState("No calls yet", "Calls appear once a provider sends signed events.")}</section>
@@ -574,7 +578,7 @@ ${s.disabled_at ? table(items, [
     const rows = (await ctx.db.prepare(`SELECT d.id, d.template, d.to_email, d.status, d.attempts, d.last_error, d.created_at, d.updated_at, m.provider, m.subject FROM email_deliveries d LEFT JOIN email_messages m ON m.delivery_id = d.id
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY d.created_at DESC LIMIT ? OFFSET ?`).bind(...binds, limit + 1, offset)
       .all<{ id: string; template: string; to_email: string; status: string; attempts: number; last_error: string | null; created_at: string; updated_at: string; provider: string | null; subject: string | null }>()).results;
-    const counts = (await ctx.db.prepare(`SELECT status, COUNT(*) AS n FROM email_deliveries GROUP BY status`).all<{ status: string; n: number }>()).results;
+    const counts = (await ctx.db.prepare(`SELECT CASE WHEN m.provider = 'dev-outbox' THEN 'held' ELSE d.status END AS status, COUNT(*) AS n FROM email_deliveries d LEFT JOIN email_messages m ON m.delivery_id = d.id GROUP BY 1`).all<{ status: string; n: number }>()).results;
     const health = (await integ.refreshIntegrationHealth({ db: ctx.db, env: ctx.env, storage: ctx.storage })).find((h) => h.integration === "resend" && h.environment === ctx.env.ENVIRONMENT);
     const c = (s: string) => counts.find((x) => x.status === s)?.n ?? 0;
     const exportQs = new URLSearchParams(ctx.url.search); exportQs.delete("page");
@@ -585,7 +589,9 @@ ${await suppressionsCard(ctx)}
 ${ctx.email.kind === "dev-outbox" ? html`<p class="faint">Development outbox: messages are rendered and stored here, never sent and never reported as delivered.</p>` : ""}
 <p><a href="/staff/integrations">Verify on the integrations page</a></p></section>
 <section class="card"><h2 class="card__title">Unsubscribe behaviour</h2><p class="muted">Every template is transactional (account, project, billing and security notices) except <strong>Sales info</strong>: the package, purchase-link, follow-up and onboarding emails a prospect asks for on an outbound AI sales call. That one is commercial, always carries a one-click unsubscribe link and the postal address, and the opt-out is honoured for every later sales email. No newsletter or bulk marketing is sent by this platform. Hard bounces and spam complaints reported by Resend delivery webhooks add the address to the <a href="/staff/email-suppressions">suppression list</a>; suppressed addresses are never mailed. The webhook is verified but not yet receiving events until Resend is configured (BLK-005).</p></section></div>
-<div class="kpis grid grid-4">${kpi("Queued / outbox", c("queued"))}${kpi("Sent", c("sent"))}${kpi("Delivered", c("delivered"), "Requires Resend delivery webhooks")}${kpi("Failed or bounced", c("failed") + c("bounced"))}</div>
+<div class="kpis grid grid-4" data-email-counts>${kpi("Held (not sent)", c("held"), ctx.email.kind === "dev-outbox" ? "development outbox" : "recipient not permitted here, e.g. staging test data")}${kpi("Waiting to send", c("queued"), "queued for Resend or a retry")}${kpi("Accepted by Resend", c("sent"), "not yet confirmed delivered")}${kpi("Delivered", c("delivered"), "confirmed by Resend delivery webhooks")}</div>
+<div class="kpis grid grid-4">${kpi("Bounced", c("bounced"))}${kpi("Failed", c("failed"), "gave up after retries")}${kpi("Suppressed", c("suppressed"), "bounced or complained before; not sent")}</div>
+<p class="faint">Only "Delivered" means the message reached the inbox server. "Accepted" means Resend took it; "Held" messages were never sent and never will be.</p>
 ${filterForm(ctx, [
   select({ name: "status", label: "Status", options: [...EMAIL_STATUSES], value: status, includeBlank: "Any status" }),
   select({ name: "template", label: "Template", options: [...EMAIL_TEMPLATES], value: template, includeBlank: "Any template" }),
@@ -599,7 +605,7 @@ ${table(rows.slice(0, limit), [
   { header: "To", cell: (d) => d.to_email },
   { header: "Subject", cell: (d) => d.subject ?? "—" },
   { header: "Provider", cell: (d) => d.provider ?? "—" },
-  { header: "Status", cell: (d) => d.provider === "dev-outbox" ? badge("queued", "Dev outbox (not sent)") : badge(d.status) },
+  { header: "Status", cell: (d) => d.provider === "dev-outbox" ? badge("queued", d.last_error?.startsWith("Not sent:") ? "Held: not sent" : "Dev outbox (not sent)") : d.status === "sent" ? badge("sent", "Accepted by Resend") : badge(d.status) },
   { header: "Attempts", cell: (d) => d.attempts, numeric: true },
   { header: "Last error", cell: (d) => d.last_error ? d.last_error.slice(0, 100) : "—" },
 ], { empty: emptyState("No email deliveries", "Messages appear here as workflows send them.") })}

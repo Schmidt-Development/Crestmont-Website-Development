@@ -28,6 +28,7 @@ import { hoursStatus, loadVoiceConfig, transferAvailability, toE164, type VoiceC
 import * as sched from "./voice-scheduling.ts";
 import { addDnc, applyOutboundResult, recordCallConsent, requestOutbound } from "./voice-outbound.ts";
 import { sendMail, type MailerCtx } from "./mailer.ts";
+import { sendInternalTemplate } from "./internal-notify.ts";
 import { safeHttpsUrl } from "../lib/html.ts";
 import { routeCalendar, wantsFounderArg, CALENDAR_LABELS, type CalendarRoute } from "../domain/calendars.ts";
 import { recordCallback, confirmedConsultation } from "./calendars.ts";
@@ -408,12 +409,12 @@ async function isVoicemailCall(db: Db, call: CallRow): Promise<boolean> {
 /** Emails every active Owner about an escalation (voice_escalation template). Returns how many were sent. */
 async function emailOwnersEscalation(db: Db, deps: VoiceDeps, call: CallRow, e: { reason: string; caller: string; transfer: string }): Promise<number> {
   if (!deps.mail || !deps.baseUrl) return 0;
-  const owners = (await db.prepare(`SELECT DISTINCT u.id, u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id = 'owner' AND u.disabled_at IS NULL AND u.email IS NOT NULL`).all<{ id: string; email: string }>()).results;
+  // Phase 14: one email per escalation to the internal operations mailbox (Owners also get the in-app alert and task).
   const ref = newId("vesc");
   let sent = 0;
-  for (const o of owners) {
+  for (const _ of [0]) {
     try {
-      await sendMail(deps.mail, { template: "voice_escalation", to: o.email, idempotencyKey: `voice_escalation:${call.id}:${o.id}:${ref}`,
+      await sendInternalTemplate(deps.mail, "support_escalation", `voice:${call.id}:${ref}`, { template: "voice_escalation",
         data: { reason: e.reason.slice(0, 500), caller: e.caller.slice(0, 200), test: !!call.is_test,
           why: e.transfer === "closed" ? "outside_hours" : e.transfer === "not_configured" ? "no_transfer" : "unavailable",
           url: `${deps.baseUrl}/staff/voice/calls/${call.id}` } });

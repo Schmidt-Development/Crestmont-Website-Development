@@ -94,7 +94,7 @@ test("[OWN-003] business settings validate recovery targets and the receptionist
   assert.match(backups0, /Recovery targets<\/div><div class="kpi__value">Not set/);
   assert.doesNotMatch(backups0, /RPO 24 h/);
   assert.match(backups0, /No passed restore drill is recorded/);
-  assert.match(await (await owner.c.get("/staff/voice")).text(), /None recorded/);
+  assert.match(await (await owner.c.get("/staff/voice")).text(), /No receptionist number is listed/);
 
   const bad = await owner.c.post("/staff/settings", { ...base, "backup.rpo_target_hours": "0", "backup.rto_target_hours": "4.5", "voice.phone_number": "call me" });
   assert.equal(bad.status, 422);

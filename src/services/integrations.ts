@@ -14,6 +14,7 @@ import type { Env } from "../app/context.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 import { audit } from "./security.ts";
 import { aiProviderFromEnv, LOCAL_RUNNER } from "./ai.ts";
+import { receptionistStatus } from "./receptionist-status.ts";
 
 export const INTEGRATIONS = [
   { id: "stripe", label: "Stripe (payments)", blocker: "BLK-004" },
@@ -22,8 +23,8 @@ export const INTEGRATIONS = [
   { id: "database", label: "Database (D1 / SQLite)", blocker: "BLK-003" },
   { id: "object_storage", label: "Object storage (R2)", blocker: "BLK-003" },
   { id: "ai", label: "AI provider (self-hosted or Anthropic)", blocker: null },
-  { id: "voice", label: "Voice receptionist provider", blocker: "BLK-009" },
-  { id: "telephony", label: "Telephony (phone number)", blocker: "BLK-009" },
+  { id: "voice", label: "AI receptionist (Retell inbound)", blocker: "BLK-009" },
+  { id: "telephony", label: "Receptionist phone number", blocker: "BLK-009" },
   { id: "monitoring", label: "External monitoring & alerting", blocker: "BLK-003" },
   { id: "dns", label: "DNS (crestmontwebsitedevelopment.com)", blocker: "BLK-011" },
   { id: "github", label: "GitHub repository", blocker: null },
@@ -90,11 +91,15 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
       const key = e.ANTHROPIC_API_KEY ? " An ANTHROPIC_API_KEY is present but unused, so no paid call can be made." : "";
       return { status: "not_configured", detail: `No AI backend is selected: AI_PROVIDER is ${e.AI_PROVIDER ? `"${e.AI_PROVIDER}"` : "unset"}. AI drafting is off.${key}`, fingerprint: null, probe: false };
     }
-    case "voice":
-      if (!e.VOICE_WEBHOOK_SECRET) return { status: "not_configured", detail: "No voice provider selected (BLK-009) and VOICE_WEBHOOK_SECRET is not set; the voice webhook rejects every request.", fingerprint: null, probe: false };
-      return { status: "configured_unverified", detail: "VOICE_WEBHOOK_SECRET set, so signed events are accepted. No provider account is connected (BLK-009); there is no provider API to probe.", fingerprint: await fp(e.VOICE_WEBHOOK_SECRET), probe: false };
-    case "telephony":
-      return { status: "not_configured", detail: "No phone number has been purchased. Purchase requires Founder approval of the provider recommendation (BLK-009).", fingerprint: null, probe: false };
+    case "voice": {
+      // The receptionist runs on Retell (Founder decision). Status from its real sources: src/services/receptionist-status.ts.
+      const r = await receptionistStatus(d.db, e);
+      return { status: r.provider.state, detail: r.provider.detail, fingerprint: `voice:${r.provider.state}:${r.lastRealCallAt ?? ""}`, probe: false };
+    }
+    case "telephony": {
+      const r = await receptionistStatus(d.db, e);
+      return { status: r.phone.state, detail: r.phone.detail, fingerprint: `phone:${r.phone.state}:${r.lastRealCallAt ?? ""}`, probe: false };
+    }
     case "monitoring":
       return { status: "not_configured", detail: "Errors are recorded in the in-app error log only. No external uptime monitor or alert routing (email/SMS/pager) is configured; nobody is notified automatically.", fingerprint: null, probe: false };
     case "dns":
@@ -175,6 +180,15 @@ export class ProbeUnavailable extends Error {}
 async function jsonOrNull(r: Response): Promise<Record<string, unknown> | null> {
   try { return (await r.json()) as Record<string, unknown>; } catch { return null; }
 }
+/** What Resend actually did in the last 30 days, from the platform's own delivery records (real sends only). */
+async function resendEvidence(db: IntegrationDeps["db"]): Promise<{ sent: number; delivered: number; lastError: string | null }> {
+  const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  const r = await db.prepare(`SELECT COALESCE(SUM(d.status = 'sent'), 0) AS sent, COALESCE(SUM(d.status IN ('delivered','bounced')), 0) AS delivered
+      FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE m.provider = 'resend' AND d.updated_at >= ?`).bind(since).first<{ sent: number; delivered: number }>();
+  const err = await db.prepare(`SELECT d.last_error FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE m.provider = 'resend' AND d.last_error LIKE 'Resend %' ORDER BY d.updated_at DESC LIMIT 1`).first<{ last_error: string }>();
+  return { sent: r?.sent ?? 0, delivered: r?.delivered ?? 0, lastError: err?.last_error?.slice(0, 200) ?? null };
+}
+
 const providerError = (name: string, r: Response, body: Record<string, unknown> | null) => {
   const err = body?.error as { message?: string } | string | undefined;
   const msg = typeof err === "string" ? err : err?.message ?? (body?.message as string | undefined) ?? r.statusText ?? "error";
@@ -236,6 +250,17 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
       case "resend": {
         const r = await f("https://api.resend.com/domains", { headers: { authorization: `Bearer ${d.env.RESEND_API_KEY}` } });
         const b = await jsonOrNull(r);
+        // A key with "Sending access" only (least privilege, recommended) is refused on /domains with 401
+        // restricted_api_key although it sends normally. That is not a failure: judge it by what Resend actually did.
+        if (r.status === 401 && b?.name === "restricted_api_key") {
+          const ev = await resendEvidence(d.db);
+          if (ev.delivered > 0) { status = "verified"; detail = `Send-only API key (it cannot list domains, which is expected). Resend accepted ${ev.sent + ev.delivered} email(s) in the last 30 days and confirmed delivery of ${ev.delivered} through its delivery webhooks.`; }
+          else if (ev.sent > 0) { status = "configured_unverified"; detail = `Send-only API key (it cannot list domains, which is expected). Resend accepted ${ev.sent} email(s) in the last 30 days, but no delivery has been confirmed yet: check that Resend delivery webhooks are set up.`; }
+          else if (ev.lastError) { status = "degraded"; detail = `Send-only API key, but the last send attempt failed: ${ev.lastError}`; }
+          else { status = "configured_unverified"; detail = "Send-only API key (it cannot list domains, which is expected). No email has been accepted by Resend in the last 30 days, so sending is not proven yet: send a permitted test email to the internal mailbox."; }
+          break;
+        }
+        if (r.status === 401 || r.status === 403) { status = "failing"; detail = `Resend refused the API key (HTTP ${r.status}${typeof b?.message === "string" ? `: ${b.message.slice(0, 160)}` : ""}). The key is wrong, revoked, or from another Resend account: create a new key in Resend and update RESEND_API_KEY.`; break; }
         if (!r.ok) { detail = providerError("Resend", r, b); break; }
         const domains = (Array.isArray(b?.data) ? b!.data : []) as { name?: string; status?: string }[];
         const ok = domains.filter((x) => x.status === "verified").map((x) => x.name);

@@ -10,6 +10,7 @@ import { latestPromptSync } from "./voice-prompt-sync.ts";
 import { importRate, TARGET_PER_MINUTE } from "./research-promote.ts";
 import type { EmailAdapter } from "../adapters/email.ts";
 import { sendMail } from "./mailer.ts";
+import { sendInternalTemplate } from "./internal-notify.ts";
 
 /**
  * Record an unhandled server error. Called by the 500 handler in src/app/app.ts. Never throws:
@@ -293,7 +294,7 @@ export async function collectAlertItems(db: Db, now = new Date()): Promise<Alert
 
 export interface OpsAlertResult { checked: number; raised: number; emailed: number; recipients: number; categories: string[] }
 
-/** Claims new alert items and emails the Owners one critical_incident message per category. Idempotent per dedupe key. */
+/** Claims new alert items and emails the internal operations mailbox one critical_incident message per category. Idempotent per dedupe key. */
 export async function runOpsAlerts(ctx: AlertCtx): Promise<OpsAlertResult> {
   const now = ctx.now();
   const items = await collectAlertItems(ctx.db, now);
@@ -303,18 +304,16 @@ export async function runOpsAlerts(ctx: AlertCtx): Promise<OpsAlertResult> {
       .bind(it.key, it.category, it.subject, it.summary.slice(0, 500), now.toISOString()).run();
     if (r.meta.changes > 0) fresh.push(it);
   }
-  const owners = (await ctx.db.prepare(`SELECT DISTINCT u.id, u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id = 'owner' AND u.disabled_at IS NULL ORDER BY u.id`).all<{ id: string; email: string }>()).results;
   const byCat = new Map<AlertCategory, AlertItem[]>();
   for (const it of fresh) byCat.set(it.category, [...(byCat.get(it.category) ?? []), it]);
   let emailed = 0;
   for (const [cat, list] of byCat) {
     const summary = `${CATEGORY_TITLE[cat]}: ${list.slice(0, 10).map((x) => x.summary).join(" ")}${list.length > 10 ? ` (+${list.length - 10} more)` : ""}`.slice(0, 1500);
-    for (const o of owners) {
-      await sendMail(ctx, { template: "critical_incident", to: o.email, idempotencyKey: `ops-alert:${list[0].key}:${o.id}`.slice(0, 300),
-        data: { summary, occurredAt: `${now.toISOString().slice(0, 16).replace("T", " ")} UTC`, url: `${ctx.baseUrl}${CATEGORY_PAGE[cat]}` } });
-      emailed++;
-    }
-    await ctx.db.batch(list.map((x) => ctx.db.prepare(`UPDATE ops_alerts SET recipients = ? WHERE dedupe_key = ?`).bind(owners.length, x.key)));
+    // Phase 14: one email to the internal operations mailbox (Owners also see the alert in the app).
+    await sendInternalTemplate(ctx, "automation_failure", list[0].key, { template: "critical_incident",
+      data: { summary, occurredAt: `${now.toISOString().slice(0, 16).replace("T", " ")} UTC`, url: `${ctx.baseUrl}${CATEGORY_PAGE[cat]}` } });
+    emailed++;
+    await ctx.db.batch(list.map((x) => ctx.db.prepare(`UPDATE ops_alerts SET recipients = ? WHERE dedupe_key = ?`).bind(1, x.key)));
   }
-  return { checked: items.length, raised: fresh.length, emailed, recipients: owners.length, categories: [...byCat.keys()] };
+  return { checked: items.length, raised: fresh.length, emailed, recipients: emailed ? 1 : 0, categories: [...byCat.keys()] };
 }

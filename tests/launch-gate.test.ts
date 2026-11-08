@@ -212,8 +212,15 @@ test("[PAY-004] launch gate: no release path can bypass it — deployment record
   const depId = newId("sd");
   await t.db.prepare(`INSERT INTO site_deployments (id, target_id, project_id, organization_id, build_job_id, version, kind, state, source_repo, source_commit, worker_name, prepared_at, authorized_at, created_at, updated_at)
     VALUES (?,?,?,?,?, 1, 'release', 'authorized', 'https://github.com/crestmont-builds/gate', 'abc1234def', ?, ?, ?, ?, ?)`).bind(depId, target.id, projectId, cu.organizationId, jobId, target.worker_name, nowIso(), nowIso(), nowIso(), nowIso()).run();
-  const claimed = await claimDeployment(t.db, { runnerId: "r1", capabilities: ["production-deploy"] });
+  const blocked: { deploymentId: string; missing: string[] }[] = [];
+  const onBlocked = async (i: { deploymentId: string; missing: string[] }) => { blocked.push(i); };
+  const claimed = await claimDeployment(t.db, { runnerId: "r1", capabilities: ["production-deploy"] }, new Date(), onBlocked);
   assert.equal(claimed.deployment, null, "the runner is given nothing to deploy");
+  assert.equal(blocked.length, 1, "Crestmont is told about the blocked launch (internal email, Phase 14)");
+  assert.equal(blocked[0].deploymentId, depId);
+  assert.ok(blocked[0].missing.length > 0);
+  await claimDeployment(t.db, { runnerId: "r1", capabilities: ["production-deploy"] }, new Date(), onBlocked);
+  assert.equal(blocked.length, 1, "told once: the cancelled release is not re-reported");
   const d = await one<{ state: string; state_reason: string }>(t.db, `SELECT state, state_reason FROM site_deployments WHERE id = ?`, depId);
   assert.equal(d.state, "canceled");
   assert.match(d.state_reason, /Launch gate/);
