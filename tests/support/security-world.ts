@@ -169,6 +169,12 @@ async function buildTenant(w: Omit<World, "a" | "b">, key: "a" | "b"): Promise<T
   await ok(admin.c.post(`/portal/support/new`, { subject: `${marker} ticket subject`, category: "technical", description: `${marker} the contact form is broken`, project_id: pid }), "ticket");
   ids.ticket = (await one<{ id: string }>(db, `SELECT id FROM tickets WHERE organization_id = ?`, cu.organizationId)).id;
   await ok(owner.post(`/staff/support/${ids.ticket}/note`, { body: `${marker} INTERNAL ticket note` }), "ticket internal note");
+  // AI reply drafts of this tenant's ticket and general conversation (discarded, so no scenario picks them up as usable).
+  ids.ticketDraft = newId("ai");
+  ids.conversationDraft = newId("ai");
+  for (const [jid, ref] of [[ids.ticketDraft, `ticket:${ids.ticket}`], [ids.conversationDraft, `conversation:${cu.organizationId}`]] as const) {
+    await db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, output_ref, created_at, updated_at) VALUES (?, 'support_reply', 'anthropic', 'test', 'rejected', ?, ?, ?, ?)`).bind(jid, ref, `${marker} draft reply`, nowIso(), nowIso()).run();
+  }
   await ok(admin.c.post(`/portal/billing/refund-request`, { payment_id: ids.payment, amount: "100", reason: `${marker} project cancelled before kickoff`, evidence: "email" }), "refund request");
   ids.refund = (await one<{ id: string }>(db, `SELECT id FROM refunds WHERE organization_id = ?`, cu.organizationId)).id;
   await ok(admin.c.post(`/portal/team`, { email: `${key}-invitee@${key}.matrix.example` }), "team invitation");

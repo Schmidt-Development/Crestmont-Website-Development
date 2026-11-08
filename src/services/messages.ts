@@ -15,7 +15,7 @@ export interface MessageRow {
   body: string; attachment_file_id: string | null; attachment_name: string | null; internal: number; created_at: string; read_by_me: number; read_by_other_side: number;
 }
 
-const STAFF_ROLE_SQL = `('owner','administrator','sales','developer','project_manager','support')`;
+export const STAFF_ROLE_SQL = `('owner','administrator','sales','developer','project_manager','support')`;
 
 /** Messages shown per thread page (CREST-GAP-040). Older ones are reached through the "earlier messages" link. */
 export const THREAD_PAGE_SIZE = 50;

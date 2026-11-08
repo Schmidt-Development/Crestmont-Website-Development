@@ -1988,6 +1988,17 @@ html.has-intro .cb { animation: show-now 1ms linear 2.4s backwards; }
 .sv:not([data-js]) .cst__nodes { position: static; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .sv:not([data-js]) .cst__node { position: static; transform: none; }
 
+/* ── AI draft replies (staff: support tickets and conversations; src/ui/ai-draft.ts, app.js) ── */
+.ai-draft { display: grid; gap: var(--s-2); }
+.ai-draft__row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.ai-draft__status { margin: 0; color: var(--text-2); font-size: var(--fs-sm); }
+.ai-draft__status[data-state="failed"] { color: var(--bad); }
+.ai-draft__status[data-state="pending"]::before { content: ""; display: inline-block; width: 12px; height: 12px; margin-right: var(--s-2); vertical-align: -1px; border-radius: 50%; border: 1.5px solid var(--gold-1); border-right-color: transparent; animation: spin .9s linear infinite; }
+.ai-draft__action { margin-left: var(--s-2); }
+.ai-draft__note { margin: 0; font-size: var(--fs-sm); }
+.ai-draft [hidden], .ai-draft-sensitive[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) { .ai-draft__status[data-state="pending"]::before { animation: none; border-right-color: var(--gold-1); opacity: .6; } }
+
 /* ── Touch targets (CREST-GAP-045) ────────────────────────────────────────────────────────────────
    The site's own rule: every control is at least 44 × 44 px on touch screens and phones. Placed last so it wins over
    the compact component sizes above (portfolio segmented control, journey stops, assistant, simulations, toasts). */

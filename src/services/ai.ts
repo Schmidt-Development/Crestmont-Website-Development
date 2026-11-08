@@ -80,27 +80,57 @@ const SYSTEM_BASE = `You draft text for Crestmont Website Development staff. You
 Rules: never invent prices, discounts, delivery dates, guarantees, customer facts or project status; use only the facts provided.
 Never approve or promise refunds, never agree to contracts, never authorise releases. If the request needs one of those, say a staff member will follow up.`;
 
-export interface AiDraftRequest { workflow: AiWorkflow; inputRef: string; prompt: string; requestedBy: string | null }
+export interface AiDraftRequest {
+  workflow: AiWorkflow; inputRef: string; prompt: string; requestedBy: string | null;
+  /** At most one pending job per (workflow, inputRef): while one is queued or running, a new request returns that job
+   *  (`reused: true`) instead of creating a duplicate. Checked and inserted in one statement, so concurrent clicks
+   *  cannot both create a job. A queued job nobody picked up within PENDING_WINDOW_MS is superseded. */
+  singleFlight?: boolean;
+}
+
+/** How long a queued/running job counts as "pending" for single-flight requests (longer than a runner lease). */
+export const PENDING_WINDOW_MS = 15 * 60_000;
 
 /** The self-hosted model behind the build runner (no per-token fee). Jobs are queued and leased to the runner. */
 export const LOCAL_RUNNER = "local-runner" as const;
 export type AiBackend = AiProvider | typeof LOCAL_RUNNER | null;
 export const AI_SYSTEM_PROMPT = SYSTEM_BASE;
 
-export async function requestAiDraft(db: Db, provider: AiBackend, req: AiDraftRequest): Promise<{ jobId: string; status: "awaiting_approval" | "failed" | "queued"; text: string | null; error: string | null }> {
+export async function requestAiDraft(db: Db, provider: AiBackend, req: AiDraftRequest): Promise<{ jobId: string; status: "awaiting_approval" | "failed" | "queued"; text: string | null; error: string | null; reused?: boolean }> {
   if (!(AI_WORKFLOWS as readonly string[]).includes(req.workflow)) throw new Error("Unknown AI workflow");
   const jobId = newId("ai");
   const at = nowIso();
+  const cutoff = new Date(Date.parse(at) - PENDING_WINDOW_MS).toISOString();
+  if (req.singleFlight) {
+    await db.prepare(`UPDATE ai_jobs SET status = 'failed', error = 'superseded: not picked up in time; a newer draft was requested', updated_at = ? WHERE workflow = ? AND input_ref = ? AND status = 'queued' AND created_at <= ?`)
+      .bind(at, req.workflow, req.inputRef, cutoff).run();
+  }
+  // The job row. With singleFlight the insert only happens when no pending job exists for the same input (one statement).
+  const insertJob = (providerName: string, model: string, status: "queued" | "running") => req.singleFlight
+    ? db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, created_at, updated_at) SELECT ?,?,?,?,?,?,?,?
+        WHERE NOT EXISTS (SELECT 1 FROM ai_jobs WHERE workflow = ? AND input_ref = ? AND status IN ('queued','running') AND created_at > ?)`)
+      .bind(jobId, req.workflow, providerName, model, status, req.inputRef, at, at, req.workflow, req.inputRef, cutoff)
+    : db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .bind(jobId, req.workflow, providerName, model, status, req.inputRef, at, at);
+  const reuse = async () => {
+    // The pending job (or, if it finished between the two statements, the latest job for this input): the caller
+    // reads its current state rather than starting another.
+    const pending = await db.prepare(`SELECT id FROM ai_jobs WHERE workflow = ? AND input_ref = ? ORDER BY (status IN ('queued','running')) DESC, created_at DESC, rowid DESC LIMIT 1`)
+      .bind(req.workflow, req.inputRef).first<{ id: string }>();
+    if (!pending) throw new Error("AI job could not be recorded");
+    return { jobId: pending.id, status: "queued" as const, text: null, error: null, reused: true };
+  };
   if (provider === LOCAL_RUNNER) {
-    await db.batch([
-      db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, created_at, updated_at) VALUES (?,?, 'local-runner', 'self-hosted', 'queued', ?, ?, ?)`).bind(jobId, req.workflow, req.inputRef, at, at),
-      db.prepare(`INSERT INTO ai_job_inputs (job_id, prompt, created_at) VALUES (?,?,?) ON CONFLICT(job_id) DO NOTHING`).bind(jobId, req.prompt.slice(0, 20_000), at),
+    const [ins] = await db.batch([
+      insertJob(LOCAL_RUNNER, "self-hosted", "queued"),
+      db.prepare(`INSERT INTO ai_job_inputs (job_id, prompt, created_at) SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM ai_jobs WHERE id = ?) ON CONFLICT(job_id) DO NOTHING`).bind(jobId, req.prompt.slice(0, 20_000), at, jobId),
     ]);
+    if (!ins?.meta?.changes) return reuse();
     await audit(db, { actorUserId: req.requestedBy, actorKind: "ai", action: "ai.draft_queued", subjectType: "ai_job", subjectId: jobId, details: { workflow: req.workflow, backend: LOCAL_RUNNER } });
     return { jobId, status: "queued", text: null, error: null };
   }
-  await db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, created_at, updated_at) VALUES (?,?,?,?, 'running', ?, ?, ?)`)
-    .bind(jobId, req.workflow, provider?.name ?? "none", provider?.model ?? "none", req.inputRef, at, at).run();
+  const ins = await insertJob(provider?.name ?? "none", provider?.model ?? "none", "running").run();
+  if (!ins.meta?.changes) return reuse();
   if (!provider) {
     await db.prepare(`UPDATE ai_jobs SET status='failed', error='not_configured: no AI provider key is set', updated_at=? WHERE id=?`).bind(nowIso(), jobId).run();
     return { jobId, status: "failed", text: null, error: "AI drafting is not configured (no provider API key)." };

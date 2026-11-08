@@ -4,7 +4,10 @@ import { aiBuildGate } from "../domain/ai-build-gate.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatCents, formatDate, formatDateTime, label, safeUrl, type SafeHtml } from "../lib/html.ts";
-import { HttpError, download, htmlResponse, redirect, str } from "../app/http.ts";
+import { HttpError, download, htmlResponse, jsonResponse, redirect, str } from "../app/http.ts";
+import { DraftError, assertDraftUsable, draftConversationReply, draftStatus, isDraftJobId, type DraftStatus } from "../services/ai-drafts.ts";
+import { decideAiJob } from "../services/ai.ts";
+import { draftControls, draftJobField, wantsJson } from "../ui/ai-draft.ts";
 import { requireStaff } from "../app/app.ts";
 import { likeContains } from "../lib/db.ts";
 import { appLayout } from "../ui/layout.ts";
@@ -167,10 +170,15 @@ ${table(rows, [
 ], { empty: emptyState(q ? "No customers match" : "No general conversations yet", q ? "Try another name." : "Customers start one from Messages in their portal. Search for a customer to message them first.") })}
 ${total > limit ? html`<p class="faint" data-showing>Showing ${offset + (rows.length ? 1 : 0)}–${offset + rows.length} of ${total} conversations.</p>${pagination(ctx, pg, offset + rows.length < total)}` : ""}`);
   });
-  const conversationPage = async (ctx: AppContext, orgId: string, errors: string[] = [], status = 200, draft = "") => {
+  const conversationPage = async (ctx: AppContext, orgId: string, errors: string[] = [], status = 200, draft = "", draftJobId = "") => {
     requireStaff(ctx, "customers.read");
     const org = await ctx.db.prepare(`SELECT id, name FROM organizations WHERE id = ? AND kind = 'customer'`).bind(orgId).first<{ id: string; name: string }>();
     if (!org) throw new HttpError(404, "Customer not found");
+    // AI draft reply (shared drafting service): text re-shown after a refused send, or the job named by ?draft= (no-JS path).
+    const draftParam = ctx.url.searchParams.get("draft");
+    const draftState: DraftStatus | null = draft ? (isDraftJobId(draftJobId) ? { jobId: draftJobId, state: "ready", draft, error: null } : null)
+      : isDraftJobId(draftParam) ? await draftStatus(ctx.db, { kind: "conversation", organizationId: org.id }, draftParam) : null;
+    const bodyValue = draft || (draftState?.state === "ready" ? draftState.draft ?? "" : "");
     const thread = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.id, staff: true }, null, { before: ctx.url.searchParams.get("before") });
     const msgs = thread.messages;
     await M.markThreadRead(ctx.db, ctx.user!.id, org.id, null, true, msgs.map((m) => m.id));
@@ -179,7 +187,8 @@ ${total > limit ? html`<p class="faint" data-showing>Showing ${offset + (rows.le
     const body = html`${pageHead(org.name, html`${linkButton("All conversations", "/staff/conversations", "ghost", "sm")}${linkButton("Customer record", `/staff/customers/${org.id}`, "ghost", "sm")}`, "General conversation")}
 ${formErrors(errors)}
 ${threadEarlierNav(ctx, thread)}<div class="thread">${msgs.length ? msgs.map((m) => html`<article class="msg${m.internal ? " msg--internal" : m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.internal ? "Internal note · " : ""}${m.author_name}${m.author_is_staff ? " · Crestmont" : " · Customer"} · ${formatDateTime(m.created_at)}${!m.internal && m.author_is_staff ? (m.read_by_other_side ? " · Seen by customer" : " · Not yet read by customer") : ""}</div>${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Send the first message, or leave an internal note for the team.")}</div>
-<form method="post" action="/staff/conversations/${org.id}" enctype="multipart/form-data" class="card" style="margin-top:1.5rem">${csrf(ctx)}${textarea({ name: "body", label: "Message", required: true, rows: 4, maxlength: 10000, value: draft })}
+<div style="margin-top:1.5rem">${draftControls(ctx, { startAction: `/staff/conversations/${org.id}/draft`, statusBase: `/staff/conversations/${org.id}/draft/`, target: "#reply", status: draftState })}</div>
+<form method="post" action="/staff/conversations/${org.id}" enctype="multipart/form-data" class="card" id="reply" style="margin-top:1rem">${csrf(ctx)}${draftJobField(draftState)}${textarea({ name: "body", label: "Message", required: true, rows: 4, maxlength: 10000, value: bodyValue })}
 <div class="field"><label for="f-attachment">Attachment (optional)</label><input class="input" id="f-attachment" type="file" name="attachment"${ctx.storage ? "" : html` disabled`}></div>
 ${checkbox("internal", "Internal note — not visible to the customer")}<div class="form-actions">${button("Send")}</div></form>`;
     return page(ctx, `${org.name} — conversation`, body, status);
@@ -191,13 +200,55 @@ ${checkbox("internal", "Internal note — not visible to the customer")}<div cla
     if (!org) throw new HttpError(404, "Customer not found");
     const f = await ctx.form();
     const att = f.get("attachment");
+    const internal = !!f.get("internal");
+    // An AI draft sent as a customer message must be an unused draft of THIS conversation; it is marked approved by
+    // the person who sent it. (Saved as an internal note instead, the draft is left as it was.)
+    const aiJob = internal ? "" : str(f, "ai_job_id");
+    const subject = { kind: "conversation" as const, organizationId: org.id };
     try {
-      await M.postMessage(ctx, { organizationId: org.id, projectId: null, authorUserId: ctx.user!.id, body: str(f, "body"), attachment: att && typeof att !== "string" ? att : null, internal: !!f.get("internal"), fromStaff: true });
+      if (aiJob) await assertDraftUsable(ctx.db, subject, aiJob);
+      await M.postMessage(ctx, { organizationId: org.id, projectId: null, authorUserId: ctx.user!.id, body: str(f, "body"), attachment: att && typeof att !== "string" ? att : null, internal, fromStaff: true });
     } catch (e) {
-      if (e instanceof M.MessageError) return conversationPage(ctx, org.id, [e.message], 422, str(f, "body"));
+      if (e instanceof DraftError) return conversationPage(ctx, org.id, [e.message], e.status, str(f, "body"));
+      if (e instanceof M.MessageError) return conversationPage(ctx, org.id, [e.message], 422, str(f, "body"), aiJob);
       throw e;
     }
-    return redirect(ctx, `/staff/conversations/${org.id}`, { kind: "success", text: f.get("internal") ? "Internal note added." : "Message sent." });
+    if (aiJob) {
+      try { await decideAiJob(ctx.db, aiJob, ctx.user!.id, "approved", str(f, "body")); } catch { /* decided concurrently; the message a person wrote was still sent */ }
+    }
+    return redirect(ctx, `/staff/conversations/${org.id}`, { kind: "success", text: internal ? "Internal note added." : "Message sent." });
+  });
+
+  // AI draft reply for the general conversation (shared drafting service, services/ai-drafts.ts). Same permission as the
+  // conversation page. With `Accept: application/json` (app.js) the state is JSON and the page polls the status route;
+  // without JavaScript it redirects to ?draft=. Repeated clicks while a draft is pending return the same job.
+  const conversationDraftJson = (orgId: string, s: DraftStatus) => ({ ...s, sensitive: false, statusUrl: `/staff/conversations/${orgId}/draft/${s.jobId}` });
+  const customerOrg = async (ctx: AppContext, orgId: string) => {
+    const org = await ctx.db.prepare(`SELECT id FROM organizations WHERE id = ? AND kind = 'customer'`).bind(orgId).first<{ id: string }>();
+    if (!org) throw new HttpError(404, "Customer not found");
+    return org;
+  };
+  r.post("/staff/conversations/:orgId/draft", async (ctx, p) => {
+    requireStaff(ctx, "customers.read");
+    const org = await customerOrg(ctx, p.orgId);
+    let res: DraftStatus;
+    try {
+      res = await draftConversationReply(ctx, org.id, ctx.user!.id);
+    } catch (e) {
+      if (!(e instanceof DraftError)) throw e;
+      if (wantsJson(ctx)) return jsonResponse(ctx, e.status, { state: "failed", error: e.message });
+      return redirect(ctx, `/staff/conversations/${org.id}`, { kind: "error", text: `AI draft unavailable: ${e.message} Nothing was sent.` });
+    }
+    if (wantsJson(ctx)) return jsonResponse(ctx, 200, conversationDraftJson(org.id, res));
+    if (res.state === "failed") return redirect(ctx, `/staff/conversations/${org.id}`, { kind: "error", text: `AI draft unavailable: ${res.error} Nothing was sent.` });
+    return redirect(ctx, `/staff/conversations/${org.id}?draft=${res.jobId}#reply`, { kind: "info", text: res.state === "pending" ? "Drafting has started. The draft will appear in the message box as soon as it is ready. Nothing has been sent." : "AI draft ready for review. Nothing has been sent." });
+  });
+  r.get("/staff/conversations/:orgId/draft/:jobId", async (ctx, p) => {
+    requireStaff(ctx, "customers.read");
+    const org = await customerOrg(ctx, p.orgId);
+    const s = await draftStatus(ctx.db, { kind: "conversation", organizationId: org.id }, p.jobId);
+    if (!s) throw new HttpError(404, "No such AI draft for this conversation.");
+    return jsonResponse(ctx, 200, conversationDraftJson(org.id, s));
   });
 
   r.post("/staff/notifications/read", async (ctx) => {

@@ -282,6 +282,7 @@ export function auditScenarios(w: World): Scenario[] {
 
     // ── Delivery (tenant A's project) ──
     { key: "POST /staff/conversations/:orgId", path: () => `/staff/conversations/${a.orgId}`, fields: () => ({ body: "Following up on your question." }) },
+    { key: "POST /staff/conversations/:orgId/draft", path: () => `/staff/conversations/${a.orgId}/draft` },
     { key: "POST /staff/projects/:id/status", path: () => P(w, "POST /staff/projects/:id/status"), fields: () => ({ to: "paused", note: "Waiting on content" }) },
     { key: "POST /staff/projects/:id/resume", path: () => P(w, "POST /staff/projects/:id/resume") },
     { key: "POST /staff/projects/:id/pm", path: () => P(w, "POST /staff/projects/:id/pm"), fields: () => ({ user_id: s.owner.id }) },
