@@ -287,3 +287,35 @@ test("[REAL-011] a declared content change is only forgiven when the comparison 
   assert.ok(without.drift.findings.some((f) => f.kind === "undeclared-content" && f.page === "quote"),
     "and fails for a reason that is about the manifest, not about the design");
 });
+
+test("[REAL-012] nothing is measured before the page has come to rest", async () => {
+  // The defect this guards: the same artifact measured to one of two stable fingerprints, 12207px of layout
+  // apart, because four of its images carry loading="lazy" and part of the page is written by its own
+  // JavaScript. `waitUntil: "load"` plus document.fonts.ready and a flat 250ms caught whichever resting state
+  // happened to be there, so the visual gate failed against whichever one it had not been given -- and Model B
+  // spent three cycles trying to make a page match a measurement that could not hold still.
+  //
+  // Asserted against the script's source because the behaviour needs a real browser, a real artifact and two
+  // runs to see. Those two runs were done and agreed (b2dd67f236668efb twice); this is what stops the step being
+  // quietly removed afterwards.
+  const { readFileSync } = await import("node:fs");
+  const path = await import("node:path");
+  const src = readFileSync(path.resolve(import.meta.dirname, "../sandbox/frontend-import.mjs"), "utf8");
+
+  assert.match(src, /const SETTLE = /, "the resting-state step exists");
+  // What resting means, each clause for its own reason.
+  assert.match(src, /im\.loading = "eager"/, "a lazy image must not stay unloaded below the fold");
+  assert.match(src, /window\.scrollTo\(0, y\)/, "the page is walked so lazy content is asked for before geometry is read");
+  assert.match(src, /im\.decode\(\)/, "a decoded image contributes its intrinsic size to the layout");
+  assert.match(src, /document\.fonts\.ready/, "a fallback face measures differently from the real one");
+  assert.match(src, /if \(now === last\) return \{ settled: true/, "the document height has to stop moving");
+  assert.match(src, /settled: false/, "and a page that never settles is reported, not waited on for ever");
+
+  // THE INVARIANT: every page load is followed by settling. A goto without one is a measurement of whatever
+  // happened to be painted, which is the bug.
+  const gotos = src.match(/await \w+\.goto\(/g) ?? [];
+  const settles = src.match(/await settle\(/g) ?? [];
+  assert.ok(gotos.length >= 5, `expected the real set of page loads, found ${gotos.length}`);
+  assert.ok(settles.length >= gotos.length,
+    `${gotos.length} page load(s) but only ${settles.length} settle(s): a measurement is being taken before the page is at rest`);
+});
