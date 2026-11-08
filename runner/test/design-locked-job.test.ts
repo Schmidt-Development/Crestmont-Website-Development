@@ -672,35 +672,43 @@ test("[DLJ-18] one unproductive cycle is ordinary; two in a row is stuck", async
   assert.ok(r.cycles.length <= MAX_REPAIR_CYCLES + 1, "the ceiling is unchanged");
 });
 
-test("[DLJ-19] a build that alters the approved frontend is refused, and the file is named", async () => {
-  // The guarantee the whole architecture rests on, which nothing checked. sourceFingerprint is taken once during
-  // the import and never looked at again, and conformance never read the frontend's files at all. Measured: three
-  // consecutive builds passed conformance AND the visual gate while serving an index page that had lost markup the
-  // approved file contains -- <b>28</b>, <b>1,900+</b>, Families &amp; owners advised, all present verbatim in the
-  // artifact and all absent from the response. Model B had replaced the server-rendered figures with placeholders
-  // its script filled from the new API. The only thing that noticed was an acceptance probe, and only because
-  // Model A happened to write one.
+test("[DLJ-19] an edit to the approved frontend does not survive the cycle that made it", async () => {
+  // The guarantee the whole architecture rests on, which nothing enforced. sourceFingerprint is taken once at
+  // import and never read again, and conformance never read the frontend's files. Iterations 11-13 each passed
+  // conformance AND the visual gate while serving an index page that had lost markup the approved file contains
+  // -- <b>28</b>, <b>1,900+</b>, Families &amp; owners advised, all verbatim in the artifact. Model B had replaced
+  // the server-rendered figures with placeholders its script filled from the new API, and the only thing that
+  // noticed was one acceptance probe, because Model A happened to write it.
+  //
+  // Detecting that is a true statement which leaves the file altered. Restoring it means the edit cannot survive
+  // its own cycle, which is what restoreProtectedFiles already does for a starter's checker files.
   const repo = path.join(tmp(), "repo");
+  let edited = "";
   const provider = fakeProvider({
     repo,
     onCycle: () => {
       writeConformingBackend(repo);
-      // Exactly the move that went unnoticed: the approved page edited to be filled in by script instead.
       const page = path.join(repo, "index.html");
-      if (existsSync(page)) writeFileSync(page, readFileSync(page, "utf8").replace(/<body/, '<body data-rendered-by="model-b"'));
+      if (existsSync(page)) {
+        edited = readFileSync(page, "utf8").replace(/<body/, '<body data-rendered-by="model-b"');
+        writeFileSync(page, edited);
+      }
     },
   });
 
   const r = await runDesignLockedJob(deps({ repo, provider: provider as never }));
 
-  assert.equal(r.ok, false, "a build that edited the approved design must never pass");
-  const codes = r.cycles.flatMap((c) => c.conformance.violations);
-  assert.ok(codes.includes("approved-frontend-changed"),
-    `the design lock did not bite: ${codes.join(",") || "(no violations)"}`);
+  // The edit happened, and did not last.
+  assert.ok(edited.includes("data-rendered-by"), "the test did not actually edit the approved page");
+  assert.ok(!readFileSync(path.join(repo, "index.html"), "utf8").includes("data-rendered-by"),
+    "the approved frontend was left altered: the design lock is advisory, not enforced");
 
-  // It must say WHICH file, because "something changed" is not actionable.
-  const said = (r.cycles[0].conformance.violationDetails ?? []).join(" ");
-  assert.match(said, /index\.html/, said);
-  assert.match(said, /must not alter it/, "and why it is forbidden, not merely that it is");
+  // And it is SAID, naming the file, so the model knows its edit was undone rather than silently losing it.
+  const warned = r.cycles.flatMap((c) => c.conformance.violationDetails ?? []).join(" ") + r.problems.join(" ") + r.summary;
+  assert.match(warned, /index.html/, warned.slice(0, 400));
+  assert.match(warned, /restored|cannot alter it/, "the brief has to say the edit was undone, not merely that it was wrong");
 
+  // The restore is not a refusal: with the design intact there is nothing left to block the build for.
+  const lockViolations = r.cycles.flatMap((c) => c.conformance.violations).filter((v) => v === "approved-frontend-changed");
+  assert.deepEqual(lockViolations, [], "a restored file is not an outstanding violation");
 });

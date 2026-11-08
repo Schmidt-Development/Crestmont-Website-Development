@@ -15,7 +15,7 @@
 //             → bounded repair cycles while they make measurable progress
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Workspace } from "../workspace.ts";
 import type { JobSandbox } from "../sandbox.ts";
@@ -125,29 +125,23 @@ export interface DesignLockedResult {
  * silently reads 0 whenever git is absent is the defect this replaces rather than a fix for it.
  */
 /**
- * The approved frontend's own files, by content.
+ * The approved frontend's own files, by content, so they can be put back.
  *
- * THE GUARANTEE THIS ENFORCES. The whole architecture rests on one promise: the Founder approves a frontend and
- * the AI builds a backend without touching it. Nothing checked it. `sourceFingerprint` is taken once during the
- * import and never looked at again, and conformance never reads the frontend's files at all -- so a build could
- * edit the approved HTML and be caught only indirectly, by a visual gate that a visually identical edit satisfies,
- * or by whatever content probes the contract happened to carry.
+ * DETECTION IS NOT PRESERVATION. The previous commit made an altered approved file a conformance violation, which
+ * is a true statement that still leaves the altered file in place and the build blocked on it. The runner already
+ * owns the stronger pattern -- `restoreProtectedFiles` in checks.ts puts a starter's protected files back and
+ * reports what it replaced -- and the approved frontend has a far better claim to it than a checker script does.
  *
- * Measured: three consecutive builds passed conformance AND the visual gate while serving an index page that had
- * lost markup the approved file contains -- `<b>28</b>`, `<b>1,900+</b>`, `Families &amp; owners advised`, all
- * present verbatim in the artifact and all absent from the response. Model B had replaced the server-rendered
- * figures with placeholders its script filled in from the new API. The only thing that noticed was an acceptance
- * probe, and only because Model A happened to write one.
+ * So these bytes are kept, and any approved file a cycle changed or deleted is restored from them. Model B then
+ * cannot alter the approved design at all: not because it is told not to, but because the alteration does not
+ * survive its own cycle. It is told, in the brief, that this happened and that its backend must work with the
+ * approved page as it stands.
  *
- * `size:mtime` would not do: a file rewritten with identical bytes is not a change, and a file rewritten with
- * different bytes and a preserved mtime is. So this hashes content.
- *
- * What is deliberately NOT here: `package.json` and lockfiles, because the contract permits new scripts and
- * conformance already polices exactly which; and generated or runner-owned directories, which are not the
- * approved frontend.
+ * Excluded on purpose: package.json and lockfiles, because the contract permits new scripts and conformance
+ * already polices exactly which; and generated or runner-owned directories, which are not the approved frontend.
  */
-function approvedSnapshot(root: string): Map<string, string> {
-  const out = new Map<string, string>();
+function approvedBytes(root: string): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
   const skip = /^(node_modules|dist|build|out|\.git|\.crestmont|\.vite|\.cache|\.next|\.wrangler|server|data|tests?)$/;
   const governed = /^(package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml)$/;
   const walk = (dir: string, rel: string): void => {
@@ -159,7 +153,7 @@ function approvedSnapshot(root: string): Map<string, string> {
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) walk(abs, r);
       else if (e.isFile() && !(rel === "" && governed.test(e.name))) {
-        try { out.set(r, createHash("sha256").update(readFileSync(abs)).digest("hex")); } catch { /* vanished mid-walk */ }
+        try { out.set(r, readFileSync(abs)); } catch { /* vanished mid-walk */ }
       }
     }
   };
@@ -167,18 +161,37 @@ function approvedSnapshot(root: string): Map<string, string> {
   return out;
 }
 
-/** Approved files this build changed or removed. Adding files is allowed; altering the approved design is not. */
-export function approvedFrontendChanges(
-  approved: Map<string, string>,
-  now: Map<string, string>,
-): { path: string; what: "changed" | "removed" }[] {
-  const out: { path: string; what: "changed" | "removed" }[] = [];
-  for (const [p, sha] of approved) {
-    const current = now.get(p);
-    if (current === undefined) out.push({ path: p, what: "removed" });
-    else if (current !== sha) out.push({ path: p, what: "changed" });
+/**
+ * Put every approved file back as approved. Returns what had to be replaced.
+ *
+ * Never writes through a link: the same precaution `restoreProtectedFiles` takes, for the same reason. An agent
+ * that replaces an approved file with a symlink must not thereby get the runner to write somewhere else.
+ */
+export function restoreApprovedFrontend(repo: string, approved: Map<string, Buffer>): { path: string; what: "changed" | "removed" }[] {
+  const replaced: { path: string; what: "changed" | "removed" }[] = [];
+  for (const [rel, want] of approved) {
+    const dst = path.join(repo, rel);
+    let state: "same" | "changed" | "removed" = "removed";
+    try {
+      const st = lstatSync(dst);
+      if (st.isFile() && !st.isSymbolicLink()) state = readFileSync(dst).equals(want) ? "same" : "changed";
+      else state = "changed";
+    } catch { state = "removed"; }
+    if (state === "same") continue;
+    replaced.push({ path: rel, what: state });
+
+    let cur = repo;
+    for (const part of rel.split("/").slice(0, -1)) {
+      cur = path.join(cur, part);
+      let st = null;
+      try { st = lstatSync(cur); } catch { /* missing */ }
+      if (st && (st.isSymbolicLink() || !st.isDirectory())) rmSync(cur, { recursive: true, force: true });
+      if (!st || st.isSymbolicLink() || !st.isDirectory()) mkdirSync(cur, { recursive: true });
+    }
+    rmSync(dst, { recursive: true, force: true });
+    writeFileSync(dst, want);
   }
-  return out.sort((a, b) => a.path.localeCompare(b.path));
+  return replaced.sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function fileSnapshot(root: string): Map<string, string> {
@@ -423,7 +436,7 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
   // ── 6. Model B, then verification, then bounded repair ────────────────────────────────────────────────────
   // The approved frontend, by content, as it stands before Model B has touched anything. Every cycle is
   // checked against this: adding files is the work, altering the approved design is the one thing forbidden.
-  const approvedFiles = approvedSnapshot(d.ws.repo);
+  const approvedFiles = approvedBytes(d.ws.repo);
 
   let prompt = integrationPrompt({ manifest, baseline, report, outputRoot: built.outputRoot, framework: ingest.framework,
     packageType: typeof approvedPackage?.type === "string" ? approvedPackage.type : null });
@@ -459,16 +472,27 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
       repo: d.ws.repo, manifest, baselinePackage: approvedPackage,
       outputRoot: built.plan.buildCommand ? built.outputRoot : null,
     });
-    // THE DESIGN LOCK, enforced rather than assumed. A changed approved file is Model B's to undo, so it is a
-    // conformance violation: it reaches the repair brief naming the file, instead of surfacing as an indirect
-    // content-probe failure the model has to infer a cause from.
-    for (const c of approvedFrontendChanges(approvedFiles, approvedSnapshot(d.ws.repo))) {
+    // THE DESIGN LOCK, enforced by putting the file back rather than by refusing the build.
+    //
+    // Reporting an altered approved file is a true statement that leaves the file altered. Restoring it means
+    // Model B cannot change the approved design at all -- the change does not survive its own cycle -- which is
+    // the same thing restoreProtectedFiles already does for a starter's checker files. A WARNING, not a
+    // violation: after the restore the design IS intact, so there is nothing left to refuse. What the model
+    // needs to know is that its edit was undone and its backend must work with the approved page as it stands,
+    // and the functional probes will say so if it does not.
+    const putBack = restoreApprovedFrontend(d.ws.repo, approvedFiles);
+    for (const c of putBack) {
       conf.findings.push({
-        severity: "violation", area: "config", code: "approved-frontend-" + c.what, basis: "source", file: c.path,
-        detail: "The approved frontend file " + c.path + " was " + c.what + ". That file is the design the Founder approved; this build may add files beside it but must not alter it.",
-        repair: "Restore " + c.path + " to the approved bytes exactly, and put the backend in its own files. If the page needs data from the API, add it without removing what the approved page already renders.",
+        severity: "warning", area: "config", code: "approved-frontend-restored", basis: "source", file: c.path,
+        detail: "The approved frontend file " + c.path + " was " + c.what + " and has been restored to the approved bytes. That file is the design the Founder approved; this build may add files beside it but cannot alter it.",
+        repair: "Leave " + c.path + " alone and make the backend work with it as approved. If the page needs data from the API, add it without removing or replacing what the approved page already renders.",
       });
-      conf.ok = false;
+    }
+    if (putBack.length) note(`restored ${putBack.length} approved frontend file(s) the cycle had altered: ${putBack.map((c) => c.path).join(", ")}`);
+    // Recorded where a PERSON reads it, not only in the activity stream: a file of the approved design was
+    // altered and put back, which is something the Founder should see even though it no longer blocks the build.
+    if (putBack.length) {
+      problems.push(`restored ${putBack.length} approved frontend file(s) this cycle had altered, so the approved design is intact: ${putBack.map((c) => `${c.path} (${c.what})`).join(", ")}. The backend must work with the approved page as it stands.`);
     }
     // Rebuild the way THIS project is built, which `planBuild` already decided at import time from the approved
     // artifact. For a static site that answer is `null`: there is no build step, the document Model B just edited
