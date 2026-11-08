@@ -644,3 +644,30 @@ test("[DLJ-17] an environment difference is not charged to Model B as design dri
     /renders a different design from the one approved/,
     "the divergence from the approved design must still be recorded, just not as the model's fault");
 });
+
+test("[DLJ-18] one unproductive cycle is ordinary; two in a row is stuck", async () => {
+  // Iterations 10, 11 and 12 each stopped at cycle 2 of a permitted 4. Iteration 12 stopped with conformance
+  // passing, the visual gate passing, and the functional gate ONE acceptance check short -- "the response does
+  // not contain 1,900+" -- holding two unspent cycles. The rule meant to prevent waste was the reason the work
+  // was abandoned, one string from done.
+  const repo = path.join(tmp(), "repo");
+  const provider = fakeProvider({
+    repo,
+    // Never satisfies the contract, so no cycle ever moves the score.
+    onCycle: () => {
+      writeFileSync(path.join(repo, "server.js"), 'import { writeFileSync } from "node:fs";\nconst D = "./x.json";\nexport function store(r) { writeFileSync(D, JSON.stringify(r)); }');
+      writeFileSync(path.join(repo, "verify-backend.mjs"), "console.log('ok');\n");
+    },
+  });
+
+  const r = await runDesignLockedJob(deps({ repo, provider: provider as never }));
+
+  assert.equal(r.ok, false);
+  // Cycle 1 integrates, cycle 2 moves nothing (tolerated), cycle 3 moves nothing (stuck) -> stop.
+  assert.equal(r.cycles.length, 3,
+    `one stall should be tolerated and the second should stop it: ${r.cycles.map((c) => `${c.cycle}:${c.progressed}`).join(" ")}`);
+  assert.match(r.problems.join(" "), /both changed nothing measurable/,
+    "and it says it was twice, not once");
+  // Still bounded by the ceiling, which this does not raise.
+  assert.ok(r.cycles.length <= MAX_REPAIR_CYCLES + 1, "the ceiling is unchanged");
+});

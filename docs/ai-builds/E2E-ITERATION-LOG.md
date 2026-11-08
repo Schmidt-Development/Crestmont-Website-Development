@@ -26,6 +26,8 @@ are resolved in round two).
 
 | 11 | `6fb4c2a` | `GATE-VISUAL` — **0 drift findings**, 1 interactive state changed; `GATE-FUNCTIONAL` — a real Model B defect | the layout fix worked. The remaining visual item is the same defect in the other channel: interactive-state screenshot hashes captured before Model B existed, compared against the same states once the backend works. An inert form against a working one must differ — that difference is the work | the declaration that covers the resting page covers its states; on an undeclared page a changed state is still a failure. Also unblocks the loop: cycle 2 had scored identically to cycle 1 and stopped with two of four cycles unspent | `[DL-012]` covers the principle |
 
+| 12 | `b5a1c39` | `GATE-FUNCTIONAL` — 4 passed, 4 failed | **`GATE-VISUAL` now passes: "the approved design held across 3 page view(s)".** The failures are real and the contract is right: `<b>28</b>` and `1,900+` ARE in the approved HTML (checked, not assumed), so the probe is protecting the frontend — Model B took the static figure out to inject it from the API, which is a change to an approved frontend | the brief now says the text a probe reports missing is text the approved page already contains: put it back, serve the approved file unchanged, add the API beside it. Feedback, not a gate change | — |
+
 ## Results by iteration
 
 **Iteration 3** (`876a33f`) — 28 passed, 2 failed, 1 undetermined.

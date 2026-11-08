@@ -369,6 +369,8 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
   let previousViolations: string[] = [];
   /** What the three gates measured last cycle, so "did this help" is a comparison and not a guess. */
   let previous: { violations: number; functional: number; visual: number } | null = null;
+  /** Consecutive cycles that moved nothing. One is ordinary; two in a row means stuck. */
+  let stalled = 0;
 
   for (let cycle = 1; cycle <= MAX_REPAIR_CYCLES + 1; cycle++) {
     if (d.stop.reason) { problems.push(`stopped: ${d.stop.reason}`); break; }
@@ -455,12 +457,33 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
       break;
     }
 
-    // A cycle that fixed nothing does not earn another: that is how an afternoon disappears.
-    if (cycle > 1 && !progressed) {
-      problems.push(regressed.length
-        ? `repair cycle ${cycle} made things worse rather than better: ${regressed.join("; ")}; stopping rather than repairing on top of it`
-        : `repair cycle ${cycle} changed nothing measurable (contract ${score.violations}, functional ${score.functional}, visual ${score.visual} — the same as before); stopping rather than repeating it`);
+    // A REGRESSION STOPS AT ONCE. A SINGLE UNPRODUCTIVE CYCLE DOES NOT.
+    //
+    // This was "a cycle that fixed nothing does not earn another", which is how an afternoon disappears -- and it
+    // is still true of a cycle that makes things WORSE: repairing on top of a regression is how a build unravels.
+    //
+    // But one cycle that moves nothing is ordinary, and treating it as terminal spent half the repair budget.
+    // Measured across iterations 10, 11 and 12: each stopped at cycle 2 of a permitted 4, and iteration 12 stopped
+    // with conformance passing, the visual gate passing, and the functional gate ONE acceptance check short --
+    // "the response does not contain 1,900+" -- holding two unspent cycles. The rule meant to prevent waste was
+    // itself the reason the work was abandoned.
+    //
+    // So: a regression breaks immediately, and two CONSECUTIVE cycles without movement break. One does not. The
+    // ceiling is unchanged, so this can never run longer than MAX_REPAIR_CYCLES allowed in the first place.
+    if (cycle > 1 && regressed.length) {
+      problems.push(`repair cycle ${cycle} made things worse rather than better: ${regressed.join("; ")}; stopping rather than repairing on top of it`);
       break;
+    }
+    if (cycle > 1 && !progressed) {
+      stalled += 1;
+      note(`cycle ${cycle}: nothing measurable changed (contract ${score.violations}, functional ${score.functional}, visual ${score.visual})`
+        + (stalled >= 2 ? "; that is twice in a row, so stopping" : "; allowing one more, because one unproductive cycle is ordinary"));
+      if (stalled >= 2) {
+        problems.push(`repair cycles ${cycle - 1} and ${cycle} both changed nothing measurable (contract ${score.violations}, functional ${score.functional}, visual ${score.visual}); stopping rather than repeating it a third time`);
+        break;
+      }
+    } else if (progressed) {
+      stalled = 0;
     }
     if (cycle === MAX_REPAIR_CYCLES + 1) {
       problems.push(`${MAX_REPAIR_CYCLES} repair cycle(s) did not satisfy all three gates; escalating for a person`);
