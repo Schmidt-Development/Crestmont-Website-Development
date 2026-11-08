@@ -197,7 +197,7 @@ test("[WDX-E05] the customer requests changes and staff see the feedback", { ski
   await staff.goto(`${BASE}/staff/website-delivery/${deliveryId}`, { waitUntil: "domcontentloaded" });
   const text = await staff.locator("main").innerText();
   assert.match(text, /The customer asked for changes/);
-  assert.match(text, new RegExp(feedback.replace(/[()]/g, "\\$&")));
+  assert.ok(text.includes(feedback), `the customer's feedback is shown to staff: ${text.slice(0, 600)}`);
   await staff.goto(`${BASE}/staff/website-delivery?approval=revision_requested&q=${encodeURIComponent(NAME)}`, { waitUntil: "domcontentloaded" });
   assert.match(await staff.locator("main").innerText(), /Changes requested/);
   await staff.context().close();
