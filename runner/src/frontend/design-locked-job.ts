@@ -37,7 +37,7 @@ import { checkConformance, describeConformance, repairBrief } from "./conformanc
 import type { ConformanceReport } from "./conformance.ts";
 import { integrationMemory, integrationPrompt, readIntegrationOutcome } from "./integrate.ts";
 import { acceptancePlan, coverageChecks, readAcceptanceOutput, summarise, writeAcceptanceDriver, writeAcceptanceResults, DRIVER } from "./acceptance.ts";
-import { completeness, validateManifest, withoutBlocked } from "./integration-manifest.ts";
+import { completeness, validateManifest, withoutBlocked, declaredChanges } from "./integration-manifest.ts";
 import type { IntegrationManifest, ManifestContract } from "./integration-manifest.ts";
 
 /** How many repair cycles a build may spend. Each one must make measurable progress to earn the next. */
@@ -558,13 +558,24 @@ async function measureVisual(
 
   const v = verifyAgainstBaseline(startOfBuild, after, { before, manifest });
   const drifted = v.drift.findings.filter((f) => f.kind !== "declared-content");
-  const ok = v.drift.ok && v.stateChanges.length === 0;
+  // AN INTERACTIVE STATE ON A DECLARED PAGE WILL CHANGE. That is the backend working.
+  //
+  // These are screenshot hashes of a page mid-interaction, captured before Model B existed and again after.
+  // Comparing an inert form to a working one and failing on the difference is backwards: the difference IS the
+  // work. The same declaration that covers the resting page covers its states -- and on a page nobody declared,
+  // a changed state is still a failure, exactly as a changed resting page is.
+  //
+  // Measured: the run after the layout fix reported 0 drift findings and failed on 1 interactive state change,
+  // which is the same defect in the other channel.
+  const declaredPages = new Set(declaredChanges(manifest).filter((d) => d.expect === "content").map((d) => d.page));
+  const stateChanges = v.stateChanges.filter((s) => !declaredPages.has(s.key.split("|")[0]));
+  const ok = v.drift.ok && stateChanges.length === 0;
   return {
     ran: true, ok,
     detail: ok
       ? `the approved design held across ${v.drift.compared} page view(s)`
-      : visualSummary(drifted, v.stateChanges.length),
-    findings: drifted.length + v.stateChanges.length,
+      : visualSummary(drifted, stateChanges.length),
+    findings: drifted.length + stateChanges.length,
   };
 }
 

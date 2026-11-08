@@ -22,6 +22,8 @@ are resolved in round two).
 
 | 9 | `1682f9f` | `GATE-VISUAL` — "the rendering changed but nothing in the integration manifest said this page would change" | Model A declared `firm-figures-read` on `index`, kind `data-read`, serving `GET /api/firm-figures`, with **`expectChange: "none"`**. A data-read puts backend data on a page, so making it work is exactly what changes the rendering — the gate was told the page would look the same and reported the data arriving as drift | the validator refuses `expectChange: "none"` for `data-read` and `search`, naming the consequence; Model A's schema says which value to use and why | `[IM-014]` |
 
+| 10 | `6fb4c2a` | `GATE-VISUAL` — `index at tablet [layout]: section spacing changed by 8616px` | **the two gates could not hold at once.** The visual gate passed at cycle 1 (no backend) and failed at cycle 2 once the backend worked, because data arriving where a placeholder was makes the page taller — and a `design-drift` finding was raised for the layout consequence of a content change the contract *declares*. The only way Model B could satisfy both was to stop the data arriving | a drift finding whose aspects are **only** `layout`, on a page whose content change is declared, is reported as the declared change. Palette, fonts and skeleton stay locked | `[DL-012]` |
+
 ## Results by iteration
 
 **Iteration 3** (`876a33f`) — 28 passed, 2 failed, 1 undetermined.
