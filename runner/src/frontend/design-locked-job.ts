@@ -84,7 +84,9 @@ export interface CycleRecord {
   intent: "integration" | "repair";
   conformance: { ok: boolean; violations: string[]; violationDetails?: string[] };
   /** `failed` and `undetermined` are what progress is measured by; `ok` cannot answer "did this cycle help". */
-  functional: { ran: boolean; ok: boolean; detail: string; failed?: number; undetermined?: number };
+  functional: { ran: boolean; ok: boolean; detail: string; failed?: number; undetermined?: number;
+    /** Checks that could not be attempted because of the build machine. Never charged to the model. */
+    environment?: number };
   visual: { ran: boolean; ok: boolean; detail: string; findings?: number };
   changedFiles: number;
   /** Did this cycle move anything? A cycle that fixes nothing does not earn another. */
@@ -386,9 +388,24 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
 
     // Model B does NOT get to say whether its own work is done. Each of these runs independently.
     const conf = checkConformance({ repo: d.ws.repo, manifest, baselinePackage: approvedPackage });
-    const rebuilt = await d.sandbox.argv(["npm", "run", "build"], undefined, "npm run build");
-    const visual = rebuilt.code !== 0
-      ? { ran: false, ok: false, detail: `the project no longer builds (exit ${rebuilt.code})` }
+    // Rebuild the way THIS project is built, which `planBuild` already decided at import time from the approved
+    // artifact. For a static site that answer is `null`: there is no build step, the document Model B just edited
+    // IS the servable site, and there is nothing to compile before measuring it.
+    //
+    // This used to run "npm run build" unconditionally. A static artifact -- a single self-contained HTML
+    // document, which is what the Founder uploads -- has no such script, npm exits 1 on a missing script, and the
+    // visual gate recorded "the project no longer builds" on every cycle of every build without ever rendering a
+    // page. Four real staging builds each stopped with exactly one visual finding that was a statement about npm
+    // and not about the website, and Model B was handed it as a defect to repair for up to 189 turns.
+    //
+    // Using the IMPORT-TIME plan rather than re-deciding here is deliberate: the design-locked pipeline must
+    // rebuild the approved website the same way the approved baseline was built, so a build step Model B invented
+    // mid-run cannot quietly change how the thing being measured is produced.
+    const rebuilt = built.plan.buildCommand
+      ? await d.sandbox.argv(built.plan.buildCommand, undefined, built.plan.buildCommand.join(" "))
+      : null;
+    const visual = rebuilt && rebuilt.code !== 0
+      ? { ran: false, ok: false, detail: `the project no longer builds (exit ${rebuilt.code}): ${(rebuilt.stderr || rebuilt.stdout).slice(-200).replace(/s+/g, " ").trim()}` }
       : await measureVisual(d, baseline, report, built.outputRoot, importOut, cycle, manifest);
     const functional = await runFunctional(d, manifest);
 
@@ -446,7 +463,12 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     previous = score;
     const next = nextPrompt(conf, functional, visual, cycle);
     if (!next) {
-      problems.push("the implementation does not pass, and there is nothing specific enough to ask for a repair of");
+      // Say which of the two this is. "Nothing specific enough to ask for" is true of a vague gate result; it is
+      // NOT true of a build machine that could not lend the build a port, and a person reading the evidence has
+      // to be able to tell a platform problem from an implementation that could not be described.
+      problems.push((functional.environment ?? 0) > 0
+        ? `the application could not be verified on this build machine (${functional.environment} check(s) could not be attempted): ${functional.detail}. This is a platform failure, not a failure of the generated website, and it was not sent to the model as a repair`
+        : "the implementation does not pass, and there is nothing specific enough to ask for a repair of");
       break;
     }
     prompt = next;
@@ -568,9 +590,9 @@ async function runFunctional(d: DesignLockedDeps, manifest: IntegrationManifest 
 
   // A model verifier that FAILED is evidence against, so it fails the gate even when the contract checks passed.
   if (authored && !corroborated && verdict.ok) {
-    return { ran: true, ok: false, detail: `${verdict.detail}${corroboration}`, failed: verdict.failed, undetermined: verdict.undetermined };
+    return { ran: true, ok: false, detail: `${verdict.detail}${corroboration}`, failed: verdict.failed, undetermined: verdict.undetermined, environment: verdict.environment };
   }
-  return { ran: full.ran, ok: full.ok, detail: `${full.detail}${corroboration}`, failed: full.failed, undetermined: full.undetermined };
+  return { ran: full.ran, ok: full.ok, detail: `${full.detail}${corroboration}`, failed: full.failed, undetermined: full.undetermined, environment: full.environment };
 }
 
 
@@ -644,6 +666,10 @@ function nextPrompt(conf: ConformanceReport, functional: CycleRecord["functional
   parts.push("");
   parts.push("**Do not change any visual design, markup structure, class name or style.** The frontend is approved and locked.");
   parts.push("");
+  // Where the preamble ends. The guard below used to be `parts.length > 5` against a preamble of SIX entries, so
+  // it could never return null and a brief was always sent -- including, once environment failures stopped
+  // producing a section, a repair brief whose body said nothing at all. Count sections, not lines.
+  const preamble = parts.length;
   if (!visual.ok) {
     parts.push("## The approved design no longer renders as approved");
     parts.push(visual.detail);
@@ -651,7 +677,11 @@ function nextPrompt(conf: ConformanceReport, functional: CycleRecord["functional
     parts.push("**Do this:** find the change that altered the rendering and undo that part of it, keeping the backend behaviour. Do not redesign the page to match: restore what was approved.");
     parts.push("");
   }
-  if (!functional.ok) {
+  // A functional gate that failed ONLY because of the build machine is not something a model can repair, and
+  // Phase 3 says not to ask it to. Staging asked anyway: a build whose port was held by a leaked server from an
+  // earlier cycle was handed "the application did not answer" as its own defect and spent 189 turns on it.
+  const implementationAtFault = (functional.failed ?? 0) > 0 || (functional.undetermined ?? 0) > 0;
+  if (!functional.ok && implementationAtFault) {
     parts.push("## It does not work");
     parts.push(functional.detail);
     parts.push("");
@@ -660,7 +690,7 @@ function nextPrompt(conf: ConformanceReport, functional: CycleRecord["functional
       : "**Do this:** write a runnable acceptance check that exercises each acceptance criterion against the real application, and make it pass. A criterion nobody can run is not satisfied.");
     parts.push("");
   }
-  return parts.length > 5 ? parts.join("\n") : null;
+  return parts.length > preamble ? parts.join("\n") : null;
 }
 
 function finish(out: DesignLockedResult): DesignLockedResult {

@@ -54,14 +54,18 @@ function fakeSandbox(o: {
   acceptanceCode?: number;
   /** Exit code of a verifier the model wrote, which is corroboration only. */
   modelAcceptanceCode?: number;
+  /** Make the driver report a build-machine problem rather than a result about the application. */
+  acceptanceEnvironment?: boolean;
   /** Called on each `npm run build`, so a test can mutate the repo the way a model would. */
   onBuild?: (n: number) => void;
 }) {
   const calls: string[] = [];
+  /** The exact argv of every command the job treated as a rebuild, so "none was run" is provable. */
+  const buildLabels: string[] = [];
   let builds = 0;
   const run = (code: number, stdout = "", stderr = "") => ({ code, stdout, stderr, timedOut: false, command: "fake" });
   return {
-    calls,
+    calls, buildLabels,
     async install() { calls.push("install"); return run(0); },
     async argv(argv: string[]) {
       const label = argv.join(" ");
@@ -78,6 +82,12 @@ function fakeSandbox(o: {
       // indistinguishable from a real driver that crashed.
       if (label.includes("contract-acceptance.mjs")) {
         calls.push("contract-acceptance");
+        if (o.acceptanceEnvironment) {
+          return run(1, JSON.stringify({ results: [{
+            id: "app:starts", ok: false, undetermined: true, environment: true,
+            detail: "the port the application was given (8099) was taken while it was starting, so it could not be exercised; this is an environment failure on the build machine and not a result about the application",
+          }] }));
+        }
         const results = o.acceptanceCode
           ? [{ id: "app:starts", ok: true, detail: "started" },
              { id: "POST /api/x :: refuses anonymous", ok: false, detail: "declared 401, answered 200" }]
@@ -91,6 +101,7 @@ function fakeSandbox(o: {
         return run(o.modelAcceptanceCode ?? 0, o.modelAcceptanceCode ? "2/10 checks passed" : "10/10 checks passed");
       }
       calls.push("build");
+      buildLabels.push(label);
       builds++;
       o.onBuild?.(builds);
       if ((o.buildCode ?? 0) !== 0) return run(o.buildCode!, "", "vite: command not found");
@@ -515,4 +526,79 @@ test("[DLJ-14] an undetermined check counts against the score, so resolving one 
   // A gate that reported no counts at all still scores: a failure is one, a pass is none.
   assert.equal(gateScore(true, [], { ran: false, ok: false, detail: "" }, { ran: false, ok: false, detail: "" }).functional, 1);
   assert.equal(gateScore(true, [], { ran: true, ok: true, detail: "" }, { ran: true, ok: true, detail: "" }).visual, 0);
+});
+
+// ── The static path ───────────────────────────────────────────────────────────────────────────────────────────
+//
+// WHY THIS FIXTURE EXISTS. Every test above this line uses `summit-haul-frontend`, a vite project with a build
+// script, so `npm run build` was always the right thing to run and the repair loop's hardcoded rebuild was never
+// questioned. The artifacts the Founder actually uploads are single self-contained HTML documents: no package
+// manifest, no build step, nothing to compile. That path had no test, and it was broken in the one place it
+// mattered — the rebuild between repair cycles — which is why four real staging builds each recorded exactly one
+// visual finding reading "the project no longer builds (exit 1)" when the website was fine and npm was simply
+// being asked for a script that a static site has no reason to own.
+const STATIC_FIXTURE = path.resolve(import.meta.dirname, "fixtures/vesper-rowe-law");
+const STATIC_ARCHIVE = zipDirectory(STATIC_FIXTURE, { prefix: "vesper-rowe-law" });
+const STATIC_SHA = createHash("sha256").update(STATIC_ARCHIVE).digest("hex");
+
+const staticArtifact = (): ApprovedArtifact => artifact({
+  framework: "static", archiveRoot: "vesper-rowe-law", sha256: STATIC_SHA,
+  sizeBytes: STATIC_ARCHIVE.length, base64: STATIC_ARCHIVE.toString("base64"),
+  filename: "01-vesper-rowe-law.zip",
+});
+
+const STATIC_MANIFEST: IntegrationManifest & ManifestContract = {
+  ...MANIFEST, artifactSha: STATIC_SHA,
+  operations: [{ ...MANIFEST.operations[0], page: "index", element: "form#consult" }],
+};
+
+test("[DLJ-15] a static site has nothing to rebuild, so the visual gate still runs", async () => {
+  const repo = path.join(tmp(), "repo");
+  // buildCode 1 is what npm really answers when asked for a script the project does not define, which is
+  // exactly what staging hit. A static site must reach its measurement anyway, because no build is owed.
+  const sandbox = fakeSandbox({ repo, buildCode: 1 });
+  const provider = fakeProvider({ repo, onCycle: () => writeConformingBackend(repo) });
+
+  const r = await runDesignLockedJob(deps({
+    repo, sandbox: sandbox as never, provider: provider as never,
+    fetchArtifact: async () => staticArtifact(), manifest: STATIC_MANIFEST,
+  }));
+
+  // The point of the test: the gate reached its own measurement instead of being refused by npm.
+  assert.equal(r.cycles.length >= 1, true, r.summary);
+  assert.doesNotMatch(r.cycles[0].visual.detail, /no longer builds/,
+    "a static site has no build script, and asking npm for one is not a fact about the website");
+  assert.equal(r.cycles[0].visual.ran, true, `the visual gate did not run: ${r.cycles[0].visual.detail}`);
+
+  // And it got there by not inventing a build step, rather than by tolerating a failing one.
+  assert.ok(!sandbox.buildLabels.includes("npm run build"),
+    `a static site was asked to build: ${sandbox.buildLabels.join(" | ")}`);
+});
+
+test("[DLJ-16] a build-machine failure is not sent to the model as a defect to repair", async () => {
+  // Phase 3: "Do not ask Model B to repair infrastructure failures outside its responsibility." Staging did ask.
+  // A leaked server from an earlier repair cycle held the one hardcoded port, the functional gate reported "the
+  // application did not answer", and that sentence was pasted into a repair brief under the heading "It does not
+  // work" -- for up to 189 turns, against an application that was fine.
+  const repo = path.join(tmp(), "repo");
+  const sandbox = fakeSandbox({ repo, acceptanceEnvironment: true });
+  const provider = fakeProvider({ repo, onCycle: () => writeConformingBackend(repo) });
+
+  const r = await runDesignLockedJob(deps({ repo, sandbox: sandbox as never, provider: provider as never }));
+
+  // Not a pass: nothing was verified, and an unverified gate is never a pass.
+  assert.equal(r.ok, false, "a build nobody could verify must not be accepted");
+  assert.equal(r.cycles[0].functional.ok, false);
+  assert.equal(r.cycles[0].functional.environment, 1, "the machine's failure is counted as the machine's");
+  assert.equal(r.cycles[0].functional.failed ?? 0, 0, "and not as the implementation's");
+
+  // The model was asked to build once, and never asked to repair the port.
+  assert.equal(provider.prompts.length, 1, provider.prompts.map((p) => p.slice(0, 80)).join(" || "));
+  for (const p of provider.prompts) {
+    assert.doesNotMatch(p, /It does not work/, "an environment problem is not an implementation defect");
+    assert.doesNotMatch(p, /did not answer|was taken while it was starting/, "and its text is not pasted into a brief");
+  }
+
+  // And a person reading the outcome is told it was the platform.
+  assert.match(r.problems.join(" "), /platform failure, not a failure of the generated website/, r.problems.join(" | "));
 });

@@ -34,6 +34,12 @@ export interface AcceptanceCheck {
   ok: boolean;
   /** True when the check could not be evaluated. Never counts as a pass. */
   undetermined?: boolean;
+  /**
+   * True when what went wrong is the BUILD MACHINE and not the implementation -- no port could be bound, the
+   * port was taken by something else. It never counts as a pass, and it is never charged to the model or put in
+   * a repair brief: asking a model to fix a busy port wastes a build, which is exactly what it did.
+   */
+  environment?: boolean;
   detail: string;
 }
 
@@ -123,10 +129,11 @@ export const DRIVER_SOURCE = String.raw`
 // Independent contract acceptance. Written by the Crestmont runner, not by the model under test.
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:net";
 
 const plan = JSON.parse(readFileSync(new URL("./plan.json", import.meta.url), "utf8"));
 const results = [];
-const add = (id, ok, detail, undetermined) => results.push({ id, ok, detail, ...(undetermined ? { undetermined: true } : {}) });
+const add = (id, ok, detail, undetermined, environment) => results.push({ id, ok, detail, ...(undetermined ? { undetermined: true } : {}), ...(environment ? { environment: true } : {}) });
 
 if (!plan.start) {
   add("app:starts", false, "the project has no start script and no server file, so the application could not be started", true);
@@ -134,13 +141,35 @@ if (!plan.start) {
   process.exit(1);
 }
 
-const base = "http://127.0.0.1:" + plan.port;
+// WHICH PORT. The plan names a preferred port; this asks the operating system whether it is actually free
+// before using it. It usually is. When it is not, an ephemeral port is used and the move is recorded, because
+// the alternative is what staging did: the job container lives for the whole build, so a server leaked by an
+// earlier repair cycle still held the one fixed port, a healthy application was reported as "did not answer"
+// with somebody else's EADDRINUSE, and that was handed to the model as its own defect to fix. A busy port is a
+// fact about this machine. It is never evidence about the website.
+const bindable = (p) => new Promise((resolve) => {
+  const probe = createServer();
+  probe.once("error", () => resolve(0));
+  probe.listen(p, "127.0.0.1", () => { const got = probe.address().port; probe.close(() => resolve(got)); });
+});
+let port = await bindable(plan.port);
+let portNote = "";
+if (!port) {
+  port = await bindable(0);
+  portNote = port ? " (the planned port " + plan.port + " was already in use on this machine, so " + port + " was used instead)" : "";
+}
+if (!port) {
+  add("app:starts", false, "no local port could be bound on this machine, so the application could not be started or probed; this is an environment failure and not a result about the application", true, true);
+  console.log(JSON.stringify({ results }));
+  process.exit(1);
+}
+const base = "http://127.0.0.1:" + port;
 // Its own process GROUP. npm run start is a wrapper: a signal sent to npm does not reliably reach the server npm
 // started, and that server keeps the port. Stopping the group stops what it started, which is what makes the
 // restart check below mean anything (and what stops a leftover server breaking the next run with EADDRINUSE).
 const SPAWN = {
   cwd: process.cwd(),
-  env: { ...process.env, PORT: String(plan.port), NODE_ENV: "test" },
+  env: { ...process.env, PORT: String(port), NODE_ENV: "test" },
   stdio: ["ignore", "pipe", "pipe"],
   shell: process.platform === "win32",
   detached: process.platform !== "win32",
@@ -173,9 +202,20 @@ for (let i = 0; i < 60 && !up; i++) {
 }
 
 if (!up) {
-  add("app:starts", false, "the application did not answer on port " + plan.port + " within 30s: " + log.slice(-400).replace(/\s+/g, " "));
+  // Three different causes used to produce one sentence. Say which: the model can repair the second, and must
+  // never be asked to repair the first or the third.
+  const tail = log.slice(-400).replace(/\s+/g, " ");
+  const elsewhere = [...log.matchAll(/(?:"port"\s*:\s*|port[ =:]+)(\d{2,5})/gi)]
+    .map((m) => Number(m[1])).find((p) => p !== port && p > 0);
+  if (/EADDRINUSE/.test(log)) {
+    add("app:starts", false, "the port the application was given (" + port + ") was taken while it was starting, so it could not be exercised; this is an environment failure on the build machine and not a result about the application: " + tail, true, true);
+  } else if (elsewhere) {
+    add("app:starts", false, "the application started but listened on port " + elsewhere + " instead of the PORT it was given (" + port + "); it must bind process.env.PORT so it can be served and probed: " + tail);
+  } else {
+    add("app:starts", false, "the application did not answer on port " + port + " within 30s" + portNote + ": " + tail);
+  }
 } else {
-  add("app:starts", true, "the application started and answered on port " + plan.port);
+  add("app:starts", true, "the application started and answered on port " + port);
 
   const body = (m) => (m === "GET" || m === "HEAD" ? undefined : JSON.stringify({}));
   const call = async (m, p, init) => {
@@ -343,7 +383,7 @@ if (!up) {
     for (let i = 0; i < 40 && !released; i++) { await sleep(250); released = await free(); }
     if (!released) {
       add("persistence:stops-cleanly", false,
-        "the application kept answering on port " + plan.port + " after being stopped, so a restart could not be tested (on a shell wrapper, a signal may not reach the server it started)", true);
+        "the application kept answering on port " + port + " after being stopped, so a restart could not be tested (on a shell wrapper, a signal may not reach the server it started)", true);
     }
 
     const again = spawn(plan.start[0], plan.start.slice(1), SPAWN);
@@ -448,19 +488,23 @@ export function writeAcceptanceResults(repo: string, checks: readonly Acceptance
  * see the boolean stops after one attempt believing nothing moved.
  */
 export function summarise(checks: readonly AcceptanceCheck[]): {
-  ran: boolean; ok: boolean; detail: string; passed: number; failed: number; undetermined: number;
+  ran: boolean; ok: boolean; detail: string; passed: number; failed: number; undetermined: number; environment: number;
 } {
   if (checks.length === 0) {
-    return { ran: false, ok: false, detail: "the independent acceptance driver produced no result, so nothing was verified", passed: 0, failed: 0, undetermined: 0 };
+    return { ran: false, ok: false, detail: "the independent acceptance driver produced no result, so nothing was verified", passed: 0, failed: 0, undetermined: 0, environment: 0 };
   }
-  const failed = checks.filter((c) => !c.ok && !c.undetermined);
-  const undetermined = checks.filter((c) => c.undetermined);
+  // An environment problem is still not a pass -- nothing was verified -- but it is not the implementation's
+  // fault and is counted apart from it, so the repair loop can tell the two cases apart.
+  const environment = checks.filter((c) => c.environment);
+  const failed = checks.filter((c) => !c.ok && !c.undetermined && !c.environment);
+  const undetermined = checks.filter((c) => c.undetermined && !c.environment);
   const passed = checks.filter((c) => c.ok);
-  if (failed.length === 0 && undetermined.length === 0) {
-    return { ran: true, ok: true, detail: `${passed.length} contract check(s) passed against the running application`, passed: passed.length, failed: 0, undetermined: 0 };
+  if (failed.length === 0 && undetermined.length === 0 && environment.length === 0) {
+    return { ran: true, ok: true, detail: `${passed.length} contract check(s) passed against the running application`, passed: passed.length, failed: 0, undetermined: 0, environment: 0 };
   }
   const parts: string[] = [];
   if (failed.length) parts.push(`${failed.length} failed: ${failed.slice(0, 4).map((c) => `${c.id} — ${c.detail}`).join("; ")}`);
   if (undetermined.length) parts.push(`${undetermined.length} could not be evaluated: ${undetermined.slice(0, 3).map((c) => `${c.id} — ${c.detail}`).join("; ")}`);
-  return { ran: true, ok: false, detail: `${passed.length} passed, ${parts.join(". ")}`, passed: passed.length, failed: failed.length, undetermined: undetermined.length };
+  if (environment.length) parts.push(`${environment.length} could not be attempted on this build machine: ${environment.slice(0, 3).map((c) => `${c.id} — ${c.detail}`).join("; ")}`);
+  return { ran: true, ok: false, detail: `${passed.length} passed, ${parts.join(". ")}`, passed: passed.length, failed: failed.length, undetermined: undetermined.length, environment: environment.length };
 }

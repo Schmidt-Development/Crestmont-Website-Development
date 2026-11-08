@@ -38,7 +38,7 @@ test("[ACC-01] undetermined is never a pass, and a driver that said nothing is n
   assert.deepEqual(summarise([]), {
     ran: false, ok: false,
     detail: "the independent acceptance driver produced no result, so nothing was verified",
-    passed: 0, failed: 0, undetermined: 0,
+    passed: 0, failed: 0, undetermined: 0, environment: 0,
   });
 
   const withUndetermined = summarise([
@@ -54,6 +54,19 @@ test("[ACC-01] undetermined is never a pass, and a driver that said nothing is n
     "and the counts say which, so a later cycle can be compared with this one",
   );
 
+  // A build-machine problem is also never a pass -- nothing was verified -- but it is counted apart from the
+  // implementation's failures, because the repair loop must not charge the model for a port it does not own.
+  const environment = summarise([
+    { id: "app:starts", ok: false, undetermined: true, environment: true, detail: "the port was taken while it was starting" },
+  ]);
+  assert.equal(environment.ok, false, "nothing was verified, so nothing passed");
+  assert.deepEqual(
+    { failed: environment.failed, undetermined: environment.undetermined, environment: environment.environment },
+    { failed: 0, undetermined: 0, environment: 1 },
+    "the machine's failure is the machine's, and is not charged to the implementation",
+  );
+  assert.match(environment.detail, /could not be attempted on this build machine/);
+
   const failing = summarise([
     { id: "app:starts", ok: true, detail: "started" },
     { id: "GET /api/x :: refuses anonymous", ok: false, detail: "declared 401, answered 200" },
@@ -66,7 +79,7 @@ test("[ACC-01] undetermined is never a pass, and a driver that said nothing is n
     { id: "app:starts", ok: true, detail: "started" },
     { id: "GET /api/x :: refuses anonymous", ok: true, detail: "401 as declared" },
   ]);
-  assert.deepEqual(passing, { ran: true, ok: true, detail: "2 contract check(s) passed against the running application", passed: 2, failed: 0, undetermined: 0 });
+  assert.deepEqual(passing, { ran: true, ok: true, detail: "2 contract check(s) passed against the running application", passed: 2, failed: 0, undetermined: 0, environment: 0 });
 });
 
 test("[ACC-02] the plan is derived from the contract and the project's own scripts, never invented", () => {
@@ -192,4 +205,53 @@ test("[ACC-07] the driver executes probes from the session the contract named, a
   assert.match(DRIVER_SOURCE, /no " \+ pr\.as \+ " session was obtained/, "and is undetermined when that session is missing");
   assert.match(DRIVER_SOURCE, /status === pr\.expect/, "judged against the declared status and nothing else");
   assert.ok(!/probes[\s\S]*ok: true/.test(DRIVER_SOURCE), "no probe result is assumed");
+});
+
+// ── The port the application is started on ────────────────────────────────────────────────────────────────────
+//
+// These two execute the real driver against a real server, because the defect they pin could not be seen in the
+// driver's text. Staging reported `app:starts` FAILED with "the application did not answer on port 8099" and an
+// EADDRINUSE from node:net, on a build whose application was fine: the job container is long-lived across repair
+// cycles, so a server leaked by an earlier cycle (the driver is killed by the command timeout before it can stop
+// the group it spawned) still held the one hardcoded port. Model B was then handed that as its own defect.
+test("[ACC-08] a port already in use is the environment's problem, not the application's", async () => {
+  const { createServer } = await import("node:net");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const repo = mkdtempSync(path.join(tmpdir(), "acc-port-"));
+
+  // An application that does the one thing every application must: listen on the PORT it was given.
+  writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "a", scripts: { serve: "node server.mjs" } }));
+  writeFileSync(path.join(repo, "server.mjs"), [
+    'import { createServer } from "node:http";',
+    'createServer((_q, s) => { s.writeHead(200, { "content-type": "text/html" }); s.end("<!doctype html>ok"); })',
+    '  .listen(Number(process.env.PORT), "127.0.0.1", () => console.log("listening on " + process.env.PORT));',
+  ].join("\n"));
+
+  const plan = acceptancePlan(repo, manifest({ projectConfig: { allowedNewScripts: ["serve"] } } as never));
+  assert.deepEqual(plan.start, ["npm", "run", "serve"], "the project's own script is what gets started");
+
+  // Hold the port the plan asked for, exactly as a leaked server from an earlier cycle would.
+  const squatter = createServer(() => {});
+  await new Promise<void>((r) => squatter.listen(plan.port, "127.0.0.1", () => r()));
+  try {
+    writeAcceptanceDriver(repo, plan);
+    const { stdout } = await promisify(execFile)(process.execPath, ["--no-warnings", DRIVER], { cwd: repo, timeout: 90_000 })
+      .catch((e: { stdout?: string }) => ({ stdout: e.stdout ?? "" }));
+    const starts = readAcceptanceOutput(stdout).find((c) => c.id === "app:starts");
+    assert.ok(starts, `the driver reported no app:starts: ${stdout.slice(0, 400)}`);
+    assert.equal(starts.ok, true, `a healthy application was failed because the port was taken: ${starts.detail}`);
+  } finally {
+    await new Promise<void>((r) => squatter.close(() => r()));
+  }
+});
+
+test("[ACC-09] an application that ignores PORT is told exactly that", () => {
+  // The same symptom text ("did not answer on port N") was also produced by an application that started
+  // perfectly and listened somewhere else -- staging logged {"port":32897} while the driver probed 8099. That is
+  // a real defect in the application, and a repairable one, but only if the report says which defect it is.
+  assert.match(DRIVER_SOURCE, /instead of the PORT it was given/,
+    "an application listening on the wrong port must be told that, not 'did not answer'");
+  assert.match(DRIVER_SOURCE, /EADDRINUSE/,
+    "and a port held by something else must be named as an environment problem, not the application's");
 });
