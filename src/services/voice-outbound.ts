@@ -155,6 +155,11 @@ export async function eligibility(db: Db, cfg: VoiceConfig, row: OutboundRow, at
   if (await isDnc(db, row.phone_e164)) return { eligible: false, terminal: true, reason: "number is on the do-not-call list" };
   const consent = await db.prepare(`SELECT 1 AS x FROM voice_call_consents WHERE phone_e164 = ? AND purpose = ? AND revoked_at IS NULL`).bind(row.phone_e164, row.purpose).first();
   if (!consent) return { eligible: false, terminal: true, reason: "consent for this purpose was revoked or never recorded" };
+  if (row.consultation_id) {
+    // A call about an appointment (e.g. a reminder) is never placed once that appointment is cancelled or over.
+    const appt = await db.prepare(`SELECT status FROM consultations WHERE id = ?`).bind(row.consultation_id).first<{ status: string }>();
+    if (!appt || !["requested", "confirmed"].includes(appt.status)) return { eligible: false, terminal: true, reason: "the appointment this call is about was cancelled or has ended" };
+  }
   const since = (h: number) => new Date(at.getTime() - h * 3_600_000).toISOString();
   // A call already linked to THIS request that has not ended is this request's in-flight attempt (Retell placed it, but
   // the create-phone-call response was lost and call_started arrived first): re-sending the same idempotency key cannot

@@ -7,7 +7,7 @@
 // job or a duplicate webhook never produces a second email. What happened to each message (queued, accepted by the
 // provider, delivered, bounced, suppressed) is recorded in email_deliveries like any other email.
 import type { Env } from "../app/context.ts";
-import { sendMail, type MailerCtx, type TemplateData } from "./mailer.ts";
+import { sendMail, type MailerCtx, type MailSpec, type SendMail, type TemplateData } from "./mailer.ts";
 
 export const INTERNAL_NOTIFY_EMAIL = "crestmontwebsitedevelopment@gmail.com";
 
@@ -27,5 +27,22 @@ export async function sendInternalNotification(
   key: string,
   data: TemplateData["internal_alert"],
 ) {
-  return sendMail(mail, { template: "internal_alert", to: internalNotifyEmail(mail.env ?? null), idempotencyKey: `internal:${kind}:${key}`.slice(0, 300), data });
+  return sendInternalTemplate(mail, kind, key, { template: "internal_alert", data });
 }
+
+/**
+ * The same internal mailbox and the same idempotency key as sendInternalNotification, for an internal event whose
+ * staff template carries more detail than internal_alert (e.g. founder_appointment). Because the key is shared, one
+ * business event can never produce both a detailed email and an internal_alert.
+ */
+export async function sendInternalTemplate(
+  mail: MailerCtx & { env?: Partial<Pick<Env, "INTERNAL_NOTIFY_EMAIL">> | null },
+  kind: InternalKind,
+  key: string,
+  spec: MailSpec,
+) {
+  return sendMail(mail, { ...spec, to: internalNotifyEmail(mail.env ?? null), idempotencyKey: internalNotifyKey(kind, key) } as SendMail);
+}
+
+/** The idempotency key every internal notification for one business event uses. */
+export const internalNotifyKey = (kind: InternalKind, key: string) => `internal:${kind}:${key}`.slice(0, 300);

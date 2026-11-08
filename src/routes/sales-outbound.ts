@@ -24,7 +24,7 @@ import { csrf, input, textarea, select, checkbox, button, formErrors, alert, bad
 import { publicLayout } from "../ui/layout.ts";
 import { staffPage } from "./crm.ts";
 import { readBody } from "./api.ts";
-import { founderDeps } from "./hooks.ts";
+import { appointmentDeps } from "./hooks.ts";
 import { RetellAuthError, signRetell } from "../adapters/retell.ts";
 import { verifyRetellWorkspace, retellKey } from "../adapters/retell-workspaces.ts";
 import { handleSalesFunction, openCheckoutLink, unsubscribeSalesEmail, SALES_LINK_COOKIE } from "../services/sales-functions.ts";
@@ -50,7 +50,7 @@ async function salesFunctions(ctx: AppContext): Promise<Response> {
     const mailCtx = { email: ctx.email, db: ctx.db, settings: ctx.settings };
     res = await handleSalesFunction(ctx.db, raw, ctx.url.searchParams.get("lead_id"), {
       mail: mailCtx, baseUrl: ctx.baseUrl, environment: ctx.env.ENVIRONMENT,
-      paymentsConfigured: ctx.payments.configured, now: ctx.env.overrides?.now, ...await founderDeps(ctx, mailCtx),
+      paymentsConfigured: ctx.payments.configured, now: ctx.env.overrides?.now, ...appointmentDeps(ctx, mailCtx),
     });
   } catch (e) {
     if (e instanceof SyntaxError) return jsonResponse(ctx, 422, { message: "Body is not valid JSON" });

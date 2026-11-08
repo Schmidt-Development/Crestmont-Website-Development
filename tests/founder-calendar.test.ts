@@ -1,6 +1,8 @@
 // Internal Founder Calendar (Founder directive 2026-11-06): the authoritative scheduling system — request-only, real
 // availability from the Founder's configured windows and existing bookings, no overlaps, the Founder's confirmation
 // step, and one Resend notification per new, rescheduled and cancelled appointment. No external calendar is used.
+// Founder directive 2026-11-08: that notification goes to the internal operations mailbox
+// (crestmontwebsitedevelopment@gmail.com), no longer to the Founder's personal address.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, TEST_PASSWORD } from "./support/app.ts";
@@ -8,13 +10,15 @@ import type { Env } from "../src/app/context.ts";
 import { signRetell } from "../src/adapters/retell.ts";
 import { defaultVoiceConfig, saveVoiceConfig, type VoiceConfig } from "../src/services/voice-settings.ts";
 import * as sched from "../src/services/voice-scheduling.ts";
-import { founderAppointmentChanged, founderNotifyEmail, DEFAULT_FOUNDER_NOTIFY_EMAIL, type FounderDeps } from "../src/services/founder-notifications.ts";
+import { founderAppointmentChanged, appointmentChanged, type FounderDeps } from "../src/services/appointment-notifications.ts";
+import { internalNotifyEmail, INTERNAL_NOTIFY_EMAIL } from "../src/services/internal-notify.ts";
 import { promptBehaviourFindings } from "../src/services/retell-inbound-audit.ts";
 import { OutboxEmail } from "../src/adapters/email.ts";
 import { routeCalendar } from "../src/domain/calendars.ts";
 
 const KEY = "key_test_founder_cal_inbound_01";
 const NOW = new Date("2026-11-02T14:00:00Z"); // Monday 09:00 ET
+const count = async (db: Env["DB"], sql: string, ...b: unknown[]) => (await db.prepare(sql).bind(...b).first<{ n: number }>())!.n;
 const ROUTE = { calendar: "founder_callback" as const, founderReason: "customer_requested_founder" as const };
 
 function cfg(): VoiceConfig {
@@ -34,7 +38,7 @@ async function app() {
   await saveVoiceConfig(t.db, owner.id, cfg());
   const deps: FounderDeps = { db: t.db, env: {}, mail: { email: new OutboxEmail(t.db), db: t.db, settings: {} }, baseUrl: "https://crestmont.test" };
   const mails = async (event?: string) => (await t.db.prepare(`SELECT COUNT(*) AS n FROM email_deliveries WHERE template = 'founder_appointment' AND to_email = ?${event ? " AND idempotency_key LIKE ?" : ""}`)
-    .bind(DEFAULT_FOUNDER_NOTIFY_EMAIL, ...(event ? [`%:${event}`] : [])).first<{ n: number }>())!.n;
+    .bind(INTERNAL_NOTIFY_EMAIL, ...(event ? [`%:${event}`] : [])).first<{ n: number }>())!.n;
   const c = t.client();
   const call = async (id: string, name: string, args: Record<string, unknown>, from = "+16145559001") => {
     const body = JSON.stringify({ name, call: { call_id: id, call_type: "phone_call", from_number: from, to_number: "+16145559999", direction: "inbound" }, args });
@@ -73,7 +77,7 @@ test("[VOICE-003] no overlapping Founder appointments, even under concurrent boo
   await assert.rejects(sched.book(t.db, cfg(), NOW, sched.NO_CALENDAR, { name: "Late", phone: "+16145550399", startsAt: "2026-11-03T20:00:00.000Z", leadId: null, callId: null, isTest: true, source: "ai_receptionist", calendar: ROUTE }), sched.SlotUnavailableError);
 });
 
-test("[VOICE-003] [EMAIL-002] the Founder is emailed once per new, rescheduled and cancelled appointment, with prospect, business, time, contact, reason and CRM context", async () => {
+test("[VOICE-003] [EMAIL-002] the internal mailbox is emailed once per new, rescheduled and cancelled Founder appointment, with prospect, business, time, contact, reason and CRM context", async () => {
   const t = await app();
   // The receptionist books a Founder appointment because the caller asked for the Founder.
   const ask = await t.call("c_f1", "schedule_consultation", { wants_founder: true });
@@ -96,6 +100,8 @@ test("[VOICE-003] [EMAIL-002] the Founder is emailed once per new, rescheduled a
   assert.equal(cx.cancelled, true);
   assert.equal(await t.mails("cancelled"), 1);
   assert.equal(await t.mails(), 3);
+  assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM email_deliveries WHERE to_email = 'noahschmidt10@gmail.com'`), 0, "nothing goes to the Founder's personal address any more");
+  assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM email_deliveries WHERE to_email = ? AND template = 'internal_alert'`, INTERNAL_NOTIFY_EMAIL), 0, "one email per event: no second internal_alert beside the Founder appointment email");
   // Content: rendered from the template with the required fields.
   const { renderTemplate } = await import("../src/services/mailer.ts");
   const r = renderTemplate("founder_appointment", { event: "booked", prospect: "Fay Prospect", business: "Fay's Bakery", when: "Tuesday, November 3 at 10:00 AM EST", timeZone: "America/New_York", durationMinutes: 30,
@@ -103,13 +109,20 @@ test("[VOICE-003] [EMAIL-002] the Founder is emailed once per new, rescheduled a
   for (const must of ["Fay Prospect", "Fay's Bakery", "November 3", "America/New_York", "+16145559001", "fay@example.com", "Custom portal", "Interest: custom", "/staff/crm/leads/ld_x"]) assert.ok(r.text.includes(must) || r.html.includes(must), must);
 });
 
-test("[VOICE-003] AI Outbound Calendar appointments never email the Founder; the notification address defaults to the Founder's and can be overridden", async () => {
+test("[VOICE-003] AI Outbound Calendar appointments never send the Founder appointment email (they get the internal_alert); the internal mailbox can be overridden for tests", async () => {
   const t = await app();
   const { booking } = await sched.book(t.db, cfg(), NOW, sched.NO_CALENDAR, { name: "AI cb", phone: "+16145550401", startsAt: "2026-11-03T18:00:00.000Z", leadId: null, callId: null, isTest: true, source: "ai_receptionist" });
   await founderAppointmentChanged(t.deps, booking.id, "booked");
   assert.equal(await t.mails(), 0);
-  assert.equal(founderNotifyEmail({}), DEFAULT_FOUNDER_NOTIFY_EMAIL);
-  assert.equal(founderNotifyEmail({ FOUNDER_NOTIFY_EMAIL: " Other@Example.com " }), "other@example.com");
+  await appointmentChanged(t.deps, booking.id, "booked");
+  assert.equal(await t.mails(), 0, "still no Founder appointment email for an AI appointment");
+  assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM email_deliveries WHERE template = 'internal_alert' AND to_email = ?`, INTERNAL_NOTIFY_EMAIL), 1);
+  assert.equal(internalNotifyEmail({}), "crestmontwebsitedevelopment@gmail.com");
+  assert.equal(internalNotifyEmail({ INTERNAL_NOTIFY_EMAIL: " Other@Example.com " }), "other@example.com");
+  // The override reaches the appointment email too.
+  const other: FounderDeps = { ...t.deps, env: { INTERNAL_NOTIFY_EMAIL: "ops-test@example.com" } };
+  await appointmentChanged(other, booking.id, "cancelled");
+  assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM email_deliveries WHERE to_email = 'ops-test@example.com'`), 1);
 });
 
 test("[VOICE-004] Retell prompt audit: 24/7 selling, after-hours conflicts, intake and Founder-on-request are judged from the live text", () => {

@@ -123,7 +123,9 @@ export interface TemplateData {
   consultation: { event: "requested" | "confirmed" | "rescheduled" | "cancelled"; name: string; when: string; code: string };
   /** Founder alert: an appointment with the Founder was requested, moved or cancelled (internal Founder Calendar). */
   founder_appointment: { event: "booked" | "rescheduled" | "cancelled"; prospect: string; business: string | null; when: string; timeZone: string; durationMinutes: number;
-    contact: string; reason: string; salesContext: string | null; status: string; reference: string; crmUrl: string | null; test: boolean };
+    contact: string; reason: string; salesContext: string | null; status: string; reference: string; crmUrl: string | null; test: boolean;
+    /** What to prepare before the call (appointment-notifications.ts). Optional so older call sites still type-check. */
+    preparation?: string | null };
   /** Staff alert: the AI receptionist escalated a call that could not be transferred live (CREST-GAP-053). */
   voice_escalation: { reason: string; caller: string; why: "outside_hours" | "no_transfer" | "unavailable"; test: boolean; url: string };
   /** Sent to the NEW address of a requested account email change (CREST-GAP-073); the change applies only after confirmation. */
@@ -631,7 +633,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
   },
   founder_appointment: {
     name: "founder_appointment", category: "transactional", audience: "staff",
-    description: "Founder alert: a prospect's appointment with the Founder (requested only when the prospect asked for the Founder) was booked, moved or cancelled.",
+    description: "Founder Calendar alert to the internal operations mailbox: a prospect's appointment with the Founder (requested only when the prospect asked for the Founder) was booked, moved or cancelled.",
     render: (d) => {
       const what = d.event === "booked" ? (d.status === "requested" ? "requested — confirm or decline it" : "booked") : d.event === "rescheduled" ? "moved" : "cancelled";
       return {
@@ -643,12 +645,13 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
           `Reason: ${d.reason}`,
           ...(d.salesContext ? [`Sales context: ${d.salesContext}`] : []),
           `Reference ${d.reference}. ${d.status === "requested" && d.event !== "cancelled" ? "It holds the slot until you confirm it on the receptionist operations page." : ""}`.trim(),
+          ...(d.preparation && d.event !== "cancelled" ? [`To prepare: ${d.preparation}`] : []),
         ],
         ...(d.crmUrl ? { cta: { label: "Open the CRM record", url: d.crmUrl } } : {}),
       };
     },
     samples: [
-      { event: "booked", prospect: "Morgan Hale", business: "Hale Bakery", when: "Tuesday, November 3 at 10:00 AM EST", timeZone: "America/New_York", durationMinutes: 30, contact: "+15550100123 · morgan@example.com", reason: "Wants to talk to the Founder about a custom portal", salesContext: "Interest: custom", status: "requested", reference: "K7MP4Q", crmUrl: "https://example.com/staff/crm/leads/ld_sample", test: false },
+      { event: "booked", prospect: "Morgan Hale", business: "Hale Bakery", when: "Tuesday, November 3 at 10:00 AM EST", timeZone: "America/New_York", durationMinutes: 30, contact: "+15550100123 · morgan@example.com", reason: "Wants to talk to the Founder about a custom portal", salesContext: "Interest: custom", status: "requested", reference: "K7MP4Q", crmUrl: "https://example.com/staff/crm/leads/ld_sample", test: false, preparation: "Review the CRM record and the latest call summary before you call." },
       { event: "cancelled", prospect: "Morgan Hale", business: null, when: "Tuesday, November 3 at 10:00 AM EST", timeZone: "America/New_York", durationMinutes: 30, contact: "+15550100123", reason: "—", salesContext: null, status: "cancelled", reference: "K7MP4Q", crmUrl: null, test: true },
     ],
   },
