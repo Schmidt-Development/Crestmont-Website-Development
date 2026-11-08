@@ -1,6 +1,7 @@
 // FD-16 (Founder decision, 2026-11): the Founder may authorize a documented launch/payment exception through an
 // authenticated, MFA-protected workflow. It waives only unpaid scheduled milestones; never approvals, change orders or
 // simulated payments; it is revocable. TEST DATA only.
+import { satisfyLaunchGate } from "./support/launch-gate.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff } from "./support/app.ts";
@@ -25,6 +26,9 @@ async function nearlyReady(db: Env["DB"], approver: string) {
     await db.prepare(`INSERT INTO approvals (id, project_id, kind, decision, decided_by, created_at) VALUES (?,?,?, 'approved', ?, ?)`).bind(newId("apv"), pid, kind, approver, nowIso()).run();
   }
   await db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, created_at) VALUES (?, 'user', 'project.status_changed', 'project', ?, '{"to":"customer_review"}', ?)`).bind(approver, pid, nowIso()).run();
+  // The maintenance launch gate is satisfied: these tests are about the FD-16 milestone exception, which never waives
+  // it (proved below in [PAY-006] "the exception never waives the maintenance agreement or first payment").
+  await satisfyLaunchGate(db, pid);
   return { pid, cu };
 }
 
@@ -97,4 +101,17 @@ test("[PAY-006] FD-16: the route is Owner-only and requires a fresh second facto
   assert.doesNotMatch(await (await pmc.get(`/staff/projects/${pid}?tab=approvals`)).text(), /data-testid="payment-exception"/);
   assert.equal((await oc.post(`/staff/projects/${pid}/payment-exception`, { intent: "grant", reason: "Customer agreed in writing to pay within 7 days of launch (TEST DATA)" })).status, 303);
   assert.equal((await releaseReadiness(t.db, pid)).ready, true);
+});
+
+test("[PAY-006] FD-16: the exception never waives the maintenance agreement or the verified first maintenance payment", async () => {
+  const t = await createTestApp();
+  const owner = await createStaff(t.db, "owner");
+  const { pid } = await nearlyReady(t.db, owner.id);
+  await grantPaymentException(t.db, staffActor(owner, "owner"), pid, "Customer agreed in writing to pay both milestones within 7 days of launch (TEST DATA)");
+  assert.equal((await releaseReadiness(t.db, pid)).ready, true);
+  // Take the maintenance steps away: the first payment is refunded. The exception does not cover it.
+  await t.db.prepare(`UPDATE subscription_initial_payments SET reversed_at = ?, reversal_reason = 'refunded'`).bind(nowIso()).run();
+  const r = await releaseReadiness(t.db, pid);
+  assert.equal(r.ready, false);
+  assert.deepEqual(r.missing, ["maintenance:initial_payment_not_verified"]);
 });

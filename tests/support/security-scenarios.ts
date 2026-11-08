@@ -1,9 +1,10 @@
 // Success scenarios for every audited route in the inventory (EMP-002), and valid form bodies for every
 // customer POST (reused by the tenant-isolation and fuzz tests). Each scenario performs the action
 // for real, so the matrix can prove the audit row it writes. Every record created here is TEST DATA.
-import { createCustomer, TEST_PASSWORD, type TestClient } from "./app.ts";
+import { createCustomer, createStaff, TEST_PASSWORD, type TestClient } from "./app.ts";
 import { pdf, png, zip, type World, type Tenant } from "./security-world.ts";
 import { pathFor } from "./security-helpers.ts";
+import { satisfyLaunchGate } from "./launch-gate.ts";
 import { ROUTE_INVENTORY } from "./route-inventory.ts";
 import { newId, nowIso } from "../../src/lib/db.ts";
 import { createPackageOrder, createQuoteOrder } from "../../src/services/commerce.ts";
@@ -19,6 +20,7 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /portal/notifications/read": () => ({}),
     "POST /portal/projects/:id/onboarding": () => ({ intent: "draft", business_name: `${t.marker} onboarding answer 2` }),
     "POST /portal/projects/:id/website/decision": () => ({ decision: "approved", note: `${t.marker} looks right` }),
+    "POST /portal/projects/:id/maintenance-agreement": () => ({ agree: "1" }),
     "POST /portal/files": () => ({ file: pdf(`${t.marker}-upload.pdf`), folder: "Uploads", project_id: t.ids.project! }),
     "POST /portal/projects/:id/files": () => ({ file: pdf(`${t.marker}-project-upload.pdf`) }),
     "POST /portal/files/:id/replace": () => ({ file: pdf(`${t.marker}-v2.pdf`) }),
@@ -175,6 +177,13 @@ export function auditScenarios(w: World): Scenario[] {
           customer_reviewed_at = NULL, customer_decision = NULL WHERE id = ?`)
         .bind(at, w.staff.owner.id, w.ids.websiteDelivery).run();
     } }),
+    // Signing the maintenance agreement needs an open maintenance activation (the website is ready for review), and
+    // must not already be signed for this project.
+    cust("POST /portal/projects/:id/maintenance-agreement", { setup: async () => {
+      await w.db.prepare(`DELETE FROM agreement_acceptances WHERE organization_id = ? AND context_type = 'maintenance_agreement'`).bind(a.ids.org).run();
+      await w.db.prepare(`INSERT OR IGNORE INTO maintenance_activations (id, organization_id, project_id, order_id, plan_id, status, trigger, opened_at, created_at, updated_at)
+        SELECT 'mact_matrix_a', organization_id, id, order_id, 'essential', 'due', 'ready_for_review', ?, ?, ? FROM projects WHERE id = ?`).bind(nowIso(), nowIso(), nowIso(), a.ids.project).run();
+    } }),
     cust("POST /portal/files"),
     cust("POST /portal/projects/:id/files"),
     cust("POST /portal/files/:id/move"),
@@ -300,6 +309,7 @@ export function auditScenarios(w: World): Scenario[] {
           await w.db.prepare(`INSERT INTO approvals (id, project_id, kind, decision, decided_by, notes, created_at) VALUES (?,?,?, 'approved', ?, 'fixture', ?)`).bind(newId("apv"), pid, kind, s.owner.id, nowIso()).run();
         }
         await w.db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, created_at) VALUES (?, 'user', 'project.status_changed', 'project', ?, '{"to":"customer_review"}', ?)`).bind(s.owner.id, pid, nowIso()).run();
+        await satisfyLaunchGate(w.db, pid); // maintenance agreement + verified first payment (launch-gate.ts)
       } },
     { key: "POST /staff/projects/:id/handoff", path: () => P(w, "POST /staff/projects/:id/handoff"), fields: () => ({ intent: "draft", website_url: "https://a.matrix.example", documentation: "Editing guide" }) },
     { key: "POST /staff/projects/:id/costs", path: () => P(w, "POST /staff/projects/:id/costs"), fields: () => ({ category: "hosting", amount: "12.50", description: "Hosting October", incurred_on: day(-2) }) },
@@ -394,6 +404,10 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/employees/:id/role", fields: () => ({ role: "project_manager" }) },
     { key: "POST /staff/employees/:id/disable", fields: () => ({ reason: "Left the company" }) },
     { key: "POST /staff/employees/:id/enable" },
+    // Removing an employee: a person created just for this, so the shared world's staff keep their access.
+    { key: "POST /staff/employees/:id/remove", fields: () => ({ reason: "Left the company", confirm: "REMOVE" }), path: () => `/staff/employees/${x.removable}/remove`, setup: async () => {
+      x.removable = (await createStaff(w.db, "developer", `removable-${Math.random().toString(16).slice(2, 8)}@crestmont.test`)).id;
+    } },
     { key: "POST /staff/employees/:id/mfa-reset" },
     { key: "POST /staff/employees/:id/profile", fields: () => ({ job_title: "Front-end developer", weekly_capacity_hours: "30" }) },
     // CREST-GAP-041: a disabled person's queued work is ended from the offboarding queue.
@@ -786,8 +800,12 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/builds/:id/prepare-release", fields: () => ({ customer_review_na: "Owner-managed site; customer reviewed in a meeting." }), setup: async () => {
       await w.db.prepare(`UPDATE build_jobs SET state = 'canceled' WHERE project_id = ? AND id <> ? AND state = 'approved'`).bind(a.ids.project, w.ids.buildJob).run();
       await w.db.prepare(`UPDATE build_jobs SET state = 'approved', approved_at = ?, source_repo = 'https://github.com/crestmont-builds/matrix', source_commit = 'def5678', customer_preview_shared_at = NULL WHERE id = ?`).bind(nowIso(), w.ids.buildJob).run();
+      await w.db.prepare(`UPDATE projects SET status = 'final_approval' WHERE id = ?`).bind(a.ids.project).run();
+      await satisfyLaunchGate(w.db, a.ids.project!); // maintenance agreement + verified first payment (launch-gate.ts)
     } },
     { key: "POST /staff/builds/releases/:id/authorize", setup: async () => {
+      await w.db.prepare(`UPDATE projects SET status = 'final_approval' WHERE id = ?`).bind(a.ids.project).run();
+      await satisfyLaunchGate(w.db, a.ids.project!);
       await w.db.prepare(`UPDATE site_deployments SET state = 'canceled' WHERE project_id = ? AND state IN ('prepared','authorized','deploying')`).bind(a.ids.project).run();
       const t = await w.db.prepare(`SELECT id, worker_name, hostname FROM site_targets WHERE project_id = ?`).bind(a.ids.project).first<{ id: string; worker_name: string; hostname: string | null }>();
       x.siteWorker = t!.worker_name;

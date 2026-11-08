@@ -121,6 +121,41 @@ export async function setStaffDisabled(db: Db, actor: { userId: string; isOwner:
   return out;
 }
 
+/**
+ * Remove an employee from Crestmont (Founder directive 2026-11-08). Access is REVOKED, nothing is deleted:
+ *   - the staff membership is removed, so every staff route refuses them on their very next request, and every session
+ *     is revoked as well (a previously issued cookie stops working);
+ *   - their open work is unassigned and flagged "owner disabled" in the offboarding records, so coordinators see it and
+ *     reassign it (nothing is silently dropped);
+ *   - the user identity is kept. If the person also belongs to another organisation (e.g. a customer account), that
+ *     access is untouched; otherwise the account is disabled so it cannot sign in at all;
+ *   - audit history, completed work, time logs and financial records are preserved.
+ * Only staff with employee.manage may remove employees, nobody may remove themselves, only an Owner may remove an
+ * Owner, and the last active Owner can never be removed.
+ */
+export async function removeEmployee(db: Db, actor: { userId: string; isOwner: boolean }, targetUserId: string, reason: string, ip: string | null = null): Promise<{ ended: number; keptIdentity: boolean; email: string }> {
+  if (targetUserId === actor.userId) throw new EmployeeError("You cannot remove your own account.", 403);
+  const m = await staffMembership(db, targetUserId);
+  if (!m) throw new EmployeeError("Staff member not found.", 404);
+  if (m.role_id === "owner") {
+    if (!actor.isOwner) throw new EmployeeError("Only an Owner can remove another Owner.", 403);
+    const others = (await db.prepare(`SELECT COUNT(*) AS n FROM memberships m JOIN organizations o ON o.id = m.organization_id JOIN users u ON u.id = m.user_id
+        WHERE o.kind = 'internal' AND m.role_id = 'owner' AND u.disabled_at IS NULL AND m.user_id <> ?`).bind(targetUserId).first<{ n: number }>())?.n ?? 0;
+    if (others === 0) throw new EmployeeError("The last active Owner cannot be removed. Add another Owner first.", 409);
+  }
+  if (reason.trim().length < 3) throw new EmployeeError("Give a short reason for removing this employee.");
+  // Work first, while the person is still identifiable as its owner; then access.
+  const off = await startOffboarding(db, actor.userId, targetUserId, "end");
+  await revokeAllSessions(db, targetUserId, null, actor.userId);
+  await db.prepare(`DELETE FROM memberships WHERE id = ?`).bind(m.id).run();
+  const other = await db.prepare(`SELECT 1 FROM memberships WHERE user_id = ? LIMIT 1`).bind(targetUserId).first();
+  if (!other) await db.prepare(`UPDATE users SET disabled_at = COALESCE(disabled_at, ?) WHERE id = ?`).bind(nowIso(), targetUserId).run();
+  await securityEvent(db, "employee_removed", { userId: targetUserId, ip, detail: `by ${actor.userId}` });
+  await audit(db, { actorUserId: actor.userId, action: "employee.removed", subjectType: "user", subjectId: targetUserId, organizationId: m.organization_id, ip,
+    details: { role: m.role_id, reason: reason.trim().slice(0, 300), assignmentsEnded: off.ended, keptIdentity: !!other } });
+  return { ended: off.ended, keptIdentity: !!other, email: m.email };
+}
+
 export async function revokeInvitation(db: Db, byUserId: string, invitationId: string): Promise<void> {
   const res = await db.prepare(`UPDATE invitations SET expires_at = ? WHERE id = ? AND accepted_at IS NULL AND role_id <> 'owner' AND expires_at > ?`).bind(nowIso(), invitationId, nowIso()).run();
   if (res.meta.changes !== 1) throw new EmployeeError("Invitation not found or no longer pending.", 404);

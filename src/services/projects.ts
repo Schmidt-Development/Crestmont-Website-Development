@@ -2,6 +2,7 @@
 // All lifecycle changes go through the validated state machine in src/domain/project.ts.
 import type { AppContext } from "../app/context.ts";
 import { openMaintenanceActivation } from "./maintenance-lifecycle.ts";
+import { launchEligibility, assertLaunchAllowed } from "./launch-gate.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { customerReviewDeadline } from "../lib/business-time.ts";
@@ -130,6 +131,12 @@ export async function changeProjectStatus(ctx: Ctx | MailCtx, projectId: string,
     .bind(to, to === "paused" ? from : null, at, to, at, to, actor.actorUserId ?? null, to, actor.note ?? null, projectId, from).run();
   if (res.meta.changes !== 1) throw new HttpError(409, "The project changed while you were editing. Reload and try again.");
   await audit(db, { actorUserId: actor.actorUserId ?? null, actorKind: actor.actorKind, action: to === "paused" ? "project.paused" : "project.status_changed", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { from, to, note: actor.note } });
+  // Founder directive 2026-11-08: the website is ready for the customer's review, so the maintenance activation opens
+  // now -- the agreement and the first payment come before launch (launch-gate.ts). Idempotent per project.
+  if (to === "customer_review") {
+    const mail = "email" in ctx && "baseUrl" in ctx ? (ctx as unknown as Parameters<typeof openMaintenanceActivation>[1]) : null;
+    await openMaintenanceActivation(db, mail, projectId, "ready_for_review");
+  }
   await notifyCustomer(ctx, projectId, { kind: "project_status",
     mail: to === "paused" ? { template: "project_update", data: { event: "paused", note: actor.note ?? null } }
       : to === "completed" ? { template: "project_completion", data: {} }
@@ -315,6 +322,10 @@ export async function releaseReadiness(db: Db, projectId: string): Promise<{ rea
   // A project paid by the test-only payment simulation can never be released (migration 0059).
   const simulated = !!(await db.prepare(`SELECT 1 FROM payments pay JOIN projects pr ON pr.order_id = pay.order_id WHERE pr.id = ? AND pay.provider = 'simulated' LIMIT 1`).bind(projectId).first());
   if (simulated) missing.push("payment:simulated_test_payment");
+  // Founder directive 2026-11-08: the signed maintenance agreement and the Stripe-verified first subscription payment
+  // are required before launch, on every path that uses this readiness (src/services/launch-gate.ts).
+  const launch = await launchEligibility(db, projectId);
+  for (const m of launch.missing) if (m !== "maintenance:website_not_ready_for_review") missing.push(m);
   if (!reviewed) missing.push("customer_review");
   if (openChangeOrders) missing.push("payment:change_order");
   const latest = (k: string) => { const r = approvals.filter((a) => a.kind === k).at(-1); return r ? r.decision : null; };
@@ -332,7 +343,9 @@ export async function releaseReadiness(db: Db, projectId: string): Promise<{ rea
     { key: "payment_verified", label: "6. Required payment verification", ok: !paymentMissing && !openChangeOrders && !simulated,
       detail: simulated ? "Paid by a SIMULATED test payment: this project can never be released" : paymentMissing ? `Unpaid: ${paymentMissing.slice(8).split(",").join(", ")}` : openChangeOrders ? `${openChangeOrders} change-order invoice(s) unpaid`
         : exception ? `Founder payment exception in force: ${exception.reason}` : "All required invoices paid" },
-    check("deployment_authorized", "7. Deployment authorization"),
+    { key: "maintenance_launch_gate", label: "7. Maintenance agreement signed and first subscription payment verified", ok: launch.eligible || launch.missing.every((m) => m === "maintenance:website_not_ready_for_review"),
+      detail: launch.steps.filter((s) => s.key !== "ready_for_review").map((s) => `${s.label}: ${s.done ? "done" : s.detail}`).join(" · ") },
+    check("deployment_authorized", "8. Deployment authorization"),
   ];
   return { ready: missing.length === 0, missing, checks };
 }
@@ -385,6 +398,8 @@ export async function saveHandoff(ctx: MailCtx, actor: Actor, projectId: string,
     const missing = (["website_url", "documentation", "access_instructions", "ownership_notes", "training_notes"] as const).filter((k) => !h[k].trim());
     if (missing.length) throw new HttpError(422, `Complete every handoff section before publishing: ${missing.join(", ").replace(/_/g, " ")}`);
   }
+  // Publishing the handoff hands the live website over, so it is a release path like any other (launch-gate.ts).
+  if (publish) await assertLaunchAllowed(ctx.db, projectId);
   const at = nowIso();
   await ctx.db.prepare(`INSERT INTO handoffs (project_id, website_url, documentation, access_instructions, ownership_notes, training_notes, documentation_file_id, published_at, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET website_url = excluded.website_url, documentation = excluded.documentation, access_instructions = excluded.access_instructions,

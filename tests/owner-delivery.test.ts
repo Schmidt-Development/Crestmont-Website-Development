@@ -1,5 +1,6 @@
 // Owner command-center delivery modules (projects, tasks, employees, notifications) exercised through
 // the real request pipeline. All records created here are TEST DATA.
+import { satisfyLaunchGate } from "./support/launch-gate.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer, TEST_PASSWORD, type TestClient } from "./support/app.ts";
@@ -111,6 +112,8 @@ test("[PM-007] project closure checklist blocks completion until tasks, invoices
 
   await t.db.prepare(`UPDATE tasks SET status = 'done' WHERE id = ?`).bind(open).run();
   await t.db.prepare(`UPDATE invoices SET status = 'paid' WHERE project_id = ?`).bind(pid).run();
+  // A launched website has its signed maintenance agreement and verified first payment (launch-gate.ts).
+  await satisfyLaunchGate(t.db, pid);
   assert.equal((await pm.c.post(`/staff/projects/${pid}/handoff`, { intent: "publish", website_url: "https://close.example", documentation: "Docs", access_instructions: "Shared vault", ownership_notes: "Registrar in customer name", training_notes: "Recorded session" })).status, 303);
   const done = await pm.c.post(`/staff/projects/${pid}/status`, { to: "completed", note: "Delivered and handed over." });
   assert.equal(done.status, 303);
@@ -121,6 +124,8 @@ test("[PM-007] project closure checklist blocks completion until tasks, invoices
   assert.equal(row.closure_notes, "Delivered and handed over.");
   assert.match(await (await pm.c.get(`/staff/projects/${pid}?tab=approvals`)).text(), /not yet recorded by the customer/);
 
+  // Maintenance needs a plan that is still in force: with the subscription cancelled, the move is refused.
+  await t.db.prepare(`UPDATE subscriptions SET status = 'canceled' WHERE organization_id = ?`).bind(cust.organizationId).run();
   assert.equal((await pm.c.post(`/staff/projects/${pid}/status`, { to: "maintenance" })).status, 409);
   await t.db.prepare(`INSERT INTO subscriptions (id, organization_id, product_id, status, created_at, updated_at) VALUES (?,?, 'essential', 'active', ?, ?)`).bind(newId("sub"), cust.organizationId, nowIso(), nowIso()).run();
   assert.equal((await pm.c.post(`/staff/projects/${pid}/status`, { to: "maintenance" })).status, 303);

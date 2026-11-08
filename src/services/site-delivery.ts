@@ -15,6 +15,7 @@
 
 import type { Db } from "../lib/db.ts";
 import { openMaintenanceActivation } from "./maintenance-lifecycle.ts";
+import { launchEligibility } from "./launch-gate.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import type { AppContext } from "../app/context.ts";
 import { HttpError } from "../app/http.ts";
@@ -116,6 +117,9 @@ export async function releaseBlockers(db: Db, job: BuildJob, customerReviewNotAp
   if (job.customer_preview_shared_at) {
     if (job.customer_review !== "approved") out.push(job.customer_review === "changes_requested" ? "The customer requested changes to this preview (step 4)." : "The customer has not reviewed the shared preview yet (step 4).");
   } else if (customerReviewNotApplicable.trim().length < 3) out.push("The preview was not shared with the customer: share it for review, or record why customer review does not apply (step 4).");
+  // Founder directive 2026-11-08: signed maintenance agreement + Stripe-verified first subscription payment first.
+  const launch = await launchEligibility(db, job.project_id);
+  if (!launch.eligible) out.push(`${launch.status}: ${launch.steps.filter((s) => !s.done && s.key !== "ready_for_review").map((s) => `${s.label} — ${s.detail}`).join("; ")}.`);
   const t = await getTarget(db, job.project_id);
   if (!t) out.push("Create the project's production target first.");
   else if (!t.enabled) out.push("The production target is disabled.");
@@ -216,6 +220,21 @@ export async function claimDeployment(db: Db, b: Record<string, unknown>, now = 
   const d = await db.prepare(`SELECT d.* FROM site_deployments d JOIN site_targets t ON t.id = d.target_id WHERE d.state = 'authorized' AND t.enabled = 1 ORDER BY d.authorized_at LIMIT 1`).first<SiteDeployment>();
   if (!d) return { deployment: null };
   if (!SITE_WORKER.test(d.worker_name)) return { deployment: null };
+  // The last boundary before code ships: an authorized RELEASE is refused (and put back for the Owner to see) if the
+  // launch gate no longer holds -- e.g. the first payment was refunded or disputed after authorization. A rollback
+  // re-publishes a version that already went live through this gate, so it is not re-gated.
+  if (d.kind === "release") {
+    const launch = await launchEligibility(db, d.project_id);
+    if (!launch.eligible) {
+      const why = `Launch gate: ${launch.status}`;
+      const r = await db.prepare(`UPDATE site_deployments SET state = 'canceled', state_reason = ?, updated_at = ? WHERE id = ? AND state = 'authorized'`).bind(why, at, d.id).run();
+      if (r.meta?.changes) {
+        await event(db, d, "authorized", "canceled", `${why}. Prepare the release again once the customer's maintenance subscription is verified.`, { kind: "system" });
+        await audit(db, { actorKind: "system", action: "builds.site_release_blocked_by_launch_gate", subjectType: "project", subjectId: d.project_id, organizationId: d.organization_id, details: { deploymentId: d.id, missing: launch.missing } });
+      }
+      return { deployment: null };
+    }
+  }
   const token = randomToken(32);
   const res = await db.prepare(`UPDATE site_deployments SET state = 'deploying', lease_runner = ?, lease_token_hash = ?, lease_expires_at = ?, attempts = attempts + 1, started_at = ?, updated_at = ? WHERE id = ? AND state = 'authorized'`)
     .bind(runnerId, await sha256Hex(token), new Date(now.getTime() + DEPLOY_LEASE_SECONDS * 1000).toISOString(), at, at, d.id).run();
