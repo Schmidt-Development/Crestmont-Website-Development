@@ -295,10 +295,14 @@ test("[EMAIL-003] [VOICE-003] on staging, receptionist mail to an address outsid
 
 // ───────────── Cross-cutting ─────────────
 
-test("[VOICE-005] voicemail mode (no Owner voice budget) refuses all eight register functions (fixture)", async () => {
+test("[VOICE-005] a call recorded in voicemail mode refuses all eight register functions (fixture)", async () => {
+  // Since 2026-11-08 no application budget puts an inbound call in voicemail mode, but a call that WAS recorded in that
+  // mode keeps refusing everything except leaving a message (enforced in code, not only in the prompt).
   const t = await app({ budget: false });
   const inbound = JSON.stringify({ event: "call_inbound", call_inbound: { call_id: "c_vm", from_number: "+15550100123", to_number: "+15550109999" } });
   await t.client().request("POST", "/api/webhooks/retell/inbound", { body: inbound, headers: { "x-retell-signature": await signRetell(KEY, inbound) } });
+  const callRow = (await t.db.prepare(`SELECT id FROM calls WHERE provider_call_id = 'c_vm'`).first<{ id: string }>())!;
+  await t.db.prepare(`INSERT INTO voice_events (id, call_id, event_key, kind, status, created_at) VALUES (?, ?, 'inbound_mode:voicemail', 'inbound_mode', 'ok', ?)`).bind(`vev_${Date.now()}`, callRow.id, nowIso()).run();
   for (const name of INBOUND_FUNCTIONS) {
     const r = await t.call("c_vm", name, { name: "Vee Mail", email: "vm@example.com", phone: "+15550100123", interest: "business", requirements: "Needs a website", summary: "Help please", package: "starter", template: "package_information", checkout_reference: "ABCDEF" });
     assert.equal(r.json.refused, "voicemail_mode", name);
@@ -367,13 +371,12 @@ test("[VOICE-006] declining recording: only what the platform enforces is said, 
   assert.match(INBOUND_MASTER_INSTRUCTIONS, /never that the call has stopped being recorded/);
 });
 
-test("[VOICE-005] the voice budget is enforced on functions even when the number's inbound webhook never ran (fixture)", async () => {
+test("[VOICE-005] receptionist functions never depend on an application voice budget, even when the number's inbound webhook never ran (fixture)", async () => {
+  // Founder directive 2026-11-08: the receptionist runs continuously; funding is managed in the Retell account.
   const t = await app({ budget: false });
   // No /api/webhooks/retell/inbound call for this call id: the number has no inbound webhook configured.
   const r = await t.call("c_nowh", "crm_upsert_lead", { name: "No Webhook", phone: "+15550100180", interest: "starter", requirements: "Wants a website" });
-  assert.equal(r.json.refused, "voicemail_mode", "no budget → message-only, whatever the webhook setup");
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM leads`), 0);
+  assert.equal(r.json.lead_saved, true, "no budget set, and the full receptionist works");
+  assert.equal(r.json.refused, undefined);
   assert.equal((await t.call("c_nowh", "request_callback", { name: "No Webhook", phone: "+15550100180", reason: "Call me back" })).json.callbackRequested, true, "a message can always be left");
-  await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('voice.monthly_budget_usd', '50', ?)`).bind(nowIso()).run();
-  assert.equal((await t.call("c_nowh2", "crm_upsert_lead", { name: "No Webhook", phone: "+15550100181", interest: "starter", requirements: "Wants a website" })).json.lead_saved, true, "with a budget the full receptionist works");
 });

@@ -134,7 +134,7 @@ test("[EMP-002] developer cannot update tasks not assigned to them even on a pro
   assert.equal(res.status, 403);
   assert.equal((await devC.post(`/staff/tasks/${notMine}/time`, { minutes: "10", worked_on: "2026-10-26" })).status, 403);
   assert.equal((await db.prepare(`SELECT status FROM tasks WHERE id = ?`).bind(notMine).first<{ status: string }>())!.status, "todo");
-  const list = await (await devC.get(`/staff/tasks`)).text();
+  const list = await (await devC.get(`/staff?tab=tasks`)).text();
   assert.match(list, /Mine/);
   assert.doesNotMatch(list, /Not mine/, "developers see only their assigned tasks");
 });

@@ -50,7 +50,7 @@ test("[INFRA-002] staging access: public site, artifact and live accounts agree;
 
   // The complete sequence the Founder follows, over the real request pipeline: email + password reach the Owner area.
   const v = await verifyStagingAccess({ base: BASE, owner: owner1 }, s.fetchFor(s.env()));
-  assert.deepEqual(v, { modules: 32, pages: 32 });
+  assert.deepEqual(v, { modules: 20, pages: 20 }); // the Founder's simplified sidebar (2026-11-08)
 
   // The seed's own random credentials (what an older artifact would have held) no longer work.
   const seedOwner = /^\| owner \| (\S+) \| `([^`]+)` \| `([A-Z2-7]+)` \|/m.exec(s.seedCreds)!;

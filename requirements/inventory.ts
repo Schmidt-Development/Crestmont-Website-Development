@@ -141,7 +141,7 @@ export const REQUIREMENTS: RequirementDef[] = [
     ["SUP-005", "Published staffed hours; no false 24/7 human claims", "P0", "business"],
   ]),
   ...group("Owner Dashboard", "§34–§35", [
-    ["OWN-001", "Owner navigation with all 32 modules, grouped and functional"],
+    ["OWN-001", "Owner navigation: the Founder's simplified module set (2026-11-08), grouped and functional; retired pages still reachable"],
     ["OWN-002", "Executive overview from real data"],
     ["OWN-003", "Business settings administration"],
   ]),

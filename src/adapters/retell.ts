@@ -21,7 +21,6 @@ import { VOICE_FUNCTIONS, VOICEMAIL_MODE_EVENT, callStartedAt, ensureCall, recor
 import { loadVoiceConfig, hoursStatus, transferAvailability, describeHours } from "../services/voice-settings.ts";
 import { addLeadTask, notifyOwners, redactSensitive } from "../services/voice-common.ts";
 import { audit } from "../services/security.ts";
-import { voiceBudget, budgetOpen, noteBudgetClosed } from "../services/voice-budget.ts";
 
 /** Environment the request is being processed in (env.ENVIRONMENT). */
 export interface RetellCtx { environment: "development" | "staging" | "production"; now?: () => Date }
@@ -218,15 +217,12 @@ export async function translateRetellInbound(db: Db, raw: string, ctx: RetellCtx
   if (cfg.inbound.numbers.length && !cfg.inbound.numbers.includes(to)) return reject("number not bound to this environment");
   const { call: row } = await ensureCall(db, RETELL_PROVIDER, callId, { from: from && /^[+0-9 ().-]{7,40}$/.test(from) ? from : null, to: to || null, direction: "inbound", environment: ctx.environment, isTest: false, agentVersion: null });
   const h = hoursStatus(cfg, now);
-  // Cost control (CREST-GAP-053): without an Owner budget, or once this month's spend reaches it, the call is
-  // answered in "voicemail" mode only. The voice service also refuses every other function on such a call.
-  const budget = await voiceBudget(db, now);
-  const closed = !budgetOpen(budget);
-  if (closed) {
-    await recordCallEvent(db, row.id, VOICEMAIL_MODE_EVENT, "inbound_mode", { mode: "voicemail", budget: budget.state });
-    await noteBudgetClosed(db, budget);
-  }
-  const t = closed ? { available: false } : transferAvailability(cfg, now);
+  // Founder directive 2026-11-08: the inbound receptionist runs continuously; its funding is managed in the Retell
+  // account (with Retell's own spending limit), so NO application-level monthly budget ever downgrades or closes an
+  // inbound call. The emergency controls stay: pausing the receptionist (reject above) and number binding. Costs are
+  // still recorded per call and reported on the AI receptionist page.
+  const closed = false;
+  const t = transferAvailability(cfg, now);
   const body: Record<string, unknown> = {
     dynamic_variables: {
       crestmont_env: ctx.environment,

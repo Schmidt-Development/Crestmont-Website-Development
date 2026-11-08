@@ -736,7 +736,7 @@ test("[SALESOPT-004] [SALESOPT-010] per-version calls, qualified-conversation an
   assert.match(page, /Appointment conversion<\/div><div class="kpi__value">Not enough data/);
 });
 
-test("[SALESOPT-010] [SALESOPT-008] [SALESOPT-006] the dashboard shows current and previous version per stage, the approval log, every proposal and the rollback history", async () => {
+test("[SALESOPT-010] [SALESOPT-008] [SALESOPT-006] the dashboard shows current and previous version per stage, the approval log and every proposal; rollbacks stay recorded and available", async () => {
   const r = fakeRetell();
   const t = await app({}, r.f);
   await registerTargets(t.db, t.owner.id);
@@ -764,7 +764,9 @@ test("[SALESOPT-010] [SALESOPT-008] [SALESOPT-006] the dashboard shows current a
   assert.equal(r.calls.length, before, "rendering the dashboard never calls Retell");
   assert.match(page, /Script version by stage/);
   assert.match(stagingRow(page), new RegExp(`>v${v3.seq}</a>[\\s\\S]*>v${v2.seq}</a>[\\s\\S]*Deploy of v${v3.seq}`), "current v3, previous (rollback target) v2, latest deployment");
-  assert.match(section(page, "Rollback history"), /No rollbacks/);
+  // Founder directive 2026-11-08: the Rollback history and Experiments sections are no longer shown; recovery is.
+  assert.doesNotMatch(page, /<h2>Rollback history<\/h2>/);
+  assert.doesNotMatch(page, /<h2>Experiments<\/h2>/);
 
   await age();
   const rb = await rollback(d, "staging", t.owner.id, "Recap made the calls longer");
@@ -774,15 +776,12 @@ test("[SALESOPT-010] [SALESOPT-008] [SALESOPT-006] the dashboard shows current a
     .bind(newId("sod"), v2.id, v3.id, new Date(Date.now() - 1000).toISOString(), nowIso()).run();
   page = await (await c.get("/staff/sales-optimization")).text();
   assert.match(stagingRow(page), new RegExp(`>v${v2.seq}</a>[\\s\\S]*>v${adopted.seq}</a>[\\s\\S]*Rollback of v${v2.seq}`), "after the rollback: current v2, previous the adopted prompt");
-  const rbs = section(page, "Rollback history");
-  assert.match(rbs, new RegExp(`v${v3.seq} → v${v2.seq}`));
-  assert.match(rbs, /Recap made the calls longer/);
-  assert.match(rbs, /Test owner \(owner@crestmontwebsitedevelopment\.com\)/);
-  assert.match(rbs, /Automatic \(safety monitor\)/);
-  assert.match(rbs, /Read-back did not match/);
-  assert.equal((rbs.match(/>Yes</g) ?? []).length, 1, "only the verified rollback shows a matching read-back");
-  assert.equal((rbs.match(/>No</g) ?? []).length, 1);
-  assert.match(rbs, new RegExp(`Deployments marked rolled back: v${v3.seq} on staging`));
+  // The rollback records are kept (the safety mechanism and its evidence), though their table is no longer shown.
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM so_deployments WHERE kind = 'rollback'`).first<{ n: number }>())!.n, 2);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM so_deployments WHERE kind = 'rollback' AND reason = 'Recap made the calls longer' AND status = 'verified'`).first());
+  // Recovery stays available on the page: the automatic-rollback control and the manual rollback buttons.
+  assert.match(page, /Roll back automatically to the last verified version/);
+  assert.match(page, /action="\/staff\/sales-optimization\/rollback"/);
   const log = section(page, "Approval log");
   assert.match(log, new RegExp(`Approved[\\s\\S]*>v${v2.seq}</a>[\\s\\S]*Test owner`));
   assert.match(log, new RegExp(`Rejected[\\s\\S]*>v${v4.seq}</a>[\\s\\S]*Pace is fine as it is`));

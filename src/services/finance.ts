@@ -214,6 +214,9 @@ export async function addCost(db: Db, userId: string, input: { projectId: string
 
 // ── accounting exports (FIN-004) ──
 export const EXPORT_KINDS = ["transactions", "invoices", "refunds", "subscriptions", "profitability"] as const;
+/** The exports offered on the Reports page (Founder directive 2026-11-08: Profitability is no longer offered there; its
+ *  records and calculations are kept, and the export route still serves it for anyone with a saved link). */
+export const OFFERED_EXPORT_KINDS = ["transactions", "invoices", "refunds", "subscriptions"] as const;
 export type ExportKind = (typeof EXPORT_KINDS)[number];
 
 export async function exportCsv(db: Db, kind: ExportKind, range: DateRange): Promise<string> {

@@ -45,19 +45,19 @@ test("[PM-004] task list: search, unassigned and dependency filters, pagination 
   await t.db.prepare(`INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)`).bind(build, design).run();
   for (let i = 0; i < 26; i++) await task(t.db, pid, `Bulk item ${String(i).padStart(2, "0")}`, { due: "2099-01-01" });
 
-  const search = await (await pm.c.get("/staff/tasks?q=homepage")).text();
+  const search = await (await pm.c.get("/staff?tab=tasks&q=homepage")).text();
   assert.match(search, /Design homepage/);
   assert.doesNotMatch(search, /Write privacy copy/);
-  assert.match(await (await pm.c.get("/staff/tasks?assignee=unassigned&q=privacy")).text(), /Write privacy copy/);
-  assert.doesNotMatch(await (await pm.c.get("/staff/tasks?assignee=unassigned")).text(), /Design homepage/);
-  const blocked = await (await pm.c.get("/staff/tasks?blocked=1")).text();
+  assert.match(await (await pm.c.get("/staff?tab=tasks&assignee=unassigned&q=privacy")).text(), /Write privacy copy/);
+  assert.doesNotMatch(await (await pm.c.get("/staff?tab=tasks&assignee=unassigned")).text(), /Design homepage/);
+  const blocked = await (await pm.c.get("/staff?tab=tasks&blocked=1")).text();
   assert.match(blocked, /Build checkout/);
   assert.match(blocked, /Waiting on 1 task/);
   assert.doesNotMatch(blocked, /Design homepage/);
-  const first = await (await pm.c.get("/staff/tasks")).text();
+  const first = await (await pm.c.get("/staff?tab=tasks")).text();
   assert.match(first, /Page 1/);
-  assert.match(first, /href="\/staff\/tasks\?page=2"/);
-  assert.match(await (await pm.c.get("/staff/tasks?page=2")).text(), /Bulk item/);
+  assert.match(first, /href="\/staff\?tab=tasks&amp;page=2"/);
+  assert.match(await (await pm.c.get("/staff?tab=tasks&page=2")).text(), /Bulk item/);
 
   const csvRes = await pm.c.get("/staff/tasks/export.csv?status=all");
   assert.equal(csvRes.status, 200);

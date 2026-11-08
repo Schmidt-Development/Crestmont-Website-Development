@@ -53,6 +53,8 @@ export interface RouteSpec {
   api?: true;
   /** GET answers 303 to an off-site URL (a signed preview sign-in link), not a page. */
   offsite?: true;
+  /** GET answers 303 to this same-site path (a page that moved, e.g. Tasks -> My Work), for permitted roles. */
+  redirectsTo?: string;
   /** Query string the page needs to render, with {resourceKind} placeholders (e.g. "lead={lead}"). */
   query?: string;
 }
@@ -371,7 +373,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/milestones/:id": staff(rolesWith("milestone.update"), P("milestone"), act("milestone.updated")),
   "POST /staff/milestones/:id/delete": staff(coord, P("milestone"), act("milestone.deleted")),
   "POST /staff/projects/:id/tasks": staff(coord, P("project"), act("task.created")),
-  "GET /staff/tasks": staff(delivery),
+  "GET /staff/tasks": { ...staff(delivery), redirectsTo: "/staff?" }, // My Work -> All tasks (2026-11-08)
   "GET /staff/tasks/export.csv": staff(delivery, undefined, act("task.exported")),
   "GET /staff/tasks/:id": staff(delivery, P("task")),
   "POST /staff/tasks/:id/status": staff(rolesWith("project.coordinate", "task.update_assigned"), P("task"), act("task.status_changed")),
