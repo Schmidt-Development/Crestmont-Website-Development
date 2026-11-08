@@ -441,6 +441,13 @@ test("[VOICE-003] [EMAIL-003] retell and resend_webhooks integrations are not_co
   const rows2 = await refreshIntegrationHealth({ db: t.db, env: { ...t.env, RETELL_INBOUND_API_KEY: RETELL_KEY, RESEND_WEBHOOK_SECRET: WHSEC }, storage: null });
   assert.equal(rows2.find((r) => r.integration === "retell")!.status, "configured_unverified");
   assert.equal(rows2.find((r) => r.integration === "resend_webhooks")!.status, "configured_unverified");
+  // A signed event for ANOTHER environment proves nothing about this one; a signed event for this one verifies the path.
+  await t.db.prepare(`INSERT INTO email_webhook_events (svix_id, type, outcome, received_at) VALUES ('msg_other', 'email.delivered', 'ignored', ?)`).bind(new Date().toISOString()).run();
+  assert.equal((await refreshIntegrationHealth({ db: t.db, env: { ...t.env, RESEND_WEBHOOK_SECRET: WHSEC }, storage: null })).find((r) => r.integration === "resend_webhooks")!.status, "configured_unverified");
+  await t.db.prepare(`INSERT INTO email_webhook_events (svix_id, type, outcome, received_at) VALUES ('msg_here', 'email.delivered', 'applied', ?)`).bind(new Date().toISOString()).run();
+  const rw = (await refreshIntegrationHealth({ db: t.db, env: { ...t.env, RESEND_WEBHOOK_SECRET: WHSEC }, storage: null })).find((r) => r.integration === "resend_webhooks")!;
+  assert.equal(rw.status, "verified", "a signed delivery event for this environment verifies the webhook path");
+  assert.match(rw.detail ?? "", /1 signed Resend delivery event/);
   const p = secretPresence({ ...t.env, RETELL_INBOUND_API_KEY: RETELL_KEY });
   assert.equal(p.find((x) => x.name === "RETELL_INBOUND_API_KEY")!.present, true);
   assert.equal(p.find((x) => x.name === "RESEND_WEBHOOK_SECRET")!.present, false);
