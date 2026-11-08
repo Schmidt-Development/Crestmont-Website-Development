@@ -970,8 +970,12 @@ a.shot { display: block; cursor: zoom-in; }
 .dl { display: grid; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); gap: var(--s-2) var(--s-5); font-size: var(--fs-sm); margin: 0; }
 .dl dt { color: var(--text-3); overflow-wrap: break-word; }
 .dl dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
-.bar-chart { display: grid; gap: var(--s-2); }
-.bar-chart__row { display: grid; grid-template-columns: minmax(90px, 140px) minmax(60px, 1fr) max-content; gap: var(--s-3); align-items: center; font-size: var(--fs-sm); }
+.bar-chart { display: grid; gap: var(--s-3); min-width: 0; }
+.bar-chart__row { display: grid; gap: var(--s-1); min-width: 0; font-size: var(--fs-sm); }
+.bar-chart__head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 var(--s-3); min-width: 0; }
+.bar-chart__label { min-width: 0; flex: 1 1 8rem; overflow-wrap: anywhere; }
+.bar-chart__value { flex: 0 0 auto; margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bar-chart__sub { color: var(--text-3); }
 .bar-chart__bar { height: 8px; background: var(--ink-4); border-radius: 999px; overflow: hidden; }
 .bar-chart__bar span { display: block; height: 100%; background: var(--gold-2); border-radius: inherit; }
 .live-status { margin: var(--s-3) var(--s-2) 0; padding: .6rem .75rem; border: 1px solid var(--line-gold); border-radius: var(--r-2); background: var(--ink-2); color: var(--text); font-size: var(--fs-xs); animation: toast-in var(--t-med) var(--ease-out); }
@@ -1033,8 +1037,6 @@ a.shot { display: block; cursor: zoom-in; }
 
 /* ── 19. Responsive refinements & touch targets ───────────────────────────────────────────────── */
 @media (max-width: 560px) {
-  .bar-chart__row { grid-template-columns: 1fr auto; }
-  .bar-chart__row > .bar-chart__bar { grid-column: 1 / -1; grid-row: 2; }
   .dl { grid-template-columns: minmax(0, 1fr); gap: 0 var(--s-5); }
   .dl dt { margin-top: var(--s-2); }
   .page-head .actions { margin-left: 0; }

@@ -29,6 +29,7 @@ import * as priv from "../services/privacy.ts";
 import * as voice from "../services/voice.ts";
 import { voiceBudget, setVoiceBudget, VoiceBudgetError } from "../services/voice-budget.ts";
 import { receptionistStatus, type ReceptionistStatus } from "../services/receptionist-status.ts";
+import { describeAudit, resolveAuditNames, ACTION_GROUPS, FAILURE_SQL, type DescribedEvent } from "../services/audit-describe.ts";
 import { syncPrompt, latestPromptSync, type PromptSyncResult } from "../services/voice-prompt-sync.ts";
 import { readBody } from "./api.ts";
 import { ValidationError } from "../lib/validate.ts";
@@ -241,6 +242,16 @@ ${rows.map(([name, x]) => html`<tr data-status-item="${name}"><th scope="row">${
 <p class="faint">"Verified" needs evidence from ${r.environment} itself: a real signed call or a passing read-only audit of the live Retell setup (Operations → Retell audit). A staging result never proves production, and production calls never prove staging.</p></section>`;
 }
 
+type AuditEntryRow = { id: number; created_at: string; actor_kind: string; actor_user_id: string | null; actor_email: string | null; actor_name: string | null; action: string; subject_type: string; subject_id: string | null; organization_id: string | null; ip: string | null; details_json: string | null };
+
+/** One audit event as a timeline entry: when, who, what happened, the affected record, the result; raw event in Details. */
+function auditEntry(a: AuditEntryRow, d: DescribedEvent): SafeHtml {
+  return html`<li class="audit-entry" data-audit-id="${a.id}"><div class="row row--between" style="flex-wrap:wrap;gap:.25rem .75rem"><strong>${d.title}</strong><span class="faint"><time datetime="${a.created_at}">${formatDateTime(a.created_at)}</time></span></div>
+<div>${d.sentence}${d.record ? html` <span class="muted">— ${d.record}</span>` : ""} ${d.outcome === "failed" ? badge("failed", "Failed or refused") : ""}</div>
+<details><summary class="faint">Details</summary><dl class="dl"><dt>Event</dt><dd><code>${a.action}</code></dd><dt>Done by</dt><dd>${a.actor_email ? html`${a.actor_name ?? ""} <span class="faint">${a.actor_email}</span>` : label(a.actor_kind)}</dd>
+<dt>Record</dt><dd><code>${a.subject_type}${a.subject_id ? ` ${a.subject_id}` : ""}</code></dd>${a.ip ? html`<dt>IP</dt><dd>${a.ip}</dd>` : ""}${a.details_json ? html`<dt>Data</dt><dd><code style="overflow-wrap:anywhere">${a.details_json.slice(0, 600)}</code></dd>` : ""}</dl></details></li>`;
+}
+
 async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instructions: string; note: string }) {
   requireStaff(ctx, "voice.manage");
   const db = ctx.db;
@@ -371,7 +382,8 @@ export function register(r: Router): void {
     const leads = (await ctx.db.prepare(`SELECT l.id, l.stage, c.name FROM leads l JOIN contacts c ON c.id = l.contact_id WHERE l.owner_user_id = ? AND l.merged_into_lead_id IS NULL AND l.stage NOT IN ('converted','lost','rejected','archived') ORDER BY l.updated_at DESC LIMIT 100`).bind(id).all<{ id: string; stage: string; name: string }>()).results;
     const tickets = (await ctx.db.prepare(`SELECT t.id, t.subject, t.priority, t.status FROM assignments a JOIN tickets t ON t.id = a.subject_id WHERE a.subject_type = 'ticket' AND a.user_id = ? AND a.ended_at IS NULL AND t.status NOT IN ('resolved','closed') ORDER BY t.updated_at DESC LIMIT 100`).bind(id).all<{ id: string; subject: string; priority: string; status: string }>()).results;
     const time = (await ctx.db.prepare(`SELECT te.worked_on, te.minutes, t.id AS task_id, t.title FROM time_entries te JOIN tasks t ON t.id = te.task_id WHERE te.user_id = ? ORDER BY te.worked_on DESC LIMIT 20`).bind(id).all<{ worked_on: string; minutes: number; task_id: string; title: string }>()).results;
-    const activity = (await ctx.db.prepare(`SELECT action, subject_type, subject_id, created_at FROM audit_logs WHERE actor_user_id = ? ORDER BY id DESC LIMIT 20`).bind(id).all<{ action: string; subject_type: string; subject_id: string | null; created_at: string }>()).results;
+    const activity = (await ctx.db.prepare(`SELECT a.*, u.email AS actor_email, u.display_name AS actor_name FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id WHERE a.actor_user_id = ? ORDER BY a.id DESC LIMIT 20`).bind(id).all<AuditRow>()).results;
+    const activityNames = await resolveAuditNames(ctx.db, activity);
     const offPending = await off.pendingCount(ctx.db, id);
     const body = html`${pageHead(s.display_name, linkButton("All employees", "/staff/employees", "ghost", "sm"), `${label(s.role)}${w.jobTitle ? ` · ${w.jobTitle}` : ""}`)}
 ${formErrors(errors)}
@@ -390,8 +402,8 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Leads</h2>${table(leads, [{ header: "Lead", cell: (l) => html`<a href="/staff/crm/leads/${l.id}">${l.name}</a>` }, { header: "Stage", cell: (l) => badge(l.stage) }], { empty: html`<p class="muted">No open leads.</p>` })}</section>
 <section class="card"><h2 class="card__title">Tickets</h2>${table(tickets, [{ header: "Ticket", cell: (t) => html`<a href="/staff/support/${t.id}">${t.subject}</a>` }, { header: "Priority", cell: (t) => badge(t.priority) }, { header: "Status", cell: (t) => badge(t.status) }], { empty: html`<p class="muted">No open tickets.</p>` })}</section>
 <section class="card"><h2 class="card__title">Recent time</h2>${table(time, [{ header: "Date", cell: (x) => x.worked_on }, { header: "Task", cell: (x) => html`<a href="/staff/tasks/${x.task_id}">${x.title}</a>` }, { header: "Time", cell: (x) => wl.hours(x.minutes), numeric: true }], { empty: html`<p class="muted">No time logged.</p>` })}</section>
-<section class="card"><h2 class="card__title">Recent activity</h2>${table(activity, [{ header: "When", cell: (a) => formatDateTime(a.created_at) }, { header: "Action", cell: (a) => html`<code>${a.action}</code>` }, { header: "Subject", cell: (a) => `${a.subject_type}${a.subject_id ? ` ${a.subject_id}` : ""}` }], { empty: html`<p class="muted">No recorded activity.</p>` })}
-<p><a href="/staff/audit?actor=${encodeURIComponent(s.email)}">Full history in the audit log</a></p></section></div>
+<section class="card"><h2 class="card__title">Recent activity</h2>${activity.length ? html`<ol class="timeline audit-timeline" data-activity-timeline>${activity.map((a) => auditEntry(a, describeAudit(a, activityNames)))}</ol>` : html`<p class="muted">No recorded activity.</p>`}
+<p><a href="/staff/audit?employee=${encodeURIComponent(s.id)}">Full history in the audit log</a></p></section></div>
 <section class="card" style="margin-top:1.5rem"><h2 class="card__title">Offboarding</h2>${s.disabled_at ? html`<p>${offPending ? html`${badge("blocked", `${offPending} item${offPending === 1 ? "" : "s"} owner disabled`)} ` : ""}${offPending ? "Open work still needs a new owner." : "No work is waiting for reassignment."}</p>` : html`<p class="muted">When this account is disabled, its open work is queued for reassignment.</p>`}${linkButton(s.disabled_at ? "Open the reassignment queue" : "Preview open work", `/staff/employees/${s.id}/offboarding`, "secondary", "sm")}</section>`;
     const removeCard = !can(ctx.actor!, "employee.manage") || s.id === ctx.user!.id ? html``
       : html`<section class="card" id="remove" style="margin-top:1.5rem;border-color:var(--danger, #b42318)"><h2 class="card__title">Remove employee</h2>
@@ -841,38 +853,47 @@ ${pagination(ctx, page, events.length > limit)}</section>`;
   // ── Audit logs ──
   const auditQuery = (ctx: AppContext) => {
     const actor = q(ctx, "actor", 254), action = q(ctx, "action", 120), subject = q(ctx, "subject", 120), from = q(ctx, "from", 10), to = q(ctx, "to", 10);
+    const employee = q(ctx, "employee", 64), group = q(ctx, "group", 20), record = q(ctx, "record", 120), outcome = q(ctx, "outcome", 10);
     const where: string[] = [], binds: unknown[] = [];
+    if (employee) { where.push("a.actor_user_id = ?"); binds.push(employee); }
+    const g = ACTION_GROUPS.find((x) => x.value === group);
+    if (g) { where.push(`(${g.prefixes.map(() => "a.action LIKE ? ESCAPE '\\'").join(" OR ")})`); binds.push(...g.prefixes.map((x) => likePrefix(`${x}.`))); }
+    if (record) {
+      // A customer or project by name: events about it, or events inside that customer's organization.
+      where.push(`(a.organization_id IN (SELECT id FROM organizations WHERE name LIKE ? ESCAPE '\\') OR (a.subject_type = 'project' AND a.subject_id IN (SELECT id FROM projects WHERE name LIKE ? ESCAPE '\\'))
+        OR (a.subject_type = 'organization' AND a.subject_id IN (SELECT id FROM organizations WHERE name LIKE ? ESCAPE '\\')))`);
+      binds.push(likeContains(record), likeContains(record), likeContains(record));
+    }
+    if (outcome === "failed") where.push(FAILURE_SQL); else if (outcome === "succeeded") where.push(`NOT ${FAILURE_SQL}`);
     if (actor) { where.push("(a.actor_user_id = ? OR u.email LIKE ? ESCAPE '\\' OR a.actor_kind = ?)"); binds.push(actor, likeContains(actor), actor); }
     if (action) { where.push("a.action LIKE ? ESCAPE '\\'"); binds.push(likePrefix(action)); }
     if (subject) { where.push("(a.subject_type = ? OR a.subject_id = ?)"); binds.push(subject, subject); }
     if (isDate(from)) { where.push("a.created_at >= ?"); binds.push(from); }
     if (isDate(to)) { where.push("a.created_at < ?"); binds.push(new Date(Date.parse(to) + 86400e3).toISOString().slice(0, 10)); }
-    return { sql: `FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`, binds, v: { actor, action, subject, from, to } };
+    return { sql: `FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`, binds, v: { actor, action, subject, from, to, employee, group, record, outcome } };
   };
-  type AuditRow = { id: number; created_at: string; actor_kind: string; actor_user_id: string | null; actor_email: string | null; actor_name: string | null; action: string; subject_type: string; subject_id: string | null; organization_id: string | null; ip: string | null; details_json: string | null };
+  type AuditRow = AuditEntryRow;
   r.get("/staff/audit", async (ctx) => {
     requireStaff(ctx, "audit.read");
     const aq = auditQuery(ctx);
     const { page, limit, offset } = pageParam(ctx);
     const rows = (await ctx.db.prepare(`SELECT a.*, u.email AS actor_email, u.display_name AS actor_name ${aq.sql} ORDER BY a.id DESC LIMIT ? OFFSET ?`).bind(...aq.binds, limit + 1, offset).all<AuditRow>()).results;
+    const names = await resolveAuditNames(ctx.db, rows.slice(0, limit));
+    const staffPeople = (await emp.listStaff(ctx.db)).map((x) => ({ id: x.id, display_name: x.display_name }));
     const exportUrl = "/staff/audit/export.csv" + (ctx.url.search ? ctx.url.search.replace(/([?&])page=\d+&?/, "$1") : "");
     const body = html`${pageHead("Audit logs", linkButton("Export CSV", exportUrl, "secondary", "sm"), "Platform")}
-<p class="muted">Append-only: the database rejects updates and deletes on this table. Exports are themselves audited.</p>
+<p class="muted">Every recorded action, in plain words. The log is append-only: the database refuses changes and deletions, and the original technical record of each entry is kept under "Details". Exports are themselves audited.</p>
 ${filterForm(ctx, [
-  input({ name: "actor", label: "Actor (email, user id or kind)", value: aq.v.actor }),
-  input({ name: "action", label: "Action starts with", value: aq.v.action }),
-  input({ name: "subject", label: "Subject type or id", value: aq.v.subject }),
+  select({ name: "employee", label: "Employee", options: staffPeople.map((x) => ({ value: x.id, label: x.display_name })), value: aq.v.employee, includeBlank: "Anyone" }),
+  select({ name: "group", label: "Action", options: ACTION_GROUPS.map((x) => ({ value: x.value, label: x.label })), value: aq.v.group, includeBlank: "Any action" }),
+  input({ name: "record", label: "Customer or project", value: aq.v.record, maxlength: 120 }),
+  select({ name: "outcome", label: "Result", options: [{ value: "succeeded", label: "Succeeded" }, { value: "failed", label: "Failed or refused" }], value: aq.v.outcome, includeBlank: "Any result" }),
   input({ name: "from", label: "From", type: "date", value: aq.v.from }),
   input({ name: "to", label: "To", type: "date", value: aq.v.to }),
+  html`<details class="audit-technical"${aq.v.actor || aq.v.action || aq.v.subject ? " open" : ""}><summary>Technical filters</summary>
+${input({ name: "actor", label: "Actor (email, user id or kind)", value: aq.v.actor })}${input({ name: "action", label: "Event name starts with", value: aq.v.action })}${input({ name: "subject", label: "Record type or id", value: aq.v.subject })}</details>`,
 ])}
-${table(rows.slice(0, limit), [
-  { header: "When", cell: (a) => formatDateTime(a.created_at) },
-  { header: "Actor", cell: (a) => a.actor_email ? html`${a.actor_name}<br><span class="faint">${a.actor_email}</span>` : label(a.actor_kind) },
-  { header: "Action", cell: (a) => html`<code>${a.action}</code>` },
-  { header: "Subject", cell: (a) => html`${a.subject_type}<br><span class="faint">${a.subject_id ?? ""}</span>` },
-  { header: "Details", cell: (a) => (a.details_json ?? "").slice(0, 160) },
-  { header: "IP", cell: (a) => a.ip ?? "—" },
-], { empty: emptyState("No audit entries match", "Adjust the filters.") })}
+${rows.length ? html`<ol class="timeline audit-timeline" data-audit-timeline>${rows.slice(0, limit).map((a) => auditEntry(a, describeAudit(a, names)))}</ol>` : emptyState("No audit entries match", "Adjust the filters.")}
 ${pagination(ctx, page, rows.length > limit)}`;
     return staffPage(ctx, "Audit logs", body);
   });

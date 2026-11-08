@@ -18,6 +18,7 @@ import { claimSignatureOnce } from "../services/security.ts";
 import * as R from "../services/research.ts";
 import { eligibilityCensus, importRate, promotionTotals, recentRuns, runAutoPromotion, TARGET_PER_MINUTE } from "../services/research-promote.ts";
 import { WEBSITE_CLASSES, WEBSITE_CLASS_LABELS, PROSPECT_STATUSES, type Finding } from "../domain/research.ts";
+import { SPOKEN } from "../domain/sales-eligibility.ts";
 
 const RUNNER = "/api/research/runner";
 const MAX_BODY = 5_000_000;
@@ -60,13 +61,66 @@ function findingsList(p: R.ProspectRow): SafeHtml {
 <div class="faint">${x.method} · confidence ${Math.round(x.confidence * 100)}% · ${formatDateTime(x.observedAt)} · <a href="${safeHttpsUrl(x.url)}" rel="noopener noreferrer nofollow">${x.url}</a>${x.reproduction ? html` · Reproduce: ${x.reproduction}` : ""}</div></li>`)}</ul>`;
 }
 
+/** Plain-English verdict per website classification: is there a website, does it work, why this business is a lead. */
+const WEBSITE_PLAIN: Record<string, { found: string; works: string; why: string }> = {
+  VERIFIED_WEBSITE_BROKEN: { found: "Yes — we found the business's own website.", works: "No — the website could not be opened properly when we checked.", why: "Their website appears to be broken, so they may need a new one." },
+  VERIFIED_WEBSITE_ISSUES: { found: "Yes — we found the business's own website.", works: "Partly — it opens, but we found problems.", why: "Their website works but has problems a new website would fix." },
+  NO_OFFICIAL_WEBSITE_FOUND: { found: "No — we could not find a website for this business.", works: "Not applicable.", why: "The business does not appear to have a website." },
+  VERIFIED_OFFICIAL_WEBSITE: { found: "Yes — we found the business's own website.", works: "Yes — it appears to work without major problems.", why: "Their website looks fine, so they are unlikely to need one." },
+  WEBSITE_UNVERIFIED: { found: "Unclear — we could not confirm which website belongs to this business.", works: "Unknown — not checked reliably.", why: "Not enough evidence yet to say whether they need a website." },
+  BUSINESS_IDENTITY_UNCERTAIN: { found: "Unclear — we are not sure we have matched the right business.", works: "Unknown.", why: "We are not sure the details all belong to the same business." },
+};
+const EXTRA_PLAIN: Record<string, string> = {
+  listed_domain_parked: "the web address listed for the business shows a parked or for-sale page",
+  no_official_website: "we could not find a website for the business in the sources we checked",
+};
+/** What a recorded finding means, in plain words, and how sure we are. Speculative findings are labelled as such. */
+function plainFinding(f: Finding): { text: string; certainty: string; tone: string } {
+  const text = SPOKEN[f.code] ?? EXTRA_PLAIN[f.code] ?? f.title;
+  const certainty = f.confidence >= 0.8 ? "Checked" : f.confidence >= 0.6 ? "Likely" : "Possible — not confirmed";
+  return { text: text.charAt(0).toUpperCase() + text.slice(1), certainty, tone: f.confidence >= 0.8 ? "verified" : f.confidence >= 0.6 ? "info" : "not_configured" };
+}
+const level = (x: number) => (x >= 0.85 ? "High" : x >= 0.7 ? "Medium" : "Low");
+const READINESS: Record<string, { ready: string; next: string }> = {
+  qualified: { ready: "Ready for a person to review and add to the CRM. Automated calling is not released.", next: "Check the evidence below, then create a CRM lead." },
+  review: { ready: "Not yet — a person needs to check it first.", next: "Look at the evidence and either create a CRM lead or dismiss it with a reason." },
+  not_qualified: { ready: "No — the evidence does not show they need a website.", next: "No action needed." },
+  promoted: { ready: "Already in the CRM.", next: "Work it from the CRM lead." },
+  existing_crm: { ready: "Already in the CRM as an existing contact.", next: "Work it from the existing CRM record." },
+  suppressed: { ready: "No — this business must not be contacted.", next: "No action: it is on a do-not-contact list." },
+  dismissed: { ready: "No — a person dismissed it.", next: "No action needed." },
+};
+
 function prospectDetail(ctx: AppContext, p: R.ProspectRow): SafeHtml {
   const web = JSON.parse(p.website_json) as { confidence: number; checkedAt: string; identitySignals: string[]; checks: { stage: string; method: string; result: string; at: string }[] };
   const sources = JSON.parse(p.sources_json) as { source: string; sourceId: string; license: string; release?: string; retrievedAt: string }[];
   const reasons = JSON.parse(p.qualification_json) as string[];
   const gate = JSON.parse(p.eligibility_json) as string[];
+  const findings = JSON.parse(p.findings_json) as Finding[];
   const canWrite = can(ctx.actor!, "lead.write_all");
-  return html`<details class="research-detail"><summary>Evidence</summary>
+  const plain = WEBSITE_PLAIN[p.website_class] ?? { found: "Unclear.", works: "Unknown.", why: "Not enough evidence recorded." };
+  const ageDays = Math.floor((ctx.now().getTime() - Date.parse(p.last_verified_at)) / 86400e3);
+  const ready = READINESS[p.status] ?? { ready: "Unknown.", next: "Review the record." };
+  const identity = level(p.identity_confidence);
+  return html`<details class="research-detail" data-evidence-plain><summary>What we found</summary>
+<div class="stack">
+${dl([
+    ["Business", html`<strong>${p.name}</strong>${[p.city, p.state].filter(Boolean).length ? html` <span class="faint">${[p.city, p.state].filter(Boolean).join(", ")}</span>` : ""}`],
+    ["Why it was identified", plain.why],
+    ["Website found?", html`${plain.found}${p.website_url ? html` <a href="${safeHttpsUrl(p.website_url)}" rel="noopener noreferrer nofollow">Open the website</a>` : ""}`],
+    ["Does the website work?", plain.works],
+    ["How reliable is this?", html`${identity === "High" ? badge("verified", "High") : identity === "Medium" ? badge("info", "Medium") : badge("not_configured", "Low")} <span class="muted">${identity === "High" ? "Several details match the same business." : identity === "Medium" ? "Most details match; check before relying on it." : "Few details match: treat with caution."}</span>`],
+    ["When we checked", html`${formatDateTime(p.last_verified_at)} <span class="faint">(${ageDays <= 0 ? "today" : `${ageDays} day${ageDays === 1 ? "" : "s"} ago`})</span>${ageDays > 45 ? html` ${badge("past_due", "Out of date: check again before contacting")}` : ""}`],
+    ["Ready for outreach?", ready.ready],
+    ["What to do next", html`<strong>${ready.next}</strong>`],
+  ])}
+<h4>Evidence</h4>
+${findings.length ? html`<ul class="research-findings">${findings.map((f) => { const x = plainFinding(f); return html`<li>${badge(x.tone, x.certainty)} ${x.text}.</li>`; })}</ul>` : html`<p class="muted">${p.website_class === "NO_OFFICIAL_WEBSITE_FOUND" ? "We searched the listed sources and found no website for this business." : "No specific website problems were recorded."}</p>`}
+<p class="faint">"Checked" means we saw it ourselves when we visited the website. "Likely" and "Possible" are not confirmed facts and must not be stated to the business as fact.</p>
+${canWrite && (p.status === "qualified" || p.status === "review") ? html`<div class="actions">${actionForm(ctx, "/staff/research/promote", "Create CRM lead", { variant: "primary", hidden: { prospect_id: p.id }, confirm: "Create a CRM lead (company, contact and lead) from this research record?" })}</div>` : ""}
+${canWrite && p.status !== "promoted" && p.status !== "dismissed" ? html`<form method="post" action="/staff/research/dismiss" class="inline-form">${csrf(ctx)}<input type="hidden" name="prospect_id" value="${p.id}">${input({ name: "reason", label: "Dismiss reason", required: true, maxlength: 300 })}${button("Dismiss", { variant: "ghost", size: "sm" })}</form>` : ""}
+${p.crm_lead_id ? html`<p><a href="/staff/crm/leads/${p.crm_lead_id}">Open CRM lead</a></p>` : ""}
+<details class="research-technical"><summary class="faint">Technical details</summary>
 ${dl([
     ["Address", [p.address_line, p.city, p.state, p.zip].filter(Boolean).join(", ") || "—"],
     ["Phone", p.phone_e164 ?? "—"], ["Email", p.email ?? "—"],
@@ -79,13 +133,12 @@ ${dl([
     ["Last verified", formatDateTime(p.last_verified_at)],
   ])}
 <h4>Website checks</h4>${web.checks.length ? html`<ol class="faint">${web.checks.map((c) => html`<li>Stage ${c.stage}: ${c.method} — ${c.result} (${formatDateTime(c.at)})</li>`)}</ol>` : html`<p class="faint">None recorded.</p>`}
-<h4>Findings</h4>${findingsList(p)}
+<h4>Findings (raw)</h4>${findingsList(p)}
 ${p.summary || p.brief ? html`<h4>Local-model draft <span class="faint">(${p.model ?? "model unknown"}; verify before use)</span></h4>${p.summary ? html`<p>${p.summary}</p>` : ""}${p.brief ? html`<p class="faint">${p.brief}</p>` : ""}` : ""}
 <h4>Automated calling</h4><p>${badge("blocked", "Not released")} ${gate.join(" · ")}</p>
-<h4>Provenance</h4><ul class="faint">${sources.map((s) => html`<li>${s.source} ${s.sourceId}${s.release ? ` (release ${s.release})` : ""} · ${s.license} · retrieved ${formatDateTime(s.retrievedAt)}</li>`)}</ul>
-${canWrite && (p.status === "qualified" || p.status === "review") ? html`<div class="actions">${actionForm(ctx, "/staff/research/promote", "Create CRM lead", { variant: "primary", hidden: { prospect_id: p.id }, confirm: "Create a CRM lead (company, contact and lead) from this research record?" })}</div>` : ""}
-${canWrite && p.status !== "promoted" && p.status !== "dismissed" ? html`<form method="post" action="/staff/research/dismiss" class="inline-form">${csrf(ctx)}<input type="hidden" name="prospect_id" value="${p.id}">${input({ name: "reason", label: "Dismiss reason", required: true, maxlength: 300 })}${button("Dismiss", { variant: "ghost", size: "sm" })}</form>` : ""}
-${p.crm_lead_id ? html`<p><a href="/staff/crm/leads/${p.crm_lead_id}">Open CRM lead</a></p>` : ""}
+<h4>Provenance</h4><ul class="faint">${sources.map((x) => html`<li>${x.source} ${x.sourceId}${x.release ? ` (release ${x.release})` : ""} · ${x.license} · retrieved ${formatDateTime(x.retrievedAt)}</li>`)}</ul>
+</details>
+</div>
 </details>`;
 }
 

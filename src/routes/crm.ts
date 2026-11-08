@@ -567,8 +567,8 @@ async function salesPage(ctx: AppContext) {
 ${rangeForm(ctx, range.from, range.to)}
 <div class="kpis">${kpi("Leads created", r.created)}${kpi("Converted", r.converted)}${kpi("Conversion rate", pct(r.rate), "converted ÷ created")}${kpi("Quotes sent", r.quotesSent)}${kpi("Quotes accepted", r.quotesAccepted)}</div>
 <div class="grid grid-2">
-<section class="card"><h2 style="font-size:1.2rem">Leads by source</h2>${r.bySource.length ? barChart(r.bySource.map((s) => ({ label: label(s.source), value: s.n, display: `${s.n} (${s.converted ?? 0} converted)` }))) : html`<p class="muted">No leads in this range.</p>`}</section>
-<section class="card"><h2 style="font-size:1.2rem">Stage funnel</h2>${r.created ? barChart(LEAD_STAGES.filter((s) => r.funnel[s]).map((s) => ({ label: label(s), value: r.funnel[s], display: String(r.funnel[s]) }))) : html`<p class="muted">No leads in this range.</p>`}</section>
+<section class="card"><h2 style="font-size:1.2rem">Leads by source</h2>${r.bySource.length ? barChart(r.bySource.map((s) => ({ label: label(s.source), value: s.n, display: s.n.toLocaleString("en-US"), sub: `${(s.converted ?? 0).toLocaleString("en-US")} converted` }))) : html`<p class="muted">No leads in this range.</p>`}</section>
+<section class="card"><h2 style="font-size:1.2rem">Stage funnel</h2>${r.created ? barChart(LEAD_STAGES.filter((s) => r.funnel[s]).map((s) => ({ label: label(s), value: r.funnel[s], display: r.funnel[s].toLocaleString("en-US") }))) : html`<p class="muted">No leads in this range.</p>`}</section>
 <section class="card"><h2 style="font-size:1.2rem">Revenue attributed by lead source</h2>${r.revenue.length ? barChart(r.revenue.map((x) => ({ label: label(x.source), value: x.cents, display: formatCents(x.cents) }))) : html`<p class="muted">No captured payments in this range.</p>`}</section>
 </div>
 ${/* Phase 9: the detailed campaign attribution tables are not sales reading. Collection and storage are untouched

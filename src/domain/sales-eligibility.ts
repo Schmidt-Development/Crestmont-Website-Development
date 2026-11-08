@@ -37,7 +37,7 @@ export const MIN_SPOKEN_CONFIDENCE = 0.7;
 export const RESEARCH_FRESH_DAYS = 45;
 
 /** Plain-language, speakable descriptions of verified findings. Codes not listed are not spoken (title stays internal). */
-const SPOKEN: Record<string, string> = {
+export const SPOKEN: Record<string, string> = {
   http_5xx: "the website was returning a server error when we checked",
   http_404: "the website's main page could not be found when we checked",
   render_blank: "the website loaded as a blank page when we checked",
