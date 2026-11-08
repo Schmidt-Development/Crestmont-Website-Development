@@ -68,6 +68,7 @@ import { runDesignLockedJob, writeEvidence, MAX_REPAIR_CYCLES } from "../runner/
 import { draftAndSubmitContract, CONTRACT_ATTEMPTS } from "../runner/src/frontend/contract-author.ts";
 import { contractAuthorFor } from "../runner/src/main.ts";
 import { collectSnapshot } from "../runner/src/orchestrator/snapshot.ts";
+import { initRepo } from "../runner/src/git.ts";
 import { LocalProvider } from "../runner/src/providers/local.ts";
 import { RunTracker, StopSwitch } from "../runner/src/agent.ts";
 import { validateManifest, completeness, describeContract } from "../runner/src/frontend/integration-manifest.ts";
@@ -496,6 +497,12 @@ async function main(): Promise<number> {
   rule("6. Model B writes the backend against the frozen design");
   const buildWs = createWorkspace(cfg.workspacesRoot, { id: claimed.job.id, attempt: claimed.job.attempt });
   const buildSandbox = new JobSandbox(cfg.jobSandbox, buildWs, claimed.job.id, executor, logger);
+
+  // The real runner initialises a repository in the build workspace (runner/src/job.ts), so this does too. It
+  // holds no commits in either place -- the design-locked path never makes one -- and the difference that matters
+  // is that git commands behave the same here as they do in production rather than failing differently.
+  await initRepo({ repo: buildWs.repo, pathEnv: cfg.agentPath, home: buildWs.home },
+    { name: cfg.gitAuthorName, email: cfg.gitAuthorEmail }, "main");
   const provider = new LocalProvider({ cfg, executor, log: logger });
   const tracker = new RunTracker();
   const stop = new StopSwitch();

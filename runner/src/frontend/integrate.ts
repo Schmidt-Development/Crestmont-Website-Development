@@ -208,6 +208,7 @@ export function integrationPrompt(i: IntegrationPromptInput): string {
   lines.push(`## The project`);
   lines.push("");
   lines.push(`A ${i.framework} project. The built site is served from \`${i.outputRoot || "the project root"}\`.`);
+  lines.push("There is no version history here to read: the workspace is a repository with no commits. So git log, git diff and git status tell you nothing about what you or anyone else has changed -- read the files instead. Measured: a build spent a dozen turns re-running git log and listing .git after the first one failed, and its phase was stopped for repeating itself.");
   lines.push(`Routes: ${r.routes.map((x) => `\`${x.page}\``).join(", ")}.`);
   if (m.runtime?.deploy) lines.push(`Deployment target: ${m.runtime.deploy}.`);
   if (m.apis?.length) {
