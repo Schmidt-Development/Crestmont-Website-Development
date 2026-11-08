@@ -357,3 +357,56 @@ test("[CONF-11] a dependency the sandbox cannot build is a violation, not a deta
   });
   assert.ok(!violations(builtin).includes("native-dependency"));
 });
+
+test("[CONF-OUT] a start script that runs a file inside the build output is refused", () => {
+  // The Northgate build that cost three repair cycles. Its start script ran a server inside `dist`, which is the
+  // build output: the driver builds and THEN starts, and a bundler empties its output directory first -- vite does
+  // by default whenever outDir is inside the project -- so the file was deleted before anything could run it.
+  // Cycle 1 failed on that server being CommonJS inside a `"type": "module"` package; cycles 2 and 3 failed with
+  // MODULE_NOT_FOUND because the rebuild had removed it. Model B was handed "it does not work" each time and
+  // rewrote a file the very next step erased. Conformance could not even see it: the output directory is skipped
+  // when sources are read, so nothing in the gate had any way to say what was wrong.
+  const inOutput = repoWith({
+    "package.json": JSON.stringify({
+      ...BASE_PKG, type: "module",
+      scripts: { ...BASE_PKG.scripts, start: "node dist/server.js" },
+    }),
+    "dist/index.html": "<!doctype html><title>x</title>",
+  });
+  const bad = checkConformance({
+    repo: inOutput,
+    manifest: contract({ projectConfig: { allowedNewScripts: ["start"] } } as never),
+    baselinePackage: BASE_PKG,
+    outputRoot: "dist",
+  });
+  assert.ok(violations(bad).includes("start-in-build-output"), violations(bad).join(","));
+  const said = bad.findings.find((f) => f.code === "start-in-build-output");
+  assert.match(said!.detail, /build output/, said!.detail);
+  assert.match(said!.repair, /server\//, "and it says where the server does belong");
+
+  // The same project with its server outside the output directory is not flagged.
+  const outside = repoWith({
+    "package.json": JSON.stringify({
+      ...BASE_PKG, type: "module",
+      scripts: { ...BASE_PKG.scripts, start: "node server/server.js" },
+    }),
+    "dist/index.html": "<!doctype html><title>x</title>",
+    "server/server.js": "import { createServer } from 'node:http';\n",
+  });
+  const fine = checkConformance({
+    repo: outside,
+    manifest: contract({ projectConfig: { allowedNewScripts: ["start"] } } as never),
+    baselinePackage: BASE_PKG,
+    outputRoot: "dist",
+  });
+  assert.ok(!violations(fine).includes("start-in-build-output"), violations(fine).join(","));
+
+  // And a static project, which has no build output of its own, is never flagged for this.
+  const staticProject = checkConformance({
+    repo: outside,
+    manifest: contract({ projectConfig: { allowedNewScripts: ["start"] } } as never),
+    baselinePackage: BASE_PKG,
+    outputRoot: "",
+  });
+  assert.ok(!violations(staticProject).includes("start-in-build-output"), violations(staticProject).join(","));
+});

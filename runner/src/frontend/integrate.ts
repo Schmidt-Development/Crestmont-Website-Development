@@ -27,6 +27,8 @@ export interface IntegrationPromptInput {
   report: ImportReport;
   /** Where the built site is served from, relative to the repo root. */
   outputRoot: string;
+  /** The approved package.json's type field, so the server is written in a module system Node will accept. */
+  packageType?: string | null;
   /** Project framework, for the runtime instructions. */
   framework: string;
 }
@@ -123,7 +125,13 @@ export function integrationPrompt(i: IntegrationPromptInput): string {
     lines.push("");
     lines.push(`It must listen on the port in \`PORT\` when that is set.`);
     lines.push("");
-    lines.push(`The driver runs \`npm run build\` and then \`npm run ${startable}\`, in that order and nothing else. So everything \`${startable}\` needs must exist by the end of \`build\`: if you write the server in TypeScript, either \`build\` compiles it or \`${startable}\` compiles it first. A separate script that nothing runs leaves the application unstartable -- measured, and it cost a whole build: \`start: node dist/server.js\` with the compile in a \`compile-server\` script the build never called, so starting it failed with MODULE_NOT_FOUND and not one acceptance criterion could be evaluated.`);
+    lines.push(`**Put the server's own source outside ${i.outputRoot || "the project root"}.** That directory is the BUILD OUTPUT: the build regenerates it and deletes whatever else is in it, and the driver builds before it starts. A server written there is erased before anything can run it. Measured: a build spent three repair cycles rewriting a server in the output directory and reporting MODULE_NOT_FOUND, because each rebuild removed it again. Put it in server/ at the project root and point the script there.`);
+    lines.push("");
+    lines.push(i.packageType === "module"
+      ? `**This project is an ES module package** (${JSON.stringify({ type: "module" })} in package.json), so the server must use import/export, not require(). Node refuses a require() in such a package and says so: \"To treat it as a CommonJS script, rename it to use the .cjs file extension\". If you compile TypeScript, note that tsc emits CommonJS by default -- set the module option to an ES module format, or the compiled server will not start. Measured: this exact mismatch failed a build's first cycle.`
+      : `This project is a CommonJS package, so the server may use require() or, with the .mjs extension, import/export. Whichever you choose, be consistent with what package.json declares.`);
+    lines.push("");
+    lines.push(`The driver runs \`npm run build\` and then \`npm run ${startable}\`, in that order and nothing else. So everything \`${startable}\` needs must exist by the end of \`build\`: if you write the server in TypeScript, either \`build\` compiles it or \`${startable}\` compiles it first, and either way the compiled output goes OUTSIDE the build output directory, for the reason above. A separate script that nothing runs leaves the application unstartable -- measured, and it cost a whole build: \`start: node dist/server.js\` with the compile in a \`compile-server\` script the build never called, so starting it failed with MODULE_NOT_FOUND and not one acceptance criterion could be evaluated.`);
     lines.push("");
   }
 

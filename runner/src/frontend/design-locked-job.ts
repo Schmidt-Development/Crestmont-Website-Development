@@ -364,7 +364,8 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     : null;
 
   // ── 6. Model B, then verification, then bounded repair ────────────────────────────────────────────────────
-  let prompt = integrationPrompt({ manifest, baseline, report, outputRoot: built.outputRoot, framework: ingest.framework });
+  let prompt = integrationPrompt({ manifest, baseline, report, outputRoot: built.outputRoot, framework: ingest.framework,
+    packageType: typeof approvedPackage?.type === "string" ? approvedPackage.type : null });
   let previousViolations: string[] = [];
   /** What the three gates measured last cycle, so "did this help" is a comparison and not a guess. */
   let previous: { violations: number; functional: number; visual: number } | null = null;
@@ -387,7 +388,14 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     const changedFiles = countChanged(before, fileSnapshot(d.ws.repo));
 
     // Model B does NOT get to say whether its own work is done. Each of these runs independently.
-    const conf = checkConformance({ repo: d.ws.repo, manifest, baselinePackage: approvedPackage });
+    // The output root is passed ONLY when something actually rebuilds it. The rule it feeds says "the build
+    // regenerates this directory, so do not keep the server here" -- true of a bundled project, and false of a
+    // static site, which has an output root but no build step and therefore nothing that erases anything. Passing
+    // it unconditionally would have refused a perfectly good static project for a danger it does not have.
+    const conf = checkConformance({
+      repo: d.ws.repo, manifest, baselinePackage: approvedPackage,
+      outputRoot: built.plan.buildCommand ? built.outputRoot : null,
+    });
     // Rebuild the way THIS project is built, which `planBuild` already decided at import time from the approved
     // artifact. For a static site that answer is `null`: there is no build step, the document Model B just edited
     // IS the servable site, and there is nothing to compile before measuring it.
