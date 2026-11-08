@@ -28,6 +28,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { launchBrowser, evidenceRunLink } from "./support.ts";
 import { totpCode } from "../../src/lib/auth-crypto.ts";
 import { signEvidence } from "../../src/readiness/ingest.ts";
+import { INTERNAL_NOTIFY_EMAIL } from "../../src/services/internal-notify.ts";
 
 const BASE = process.env.E2E_BASE_URL?.replace(/\/$/, "");
 const ACCOUNTS = process.env.E2E_ACCOUNTS_FILE;
@@ -845,13 +846,35 @@ journey(19, ["PM-007"], "authorized deployment occurs (this run's project, after
   const pm = await as("project_manager");
   await pm.goto(`${BASE}/staff/projects/${id}?tab=approvals`);
   const rec = 'form[action$="/approvals"]';
-  for (const kind of ["engineering_complete", "internal_qa", "security_accessibility", "deployment_authorized"]) {
+  const approve = async (kind: string) => {
+    await pm.goto(`${BASE}/staff/projects/${id}?tab=approvals`);
     await pm.locator(`${rec} select[name=kind]`).selectOption(kind);
     await pm.locator(`${rec} select[name=decision]`).selectOption("approved");
     await pm.locator(`${rec} textarea[name=notes]`).fill(`E2E ${RUN}: ${kind} checked (staging journey test).`);
     await nav(pm, pm.locator(rec).getByRole("button", { name: "Record" }));
     assert.match(await alerts(pm), /Approval recorded/i, await alerts(pm));
-  }
+  };
+  for (const kind of ["engineering_complete", "internal_qa", "security_accessibility"]) await approve(kind);
+  // Founder Phase 7 (production-blocking, #226): no deployment until the customer has signed the maintenance agreement
+  // AND Stripe has confirmed the first subscription payment through its signed webhook. This run's customer does both
+  // through the real portal and Stripe TEST-mode Checkout, exactly as a customer would; nothing is forced in the database.
+  const c = people.newCustomer.page;
+  await c.goto(`${BASE}/portal/projects/${id}`);
+  const sign = c.locator("[data-launch-gate]").getByRole("link", { name: "Sign your maintenance agreement" });
+  assert.equal(await sign.count(), 1, `the launch-gate card asks for the agreement: ${(await text(c, "[data-launch-gate]").catch(() => "(no card)")).slice(0, 300)}`);
+  await c.goto(new URL((await sign.getAttribute("href"))!, BASE).href);
+  await c.locator("input[name=agree]").check();
+  await c.getByRole("button", { name: "Sign the maintenance agreement" }).click();
+  await c.waitForURL((u: URL) => u.pathname === `/portal/projects/${id}`, { timeout: 60_000 });
+  const activate = c.locator("[data-launch-gate]").getByRole("link", { name: "Activate your maintenance subscription" });
+  assert.equal(await activate.count(), 1, "the activation link appears once the agreement is signed");
+  await c.goto(new URL((await activate.getAttribute("href"))!, BASE).href);
+  await c.locator("input[name=terms]").check();
+  await c.locator('form[action^="/checkout/maintenance/"] button[type=submit]').click();
+  await payOnStripeCheckout(c);
+  await until(pm, `${BASE}/staff/projects/${id}?tab=approvals`, /7\. Maintenance agreement signed and first subscription payment verified\s+Pass/,
+    "Stripe's signed webhook confirming the first maintenance payment", 180_000);
+  await approve("deployment_authorized");
   const panel = await gate();
   for (const n of [1, 2, 3, 4, 5, 6, 7]) assert.match(panel, new RegExp(`${n}\\. [^\\n]+\\s+Pass`), `check ${n} passes`);
   // A deployment record for this run's project (a placeholder URL on a reserved domain; no real site is published).
@@ -860,7 +883,6 @@ journey(19, ["PM-007"], "authorized deployment occurs (this run's project, after
   await nav(pm, btn(pm, "Record deployment"));
   assert.match(await alerts(pm), /Deployment recorded/i, await alerts(pm));
   assert.match(await text(pm), re(live), "deployment listed for the PM");
-  const c = people.newCustomer.page;
   await c.goto(`${BASE}/portal/projects/${id}`);
   const page = await text(c);
   assert.match(page, /Deployment/i, "the customer sees the project in deployment");
@@ -869,23 +891,25 @@ journey(19, ["PM-007"], "authorized deployment occurs (this run's project, after
 
 // ───────────── 20. Handoff ─────────────
 
-journey(20, ["PORTAL-010"], "PM publishes the handoff (sample Ridgeline project) and the customer receives it", {}, async () => {
-  const id = await projectId("customer.ridgeline", RIDGELINE);
+// This run's project, after journey 19: a handoff is a publication, so the launch gate applies to it too (#226). The
+// seeded Ridgeline sample can never carry a Stripe-verified maintenance payment, so it can no longer receive a handoff.
+journey(20, ["PORTAL-010"], "PM publishes the handoff (this run's project, after its launch gate) and the customer receives it", { needs: [19] }, async () => {
+  const id = await runProject();
   const pm = await as("project_manager");
   await pm.goto(`${BASE}/staff/projects/${id}?tab=handoff`);
-  await pm.fill("#f-website_url", "https://ridgeline-sample.example");
+  await pm.fill("#f-website_url", `https://${RUN}.handoff-sample.example`);
   await pm.fill("#f-documentation", `Sample editing guide for services and gallery pages (E2E ${RUN}).`);
   await pm.fill("#f-access_instructions", "Admin invitations are sent to your email; set your own password.");
   await pm.fill("#f-ownership_notes", "Domain registered in the customer's name (sample).");
   await pm.fill("#f-training_notes", "30-minute recorded walkthrough (sample).");
   await nav(pm, btn(pm, /^(Publish to customer|Update published handoff)$/i));
   assert.match(await text(pm), /Published/i, await alerts(pm));
-  const c = await as("customer.ridgeline");
+  const c = people.newCustomer.page;
   await c.goto(BASE + "/portal");
   await nav(c, c.getByRole("link", { name: /Review your handoff and record final acceptance/ }).first());
   const h = await text(c);
   assert.match(h, re(`(E2E ${RUN})`), "customer sees the current handoff");
-  assert.match(h, /ridgeline-sample\.example/);
+  assert.match(h, re(`${RUN}.handoff-sample.example`));
   assert.match(h, /30-minute recorded walkthrough/);
   assertClean();
 });
@@ -1088,14 +1112,15 @@ test("[PAY-007] [PAY-003] Stripe test mode: the Founder issues a refund; the sig
 // Stripe's published dispute test card, which succeeds and then opens a fraudulent-reason dispute. The signed
 // charge.dispute.created webhook must record it for staff and email the Owner once. Test mode only.
 const STRIPE_DISPUTE_CARD = { number: "4000 0000 0000 0259", expiry: "12 / 34", cvc: "123" };
-test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Disputes and the Owner is emailed once", { skip: unset || false }, async (t) => {
+test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Disputes and the internal mailbox is emailed once", { skip: unset || false }, async (t) => {
   if (outcome.get(6) !== "passed") { t.skip(`needs journey 6 (${outcome.get(6) ?? "not run"})`); return; }
   const o = await as("owner");
   // Count across EVERY page of the email log (25 rows a page), from today's date. Counting page one only saturated at
   // 25 once staging had sent that many dispute emails: deploy #154 read "25 !== 26" with the email actually sent, and
   // the assertion could never pass again. A UTC date filter keeps the walk short; the count is still exact.
   const since = new Date().toISOString().slice(0, 10);
-  const ownerMail = (page: number) => `${BASE}/staff/email?to=${encodeURIComponent(account("owner").email)}&template=dispute_opened&from=${since}&page=${page}`;
+  // Founder Phase 14 (#229): dispute notices go to the internal operations mailbox, not to an Owner's own address.
+  const ownerMail = (page: number) => `${BASE}/staff/email?to=${encodeURIComponent(process.env.INTERNAL_NOTIFY_EMAIL ?? INTERNAL_NOTIFY_EMAIL)}&template=dispute_opened&from=${since}&page=${page}`;
   const disputeMails = async () => {
     let total = 0;
     for (let page = 1; page <= 40; page++) {
@@ -1121,7 +1146,7 @@ test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Dis
   const end = Date.now() + 120_000;
   let after = await disputeMails();
   while (after === before && Date.now() < end) { await o.waitForTimeout(5_000); after = await disputeMails(); }
-  assert.equal(after, before + 1, "exactly one new dispute email to the Owner");
+  assert.equal(after, before + 1, "exactly one new dispute email to the internal operations mailbox");
   assertClean();
 });
 
