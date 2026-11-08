@@ -172,9 +172,14 @@ test("[INFRA-006] unconfigured integrations stay not_configured and cannot be pr
   await assert.rejects(verifyIntegration(d, "stripe", null), /no verification probe/);
   await assert.rejects(verifyIntegration(d, "telephony", null), /no verification probe/);
   const rows = await refreshIntegrationHealth(d);
-  for (const id of ["stripe", "resend", "ai", "voice", "telephony", "monitoring", "github", "turnstile", "object_storage"]) {
+  for (const id of ["stripe", "resend", "ai", "voice", "telephony", "github", "turnstile", "object_storage", "retell", "retell_outbound"]) {
     assert.equal(rows.find((r) => r.integration === id)!.status, "not_configured", id);
   }
+  // Alert routing is built in (ops_alerts → internal mailbox) but development runs no scheduler and there is no
+  // external uptime monitor: never "verified", never "not configured" either.
+  const mon = rows.find((r) => r.integration === "monitoring")!;
+  assert.equal(mon.status, "configured_unverified");
+  assert.match(mon.detail ?? "", /No external uptime monitor is configured/);
   assert.equal((await verifyIntegration(d, "database", null)).status, "verified");
   // Resend: valid key but official domain not verified → degraded, never verified.
   const resendEnv: Env = { ...app.env, RESEND_API_KEY: "re_test_123456789012" };

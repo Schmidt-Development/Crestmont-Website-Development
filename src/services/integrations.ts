@@ -30,7 +30,9 @@ export const INTEGRATIONS = [
   { id: "github", label: "GitHub repository", blocker: null },
   { id: "turnstile", label: "Cloudflare Turnstile (bot defence)", blocker: "BLK-003" },
   { id: "retell", label: "Retell AI webhooks (voice receptionist)", blocker: "BLK-009" },
+  { id: "retell_outbound", label: "Retell outbound (AI sales calls)", blocker: "BLK-009" },
   { id: "resend_webhooks", label: "Resend delivery webhooks (bounces, complaints)", blocker: "BLK-005" },
+  { id: "bindings", label: "Environment bindings and secrets (this environment)", blocker: null },
 ] as const;
 export type IntegrationId = (typeof INTEGRATIONS)[number]["id"];
 export type HealthStatus = "not_configured" | "configured_unverified" | "verified" | "degraded" | "failing" | "blocked";
@@ -100,8 +102,19 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
       const r = await receptionistStatus(d.db, e);
       return { status: r.phone.state, detail: r.phone.detail, fingerprint: `phone:${r.phone.state}:${r.lastRealCallAt ?? ""}`, probe: false };
     }
-    case "monitoring":
-      return { status: "not_configured", detail: "Errors are recorded in the in-app error log only. No external uptime monitor or alert routing (email/SMS/pager) is configured; nobody is notified automatically.", fingerprint: null, probe: false };
+    case "monitoring": {
+      // Alert routing exists: the ops_alerts job (every 15 minutes) emails the internal operations mailbox about
+      // dead-lettered payment events, new payment discrepancies, a stuck email queue and failing feeds. What does not
+      // exist is an EXTERNAL uptime monitor: if the whole platform is down, nothing inside it can send an alert.
+      const job = await d.db.prepare(`SELECT last_success_at, last_attempt_at, last_error FROM ingestion_status WHERE source = 'job:ops_alerts'`).first<{ last_success_at: string | null; last_attempt_at: string | null; last_error: string | null }>();
+      const noExternal = "No external uptime monitor is configured, so a full outage of the platform would not alert anyone.";
+      if (e.ENVIRONMENT === "development") return { status: "configured_unverified", detail: `Operations alerts are built in (scheduled job ops_alerts, emailed to the internal mailbox); development runs no scheduler. ${noExternal}`, fingerprint: "monitoring:dev", probe: false };
+      if (!job?.last_attempt_at) return { status: "failing", detail: `The scheduled operations-alert job has never run in ${e.ENVIRONMENT}: check the cron trigger. ${noExternal}`, fingerprint: "monitoring:never", probe: false };
+      const ageMin = Math.round((Date.now() - Date.parse(job.last_attempt_at)) / 60_000);
+      if (job.last_error) return { status: "failing", detail: `The last operations-alert run failed (${job.last_error.slice(0, 160)}). ${noExternal}`, fingerprint: `monitoring:err:${job.last_attempt_at}`, probe: false };
+      if (ageMin > 60) return { status: "failing", detail: `The operations-alert job last ran ${ageMin} minutes ago (it should run every 15): the scheduler may have stopped. ${noExternal}`, fingerprint: `monitoring:stale:${job.last_attempt_at}`, probe: false };
+      return { status: "configured_unverified", detail: `Operations alerts run every 15 minutes and email the internal mailbox (last run ${ageMin} minute${ageMin === 1 ? "" : "s"} ago). ${noExternal}`, fingerprint: `monitoring:ok`, probe: false };
+    }
     case "dns":
       return { status: "not_configured", detail: `No DNS provider access is configured (BLK-011). The probe can check public resolution of ${OFFICIAL_DOMAIN}, which does not prove control.`, fingerprint: null, probe: true };
     case "github": {
@@ -134,7 +147,42 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
       const sales = `Sales workspace key (RETELL_OUTBOUND_API_KEY): ${out ? "set" : "not set"}.`;
       if (keysAmbiguous(e)) return { status: "not_configured", detail: "RETELL_INBOUND_API_KEY and RETELL_OUTBOUND_API_KEY are identical, so the workspace of a request cannot be told apart: every Retell request is refused. Set each to its own workspace's key.", fingerprint: null, probe: false };
       if (!inb) return { status: "not_configured", detail: `RETELL_INBOUND_API_KEY is not set; the receptionist's Retell routes (/api/webhooks/retell/functions, /api/webhooks/retell/inbound) reject every request. ${sales}${legacy}`, fingerprint: null, probe: false };
-      return { status: "configured_unverified", detail: `Receptionist workspace key (RETELL_INBOUND_API_KEY) set, so signed receptionist events and functions are accepted. ${sales} Unverified until a test call is received; there is no read-only probe. Follow-up calling: ${e.RETELL_OUTBOUND === "on" ? "environment switch on (the Owner setting must also be on)" : "off (RETELL_OUTBOUND not on)"}.${legacy}`, fingerprint: await fp(inb), probe: false };
+      const rs = await receptionistStatus(d.db, e);
+      const follow = ` Follow-up calling: ${e.RETELL_OUTBOUND === "on" ? "environment switch on (the Owner setting must also be on)" : "off (RETELL_OUTBOUND not on)"}.`;
+      return { status: rs.webhooks.state === "not_configured" ? "configured_unverified" : rs.webhooks.state, detail: `Receptionist workspace key (RETELL_INBOUND_API_KEY) set. ${rs.webhooks.detail} ${sales}${follow}${legacy}`, fingerprint: `${await fp(inb)}:${rs.webhooks.state}`, probe: false };
+    }
+    case "retell_outbound": {
+      // The sales workspace (src/services/sales-outbound.ts). Verified only by a passing read-only audit of the live
+      // sales agent or a real signed sales call recorded in this environment.
+      if (keysAmbiguous(e)) return { status: "failing", detail: "RETELL_INBOUND_API_KEY and RETELL_OUTBOUND_API_KEY are identical: the sales and receptionist workspaces cannot be told apart, so every Retell request is refused.", fingerprint: null, probe: false };
+      const out = retellKey(e, "outbound");
+      if (!out) return { status: "not_configured", detail: "RETELL_OUTBOUND_API_KEY (the sales workspace key) is not set: AI sales calls and scheduled AI callbacks cannot be placed or verified here.", fingerprint: null, probe: false };
+      const audit = await d.db.prepare(`SELECT created_at, details_json FROM audit_logs WHERE action = 'sales_outbound.retell_audit' ORDER BY created_at DESC LIMIT 1`).first<{ created_at: string; details_json: string | null }>();
+      let st: string | null = null;
+      try { st = audit ? String((JSON.parse(audit.details_json ?? "{}") as { status?: string }).status ?? "") : null; } catch { st = null; }
+      const env = e.ENVIRONMENT === "production" ? "production" : e.ENVIRONMENT === "staging" ? "staging" : "development";
+      const calls = (await d.db.prepare(`SELECT COUNT(*) AS n FROM sales_calls WHERE provider_call_id IS NOT NULL AND is_test = 0 AND finalized_at >= ?`).bind(new Date(Date.now() - 30 * 86_400_000).toISOString()).first<{ n: number }>())?.n ?? 0;
+      const fpv = `${await fp(out)}:${st ?? ""}:${calls}`;
+      if (st === "issues" || st === "failed") return { status: "failing", detail: `The last read-only audit of the live sales agent (${audit!.created_at.slice(0, 10)}) found problems. Calls are still re-checked by the compliance gate before every dial.`, fingerprint: fpv, probe: false };
+      if (st === "ok") return { status: "verified", detail: `Sales workspace key set; the live sales agent passed the read-only audit on ${audit!.created_at.slice(0, 10)} in ${env}.`, fingerprint: fpv, probe: false };
+      if (calls) return { status: "verified", detail: `Sales workspace key set; ${calls} real sales call(s) completed with signed Retell events in the last 30 days.`, fingerprint: fpv, probe: false };
+      return { status: "configured_unverified", detail: `Sales workspace key set in ${env}, but no live audit has passed and no real sales call has completed here. Run the outbound Retell audit to verify.`, fingerprint: fpv, probe: false };
+    }
+    case "bindings": {
+      // What THIS Worker has bound, read from its own environment (presence only; each integration row checks its value).
+      const env = e.ENVIRONMENT;
+      if (env === "development") return { status: "configured_unverified", detail: "Development uses local adapters (SQLite, local disk, development outbox); production bindings are not expected here.", fingerprint: "bindings:dev", probe: false };
+      const need: [string, boolean][] = [
+        ["D1 database (DB)", !!d.db], ["R2 file storage (FILES)", !!d.storage && d.storage.kind !== "local-disk"],
+        ["APP_URL (https)", !!e.APP_URL && /^https:\/\//.test(e.APP_URL)], ["SCHEDULER_TRIGGER_SECRET", !!e.SCHEDULER_TRIGGER_SECRET],
+        ["STRIPE_SECRET_KEY", !!e.STRIPE_SECRET_KEY], ["STRIPE_WEBHOOK_SECRET", !!e.STRIPE_WEBHOOK_SECRET],
+        ["RESEND_API_KEY", !!e.RESEND_API_KEY], ["RESEND_WEBHOOK_SECRET", !!e.RESEND_WEBHOOK_SECRET],
+        ["RETELL_INBOUND_API_KEY", !!retellKey(e, "inbound")], ["TURNSTILE_SECRET and TURNSTILE_SITE_KEY", !!e.TURNSTILE_SECRET && !!e.TURNSTILE_SITE_KEY],
+      ];
+      const missing = need.filter(([, ok]) => !ok).map(([n]) => n);
+      const fpb = `bindings:${missing.join(",")}`;
+      if (!missing.length) return { status: "verified", detail: `All ${need.length} required bindings and secrets are present in this ${env} Worker (presence read from the Worker itself; values are checked by each integration's own row). Staging results never prove production.`, fingerprint: fpb, probe: false };
+      return { status: "degraded", detail: `Missing in this ${env} Worker: ${missing.join(", ")}. Present: ${need.filter(([, ok]) => ok).map(([n]) => n).join(", ") || "none"}. Staging and production are configured separately.`, fingerprint: fpb, probe: false };
     }
     case "resend_webhooks":
       if (!e.RESEND_WEBHOOK_SECRET) return { status: "not_configured", detail: "RESEND_WEBHOOK_SECRET is not set; /api/webhooks/resend rejects every request, so bounces and complaints are not recorded.", fingerprint: null, probe: false };

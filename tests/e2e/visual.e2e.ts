@@ -235,13 +235,13 @@ test("[BRAND-005] skeleton loader appears while a slow server-rendered page load
   await page.goto(srv.base + "/staff");
   // Delay the readiness response so the in-between state is observable, and record (before the document is
   // replaced) whether the skeleton was rendered into <main>.
-  await page.route("**/staff/readiness", async (route: { continue(): Promise<void> }) => { await new Promise((r) => setTimeout(r, 900)); await route.continue(); });
+  await page.route("**/staff/finance", async (route: { continue(): Promise<void> }) => { await new Promise((r) => setTimeout(r, 900)); await route.continue(); });
   await page.evaluate(() => {
     new MutationObserver(() => {
       if (document.querySelector("main.is-loading > .loading-state .skeleton")) sessionStorage.setItem("skeletonSeen", "1");
     }).observe(document.querySelector("main")!, { childList: true, subtree: true, attributes: true });
   });
-  await Promise.all([page.waitForURL(/\/staff\/readiness$/), page.locator('.sidebar a[href="/staff/readiness"]').click()]);
+  await Promise.all([page.waitForURL(/\/staff\/finance$/), page.locator('.sidebar a[href="/staff/finance"]').click()]);
   await page.waitForLoadState("load");
   assert.equal(await page.evaluate(() => sessionStorage.getItem("skeletonSeen")), "1", "skeleton shown while the slow page computed");
   assert.equal(await page.locator("main .loading-state").count(), 0);
