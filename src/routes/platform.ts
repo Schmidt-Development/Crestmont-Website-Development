@@ -851,13 +851,19 @@ ${pagination(ctx, page, events.length > limit)}</section>`;
   });
 
   // ── Audit logs ──
+  const ACTION_RANGE = "a.action >= ? AND a.action <= ?";
+  /** [lower, upper] bounds of every lower-case action name that starts with `prefix` (U+10FFFF sorts after any character). */
+  const actionRange = (prefix: string): [string, string] => { const lo = prefix.toLowerCase(); return [lo, `${lo}\u{10FFFF}`]; };
   const auditQuery = (ctx: AppContext) => {
     const actor = q(ctx, "actor", 254), action = q(ctx, "action", 120), subject = q(ctx, "subject", 120), from = q(ctx, "from", 10), to = q(ctx, "to", 10);
     const employee = q(ctx, "employee", 64), group = q(ctx, "group", 20), record = q(ctx, "record", 120), outcome = q(ctx, "outcome", 10);
     const where: string[] = [], binds: unknown[] = [];
     if (employee) { where.push("a.actor_user_id = ?"); binds.push(employee); }
     const g = ACTION_GROUPS.find((x) => x.value === group);
-    if (g) { where.push(`(${g.prefixes.map(() => "a.action LIKE ? ESCAPE '\\'").join(" OR ")})`); binds.push(...g.prefixes.map((x) => likePrefix(`${x}.`))); }
+    // Each prefix is also stated as a range so SQLite can answer it from idx_e_audit_logs_action: LIKE is
+    // case-insensitive, so on its own it can never use that index and every request walked the whole audit log.
+    // Audit action names are lower-case identifiers, so the range and the LIKE select the same rows.
+    if (g) { where.push(`(${g.prefixes.map(() => `(${ACTION_RANGE} AND a.action LIKE ? ESCAPE '\\')`).join(" OR ")})`); for (const x of g.prefixes) binds.push(...actionRange(`${x}.`), likePrefix(`${x}.`)); }
     if (record) {
       // A customer or project by name: events about it, or events inside that customer's organization.
       where.push(`(a.organization_id IN (SELECT id FROM organizations WHERE name LIKE ? ESCAPE '\\') OR (a.subject_type = 'project' AND a.subject_id IN (SELECT id FROM projects WHERE name LIKE ? ESCAPE '\\'))
@@ -866,7 +872,7 @@ ${pagination(ctx, page, events.length > limit)}</section>`;
     }
     if (outcome === "failed") where.push(FAILURE_SQL); else if (outcome === "succeeded") where.push(`NOT ${FAILURE_SQL}`);
     if (actor) { where.push("(a.actor_user_id = ? OR u.email LIKE ? ESCAPE '\\' OR a.actor_kind = ?)"); binds.push(actor, likeContains(actor), actor); }
-    if (action) { where.push("a.action LIKE ? ESCAPE '\\'"); binds.push(likePrefix(action)); }
+    if (action) { where.push(`${ACTION_RANGE} AND a.action LIKE ? ESCAPE '\\'`); binds.push(...actionRange(action), likePrefix(action)); }
     if (subject) { where.push("(a.subject_type = ? OR a.subject_id = ?)"); binds.push(subject, subject); }
     if (isDate(from)) { where.push("a.created_at >= ?"); binds.push(from); }
     if (isDate(to)) { where.push("a.created_at < ?"); binds.push(new Date(Date.parse(to) + 86400e3).toISOString().slice(0, 10)); }
