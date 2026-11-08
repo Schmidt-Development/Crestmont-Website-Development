@@ -1,5 +1,27 @@
 # Retell dashboard changes for the Founder (2026-11-08)
 
+> **SUPERSEDED (2026-11-08, evening).** The Founder saved and republished both agents' master prompts after this was
+> written. Do not use the instructions below, and never overwrite or revert either published prompt. The read-only live
+> audits of the newly published versions (staging deploy run 42521194657, 20:45 UTC) found:
+>
+> - **Receptionist `agent_b6ed20f033422649ecf1aedd38`: 43/43 checks pass.** v4 is published and carries the saved
+>   prompt (14,046 characters, sha256 prefix `6316b7dd75e0`). All 17 functions are named, 24/7 service holds with no
+>   after-hours wording, callback booking uses `schedule_consultation`, and the Founder calendar is used only on request
+>   (`wants_founder`). Warm transfer goes to `{{transfer_number}}`. Number …2055 routes to the latest published version.
+> - **Sales agent `agent_bbb30864fb403d788a5a2784bc`: 42/44 findings ok.** v3 is published (13,851 characters, sha
+>   `90aef151803548bb`). All nine functions match the backend and are named in the prompt. Two findings remain in the
+>   live configuration:
+>   1. *Voicemail message content*: the fixed voicemail text is unchanged (288 characters, sha `99a985f3aeec`). It
+>      names Crestmont and gives a callback number, but does not say the caller is an AI. This is the voicemail
+>      setting, not the prompt. Section 1 below still applies to that one setting only, and outbound calling stays off.
+>   2. *SIE current version = live prompt*: the Sales Self-Improvement Engine's recorded version (v2) differs from the
+>      newly published prompt. Until an Owner presses **Adopt live prompt** on /staff/sales-optimization, the engine
+>      refuses to deploy over the live prompt, which protects the Founder's text. Adopting records the published prompt
+>      as the engine's baseline and changes nothing in Retell.
+>
+> The receptionist's equivalent (**Adopt the live Retell prompt** on /staff/voice) is informational only. The platform
+> pushes nothing while no version is active.
+
 These changes are made by the Founder in the Retell dashboard. The platform never writes either agent's prompt or
 settings during a deployment, and nothing in this document has been applied. Each change is saved as a **draft** first
 and goes live only when the Founder reviews it and presses **Publish**. Leave the working configuration in place until
