@@ -13,12 +13,11 @@
 import type { Db } from "../lib/db.ts";
 import type { Env } from "../app/context.ts";
 import { retellKey, keysAmbiguous } from "../adapters/retell-workspaces.ts";
-import { loadSalesSettings, salesOutboundSwitch, callbackSwitch, leadFacts, gateFor, CONSENTED_LEAD_IDS } from "./sales-outbound.ts";
+import { loadSalesSettings, salesOutboundSwitch, callbackSwitch, leadFacts, gateFor, CONSENTED_OPEN_WHERE, OPEN_SALES_STAGES } from "./sales-outbound.ts";
 import { voiceBudget, type VoiceBudget } from "./voice-budget.ts";
 
 /** Open CRM stages a sales call may be placed for (same list as the engine's candidate query). */
-const OPEN_STAGES = ["new", "qualified", "quote_required", "quote_sent", "negotiation"] as const;
-const OPEN_IN = OPEN_STAGES.map((s) => `'${s}'`).join(",");
+const OPEN_IN = OPEN_SALES_STAGES.map((s) => `'${s}'`).join(",");
 
 /** Each recorded call result, in the words the Sales team uses. */
 export const OUTCOME_LABELS: Record<string, string> = {
@@ -55,8 +54,8 @@ export interface OutboundStatus {
 const n = async (db: Db, sql: string, ...b: unknown[]) => (await db.prepare(sql).bind(...b).first<{ n: number }>())?.n ?? 0;
 
 /** Leads with documented AI-calling consent that are open in the CRM, not merged, and not yet in a cold call series.
- *  Driven from the consents (CONSENTED_LEAD_IDS, evaluated once), never from all leads: see sales-outbound.ts. */
-const CONSENTED_OPEN = `FROM leads l WHERE l.id IN (${CONSENTED_LEAD_IDS}) AND l.merged_into_lead_id IS NULL AND l.stage IN (${OPEN_IN})`;
+ *  Driven from the consents (evaluated once, leads fetched by primary key), never from all leads: see sales-outbound.ts. */
+const CONSENTED_OPEN = `FROM leads l WHERE ${CONSENTED_OPEN_WHERE}`;
 const CANDIDATES = `${CONSENTED_OPEN} AND NOT EXISTS (SELECT 1 FROM sales_calls c WHERE c.lead_id = l.id AND c.mode = 'cold')`;
 
 export async function outboundStatus(db: Db, env: Env, now: Date, periodDays = 30): Promise<OutboundStatus> {

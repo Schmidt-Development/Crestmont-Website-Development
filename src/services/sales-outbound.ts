@@ -688,13 +688,30 @@ async function dispatchMode(d: SalesQueueDeps, s: SalesSettings, mode: OutboundM
  */
 /**
  * The leads that have documented, unrevoked AI-calling consent: a consent recorded on the lead, or on a number one of
- * its research records carries. Uncorrelated on purpose: it is evaluated ONCE from the small side (consents, then their
- * phone matches through idx_research_prospects_phone) and leads are looked up by primary key. The earlier form joined
- * every open lead to every consent with a correlated research_prospects subquery, ~8.6 s of D1 time at staging scale
- * (36,780 leads, 120 consents), which exhausted D1's 10-second resource window and made the pages behind it 500.
+ * its research records carries. Uncorrelated, and driven from the small side: evaluated ONCE, starting from the
+ * consents (CROSS JOIN fixes that order in SQLite) and finding their research records through
+ * idx_research_prospects_phone. A plain JOIN let the planner walk every research record that has a CRM lead (~36,000
+ * on staging) and probe the consents for each.
+ *
+ * History: the first form joined every open lead to every consent through a correlated research_prospects subquery,
+ * ~8.6 s of D1 time at staging scale (36,780 leads, 120 consents), which exhausted D1's 10-second resource window and
+ * made the pages behind it 500 (staging deploy 42514825859). The uncorrelated rewrite still read ~1M rows for one
+ * /staff/sales request on staging (deploy 42518473036): this side-ordering and CONSENTED_OPEN_WHERE below remove the
+ * remaining full passes.
  */
 export const CONSENTED_LEAD_IDS = `SELECT sc.lead_id FROM sales_call_consents sc WHERE sc.revoked_at IS NULL AND sc.lead_id IS NOT NULL
-  UNION SELECT rp.crm_lead_id FROM sales_call_consents sc JOIN research_prospects rp ON rp.phone_e164 = sc.phone_e164 WHERE sc.revoked_at IS NULL AND rp.crm_lead_id IS NOT NULL`;
+  UNION SELECT rp.crm_lead_id FROM sales_call_consents sc CROSS JOIN research_prospects rp ON rp.phone_e164 = sc.phone_e164 WHERE sc.revoked_at IS NULL AND rp.crm_lead_id IS NOT NULL`;
+
+/** Open CRM stages a cold call may be placed for. */
+export const OPEN_SALES_STAGES = ["new", "qualified", "quote_required", "quote_sent", "negotiation"] as const;
+
+/**
+ * Consented leads (alias `l`) that are open and not merged. The unary `+` keeps SQLite from answering through
+ * idx_leads_merged / idx_leads_stage (a pass over every unmerged lead, filtered by the consent list afterwards): the
+ * leads are fetched by primary key from the short consent list, and the stage and merge tests are applied to those
+ * rows only.
+ */
+export const CONSENTED_OPEN_WHERE = `l.id IN (${CONSENTED_LEAD_IDS}) AND +l.merged_into_lead_id IS NULL AND +l.stage IN (${OPEN_SALES_STAGES.map((s) => `'${s}'`).join(",")})`;
 
 export async function topUpColdCandidates(db: Db, s: SalesSettings, now: Date): Promise<number> {
   const remaining = coldDailyLimit(s) - (await dialsToday(db, now)).cold;
@@ -702,7 +719,7 @@ export async function topUpColdCandidates(db: Db, s: SalesSettings, now: Date): 
   const want = Math.min(Math.max(0, remaining - queued), s.max_dials_per_run * 3);
   if (want <= 0) return 0;
   const rows = (await db.prepare(`SELECT l.id FROM leads l
-      WHERE l.id IN (${CONSENTED_LEAD_IDS}) AND l.merged_into_lead_id IS NULL AND l.stage IN ('new','qualified','quote_required','quote_sent','negotiation')
+      WHERE ${CONSENTED_OPEN_WHERE}
         AND NOT EXISTS (SELECT 1 FROM sales_calls c WHERE c.lead_id = l.id AND c.mode = 'cold')
       ORDER BY l.created_at LIMIT ?`).bind(want).all<{ id: string }>()).results;
   let n = 0;

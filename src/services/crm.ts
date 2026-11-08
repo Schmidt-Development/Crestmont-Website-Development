@@ -367,9 +367,18 @@ export const SALES_DEFINITIONS: [string, string][] = [
 export async function salesReport(db: Db, actor: Actor, range: DateRange) {
   const scope = leadScope(actor);
   const r = [range.fromIso, range.toIso];
-  const bySource = (await db.prepare(`SELECT l.source, COUNT(*) AS n, SUM(CASE WHEN l.stage='converted' THEN 1 ELSE 0 END) AS converted FROM leads l WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND l.created_at >= ? AND l.created_at < ? GROUP BY l.source ORDER BY n DESC`)
-    .bind(...scope.binds, ...r).all<{ source: string; n: number; converted: number }>()).results;
-  const funnel = (await db.prepare(`SELECT l.stage, COUNT(*) AS n FROM leads l WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND l.created_at >= ? AND l.created_at < ? GROUP BY l.stage`).bind(...scope.binds, ...r).all<{ stage: string; n: number }>()).results;
+  // ONE pass over the range's leads gives both the by-source chart and the stage funnel (staging: 36,780 leads; every
+  // pass counts against D1's 10-second resource window, deploy 42518473036).
+  const cells = (await db.prepare(`SELECT l.source, l.stage, COUNT(*) AS n FROM leads l WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND l.created_at >= ? AND l.created_at < ? GROUP BY l.source, l.stage`)
+    .bind(...scope.binds, ...r).all<{ source: string; stage: string; n: number }>()).results;
+  const src = new Map<string, { source: string; n: number; converted: number }>(), stages = new Map<string, number>();
+  for (const c of cells) {
+    const e = src.get(c.source) ?? { source: c.source, n: 0, converted: 0 };
+    e.n += c.n; if (c.stage === "converted") e.converted += c.n; src.set(c.source, e);
+    stages.set(c.stage, (stages.get(c.stage) ?? 0) + c.n);
+  }
+  const bySource = [...src.values()].sort((a, b) => b.n - a.n);
+  const funnel = [...stages].map(([stage, n]) => ({ stage, n }));
   const created = bySource.reduce((s, x) => s + x.n, 0);
   const converted = bySource.reduce((s, x) => s + (x.converted ?? 0), 0);
   const sent = await db.prepare(`SELECT COUNT(*) AS n FROM quotes q JOIN leads l ON l.id = q.lead_id WHERE ${scope.sql} AND q.sent_at >= ? AND q.sent_at < ?`).bind(...scope.binds, ...r).first<{ n: number }>();
@@ -379,8 +388,9 @@ export async function salesReport(db: Db, actor: Actor, range: DateRange) {
         WHERE p.status IN ('succeeded','partially_refunded','refunded','disputed') AND p.provider <> 'simulated' AND p.created_at >= ? AND p.created_at < ? GROUP BY source ORDER BY cents DESC`).bind(...r).all<{ source: string; cents: number }>()).results
     : (await db.prepare(`SELECT l.source AS source, SUM(p.amount_cents) AS cents FROM payments p JOIN orders o ON o.id = p.order_id JOIN leads l ON l.id = o.lead_id
         WHERE ${scope.sql} AND p.status IN ('succeeded','partially_refunded','refunded','disputed') AND p.provider <> 'simulated' AND p.created_at >= ? AND p.created_at < ? GROUP BY l.source ORDER BY cents DESC`).bind(...scope.binds, ...r).all<{ source: string; cents: number }>()).results;
-  const attribution = await attributionReport(db, actor, range);
-  return { bySource, funnel: Object.fromEntries(funnel.map((f) => [f.stage, f.n])) as Record<string, number>, created, converted, rate: created ? converted / created : null, quotesSent: sent?.n ?? 0, quotesAccepted: accepted?.n ?? 0, revenue, attribution };
+  // The campaign-attribution report (four more passes over the leads) is not part of the Sales page since Phase 9;
+  // attributionReport() remains for reporting and is no longer computed here for nothing.
+  return { bySource, funnel: Object.fromEntries(funnel.map((f) => [f.stage, f.n])) as Record<string, number>, created, converted, rate: created ? converted / created : null, quotesSent: sent?.n ?? 0, quotesAccepted: accepted?.n ?? 0, revenue };
 }
 
 // ── campaign attribution (CRM-001, CRM-006) ──
