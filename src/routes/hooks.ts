@@ -24,7 +24,7 @@ import { ingestSalesEvent } from "../services/sales-opt/ingest.ts";
 import { applySalesCallEvent } from "../services/sales-outbound.ts";
 import { audit } from "../services/security.ts";
 import type { MailerCtx } from "../services/mailer.ts";
-import { founderAppointmentChanged, type FounderEvent } from "../services/founder-notifications.ts";
+import { appointmentHooks } from "../services/appointment-notifications.ts";
 
 const q = (ctx: AppContext, k: string, max = 120) => (ctx.url.searchParams.get(k) ?? "").trim().slice(0, max);
 
@@ -83,7 +83,7 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
   if (t.kind === "ack") { await salesFacts(); return jsonResponse(ctx, t.status ?? 200, fn ? ((t.body.result as Record<string, unknown> | undefined) ?? t.body) : t.body); }
   // Consultation confirmations go through the platform's existing mail pipeline (Resend outside development).
   const mailCtx = { email: ctx.email, db: ctx.db, settings: ctx.settings };
-  const res = await handleVoiceEvent(ctx.db, t.body, { mail: mailCtx, baseUrl: ctx.baseUrl, now, paymentsConfigured: ctx.payments.configured, ...await founderDeps(ctx, mailCtx) });
+  const res = await handleVoiceEvent(ctx.db, t.body, { mail: mailCtx, baseUrl: ctx.baseUrl, now, paymentsConfigured: ctx.payments.configured, ...appointmentDeps(ctx, mailCtx) });
   if (res.status < 300) await salesFacts();
   // Retell gives the function response body to the agent's LLM: return only the result object.
   if (fn) return jsonResponse(ctx, res.status, (res.body.result as Record<string, unknown> | undefined) ?? res.body);
@@ -91,10 +91,10 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
 }
 
 
-/** Founder appointment hook for the agents: emails the Founder about new, moved and cancelled Founder appointments. */
-export async function founderDeps(ctx: AppContext, mail: MailerCtx) {
-  const fd = { db: ctx.db, env: ctx.env, mail, baseUrl: ctx.baseUrl };
-  return { founder: { changed: (id: string, ev: FounderEvent) => founderAppointmentChanged(fd, id, ev) } };
+/** Appointment hook for the agents: emails the internal mailbox about booked, moved and cancelled appointments on both
+ *  calendars and about Founder callback requests (src/services/appointment-notifications.ts). */
+export function appointmentDeps(ctx: AppContext, mail: MailerCtx) {
+  return { appointments: appointmentHooks({ db: ctx.db, env: ctx.env, mail, baseUrl: ctx.baseUrl }) };
 }
 
 export function register(r: Router): void {

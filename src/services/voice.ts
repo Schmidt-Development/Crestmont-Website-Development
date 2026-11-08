@@ -32,6 +32,7 @@ import { safeHttpsUrl } from "../lib/html.ts";
 import { routeCalendar, wantsFounderArg, CALENDAR_LABELS, type CalendarRoute } from "../domain/calendars.ts";
 import { recordCallback, confirmedConsultation } from "./calendars.ts";
 import { syncAppointmentCallback, cancelAppointmentCallback } from "./appointment-callbacks.ts";
+import type { AppointmentHooks } from "./appointment-notifications.ts";
 
 export class VoiceAuthError extends Error {}
 
@@ -74,8 +75,8 @@ export interface VoiceDeps {
   baseUrl?: string;
   now?: () => Date;
   calendar?: sched.CalendarAdapter;
-  /** Founder appointments → Founder email (src/services/founder-notifications.ts). */
-  founder?: { changed(consultationId: string, event: "booked" | "rescheduled" | "cancelled"): Promise<void> };
+  /** Appointments on either calendar and Founder callback requests → internal mailbox (appointment-notifications.ts). */
+  appointments?: AppointmentHooks;
   /** Whether Stripe (test mode on staging) is configured. create_checkout_session refuses honestly when it is not. */
   paymentsConfigured?: boolean;
 }
@@ -504,6 +505,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       const route = routeCalendar({ wantsFounder: a.wants_founder, context: { channel: "inbound_receptionist", fn: "request_callback", kind: "callback" } });
       const entry = await recordCallback(db, { route, kind: "callback", source: "ai_receptionist", leadId, callId: call.id, isTest: !!call.is_test, dueAt: new Date(Date.now() + 24 * 3600e3),
         taskBody: `Call back ${a.name} at ${a.phone}${a.preferred_time ? ` (preferred: ${a.preferred_time})` : ""}: ${a.reason}` });
+      await deps.appointments?.callbackRecorded(entry.id);
       // The caller asked to be called back: that request is the consent, scoped to the callback purpose only.
       // The outbound request still waits for staff approval, and outbound calling is off by default.
       // Consent counts only for the number the caller is actually calling from: a caller cannot consent for someone else.
@@ -600,7 +602,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
         await db.prepare(`UPDATE consultations SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, booking.id).run();
         await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) via AI receptionist · calendar: ${CALENDAR_LABELS[held.calendar].name}`);
         if (booking.status === "requested") await addLeadTask(db, leadId, `${held.calendar === "founder_callback" ? "[FOUNDER CALLBACK] " : ""}Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}). Check your calendar first: no calendar is connected.`, 4);
-        if (held.calendar === "founder_callback") await deps.founder?.changed(booking.id, "booked");
+        await deps.appointments?.changed(booking.id, "booked");
         if (held.calendar === "ai_follow_up") {
           // Booking an AI callback time is the caller's request to be called then (their own number only).
           if (isCallersOwn(call, phone)) await recordCallConsent(db, phone, "callback", "caller_request", `call:${call.id}`);
@@ -633,7 +635,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       if (name === "cancel_consultation") {
         await sched.cancel(db, row, a.reason ?? "Cancelled by caller", { kind: "ai" });
         await cancelAppointmentCallback(db, row.id, "Appointment cancelled by the caller");
-        if (row.calendar === "founder_callback") await deps.founder?.changed(row.id, "cancelled");
+        await deps.appointments?.changed(row.id, "cancelled");
         if (row.lead_id) await addLeadNote(db, row.lead_id, `Consultation ${sched.labelOf(row)} cancelled by caller via AI receptionist`);
         await notifyOwners(db, "voice_consultation", `${call.is_test ? "[TEST] " : ""}Consultation cancelled by phone: ${row.name}, ${sched.labelOf(row)}`, "consultation", row.id);
         await mailConsultation(deps, row, "cancelled");
@@ -643,7 +645,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       try {
         const next = await sched.reschedule(db, c, now, cal, row, a.new_start_time!, { kind: "ai" });
         await syncAppointmentCallback(db, next.id, { now });
-        if (next.calendar === "founder_callback") await deps.founder?.changed(next.id, "rescheduled");
+        await deps.appointments?.changed(next.id, "rescheduled");
         if (row.lead_id) {
           await addLeadNote(db, row.lead_id, `Consultation moved from ${sched.labelOf(row)} to ${sched.labelOf(next)} (new ref ${next.confirmation_code}) via AI receptionist`);
           if (next.status === "requested") await addLeadTask(db, row.lead_id, `Confirm the rescheduled consultation ${sched.labelOf(next)} (ref ${next.confirmation_code}).`, 4);

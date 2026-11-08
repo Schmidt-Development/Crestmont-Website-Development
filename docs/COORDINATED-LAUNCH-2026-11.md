@@ -50,11 +50,12 @@ its deploy run was cancelled).
    the callback consent model (a recorded request on the call) and both calling windows.
 6. **Founder Calendar (internal, authoritative).** No external calendar is used (Founder decision). Founder
    appointments are request-only, one per slot within the Founder windows set on `/staff/voice/operations`, and
-   "requested" until the Founder confirms them there. The Founder is emailed through the platform mailer (Resend) at
-   `FOUNDER_NOTIFY_EMAIL` (default the Founder's address) for every new, rescheduled and cancelled appointment, once
-   each, with prospect, business, time and time zone, contact, reason, CRM context and the CRM link
-   (`src/services/founder-notifications.ts`). Staging only delivers to its recipient allowlist
-   (`EMAIL_RECIPIENT_ALLOWLIST`); production delivers to the Founder's address.
+   "requested" until the Founder confirms them there. Every new, rescheduled and cancelled appointment on EITHER
+   calendar (and every Founder callback request) is emailed once, through the platform mailer (Resend), to the internal
+   operations mailbox crestmontwebsitedevelopment@gmail.com (Founder directive 2026-11-08; `INTERNAL_NOTIFY_EMAIL`
+   overrides it for a test environment), with name, business, phone, type, time and time zone, reason, CRM context,
+   how to prepare and the CRM link (`src/services/appointment-notifications.ts`). Staging only delivers to its
+   recipient allowlist (`EMAIL_RECIPIENT_ALLOWLIST`).
 7. **Live Stripe payments** — production checkout is closed by `commerceBlock` until ALL hold:
    - the legal policies are attorney-reviewed and published (today `DRAFT_BANNER` is set in `src/content/legal.ts`);
    - Business settings `business.legal_name` = "Talent Revenue Systems LLC" on production;
