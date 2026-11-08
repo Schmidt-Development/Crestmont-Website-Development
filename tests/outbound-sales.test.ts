@@ -946,3 +946,60 @@ test("[SEC-001] POST /api/sales-outbound/test-dispatch signs only synthetic is_t
   assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'sales_outbound.test_dispatch'`).first());
   assert.equal((await send({ key: "outbound", target: "outbound_functions", payload: payload("call_e2e1", "scall_e2e1") }, { ENVIRONMENT: "production" })).status, 404);
 });
+
+// ───────────── Phase 11: the queue made visible on the Sales page and the lead page ─────────────
+
+test("[VOICE-003] outbound calling status: eligibility explained, queue counts follow the real engine, results synced once and shown in plain English", async () => {
+  const t = await app({ payments: true });
+  const owner = await t.client().login(t.owner.email);
+  const kpiValue = (page: string, name: string) => Number(new RegExp(`<div class="kpi__label">${name}</div><div class="kpi__value">(\\d+)</div>`).exec(page)?.[1] ?? NaN);
+  const sales = async () => (await owner.get("/staff/sales")).text();
+
+  // A lead that merely exists in the CRM is not eligible, and the page says why.
+  const leadId = await t.seedLead();
+  let page = await sales();
+  assert.match(page, /id="outbound"/);
+  assert.equal(kpiValue(page, "Eligible for calling"), 0);
+  assert.match(page, /Not eligible: 1 open CRM lead without documented consent for AI calls \(never called automatically\)/);
+  assert.match(page, /Last live check with Retell:<\/strong> <span class="badge[^"]*"[^>]*>Not verified yet/, "configured is never shown as verified");
+  let lead = await (await owner.get(`/staff/crm/leads/${leadId}`)).text();
+  assert.match(lead, /AI outbound calling: not eligible/);
+  assert.match(lead, /The outbound AI agent will not call this lead because:/);
+
+  // With consent, a registry check and the Founder's approval on file it becomes a candidate, and the gate explains it.
+  await t.authorise("+16145552142", leadId);
+  page = await sales();
+  assert.equal(kpiValue(page, "Eligible for calling"), 1);
+  assert.match(page, /Not eligible: 0 open CRM leads/);
+  assert.match(page, /Next leads in line and why they can or cannot be called now/);
+  assert.match(await (await owner.get(`/staff/crm/leads/${leadId}`)).text(), /AI outbound calling: eligible/);
+
+  // Queued, then dialled through the real queue: the counts move with it.
+  const row = await SO.enqueueSalesCall(t.db, leadId, { requestedBy: t.owner.id, now: t.now });
+  page = await sales();
+  assert.equal(kpiValue(page, "Waiting for a call"), 1);
+  assert.equal(kpiValue(page, "Eligible for calling"), 0, "a queued lead is no longer waiting to be selected");
+  assert.equal((await SO.processSalesQueue(env(t))).dialled, 1);
+  page = await sales();
+  assert.equal(kpiValue(page, "In progress"), 1);
+  assert.equal(kpiValue(page, "Waiting for a call"), 0);
+
+  // The call ends; Retell retries the webhook. The result is ingested once and shown in the Sales team's words.
+  const callId = (await SO.getSalesCall(t.db, row.id))!.provider_call_id!;
+  const ended = { event: "call_ended", call: salesCall(callId, row.id, { disconnection_reason: "agent_hangup", call_status: "ended", duration_ms: 120000, transcript: "Agent: ... User: ..." }) };
+  await t.post("/api/webhooks/retell", ended);
+  await t.post("/api/webhooks/retell", ended);
+  page = await sales();
+  assert.equal(kpiValue(page, "In progress"), 0);
+  assert.equal(kpiValue(page, "Completed"), 1, "a retried webhook never double-counts");
+  assert.equal(kpiValue(page, "Need follow-up"), 1);
+  assert.match(page, /<td>Needs manual review<\/td><td class="num">1<\/td>/, "a connected call with no recorded outcome goes to a person");
+  lead = await (await owner.get(`/staff/crm/leads/${leadId}`)).text();
+  assert.match(lead, /<td>Needs manual review<\/td>/);
+  assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM crm_activities WHERE lead_id = ? AND body LIKE 'AI sales call % finished:%'`, leadId), 1, "one CRM note per call");
+
+  // Sales staff without the operational view do not see the queue; the budget form is the Owner's.
+  const salesRep = await createStaff(t.db, "sales", "rep@crestmont.test");
+  assert.doesNotMatch(await (await (await t.client().login(salesRep.email)).get("/staff/sales")).text(), /data-outbound-status/);
+  assert.match(page, /action="\/staff\/voice\/budget"/);
+});
