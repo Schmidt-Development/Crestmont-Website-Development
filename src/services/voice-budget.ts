@@ -5,10 +5,10 @@
 // included because the provider bills them too (Retell call_cost.combined_cost, recorded on call_ended /
 // call_analyzed). Calls whose cost has not arrived yet count as unknown, never as zero; the page says so.
 //
-// When the budget is unset or reached, the Retell inbound webhook answers with a "closed" configuration:
-// the agent only takes a message (voicemail / callback request), no transfer, no scheduling, a short
-// maximum call length, and the outbound queue does not dial. Owners are notified once per month when the
-// budget is reached. This complements, and does not replace, the spending limit set in the Retell dashboard.
+// Since the Founder's directive of 2026-11-08 this budget governs OUTBOUND calling only: when it is unset or
+// reached the outbound queues do not dial, and Owners are notified once per month. The inbound receptionist runs
+// continuously (its funding is managed in the Retell account) and is never closed by this budget. This complements,
+// and does not replace, the spending limit set in the Retell dashboard.
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
@@ -42,7 +42,7 @@ export async function noteBudgetClosed(db: Db, b: VoiceBudget): Promise<void> {
   const seen = await db.prepare(`SELECT 1 FROM notifications WHERE kind = 'voice_budget_exhausted' AND subject_id = ? LIMIT 1`).bind(b.month).first();
   if (seen) return;
   const usd = (m: number) => `$${(m / 1e6).toFixed(2)}`;
-  await notifyOwners(db, "voice_budget_exhausted", `The AI receptionist reached its monthly budget (${usd(b.spentMicro)} of ${usd(b.budgetMicro ?? 0)} for ${b.month}). Calls now go to voicemail / callback until the budget is raised or the month ends.`, "setting", b.month);
+  await notifyOwners(db, "voice_budget_exhausted", `Outbound calling reached its monthly budget (${usd(b.spentMicro)} of ${usd(b.budgetMicro ?? 0)} for ${b.month}). The outbound queues stop dialling until the budget is raised or the month ends. Inbound calls are not affected.`, "setting", b.month);
   await audit(db, { actorKind: "system", action: "voice.budget_exhausted", subjectType: "setting", subjectId: VOICE_BUDGET_KEY, details: { month: b.month, spentMicro: b.spentMicro, budgetMicro: b.budgetMicro } });
 }
 

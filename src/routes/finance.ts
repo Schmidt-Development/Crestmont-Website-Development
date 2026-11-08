@@ -460,7 +460,8 @@ async function reportsPage(ctx: AppContext) {
   };
   return staffPage(ctx, "Reports", html`${pageHead("Accounting exports", undefined, "Finance")}
 ${rangeForm(ctx, range.from, range.to)}
-${table([...fin.EXPORT_KINDS], [{ header: "Export", cell: (k) => label(k) }, { header: "Contents", cell: (k) => desc[k] }, { header: "", cell: (k) => linkButton("Download CSV", `/staff/reports/${k}.csv${q}`, "secondary", "sm") }])}
+${table([...fin.OFFERED_EXPORT_KINDS], [{ header: "Export", cell: (k) => label(k) }, { header: "Contents", cell: (k) => desc[k] }, { header: "", cell: (k) => linkButton("Download CSV", `/staff/reports/${k}.csv${q}`, "secondary", "sm") }])}
+<p><a href="/staff/finance/profitability#costs">Record a project or overhead cost</a> <span class="faint">(costs are also recorded on each project)</span></p>
 <p class="muted">CSV files use ISO dates (YYYY-MM-DD, UTC), integer cents and plain decimal dollar columns. Cells beginning with =, +, - or @ are prefixed with an apostrophe to prevent spreadsheet formula execution.</p>
 ${alert("info", "These exports summarize Crestmont's internal records. They are not tax or accounting advice. Reconcile against Stripe payouts and consult a qualified accountant.")}`);
 }

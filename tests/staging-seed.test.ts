@@ -46,7 +46,7 @@ test("[INFRA-002] staging seed applies cleanly on a migrated database and demo a
     // Developer sees assigned sample task.
     const [, devEmail, devPw, devTotp] = accounts.find((a) => a[0] === "developer")!;
     const d = await new TestClient(env).login(devEmail, devPw, devTotp);
-    assert.match(await (await d.get("/staff/tasks")).text(), /Sample: homepage hero/);
+    assert.match(await (await d.get("/staff?tab=tasks")).text(), /Sample: homepage hero/); // My Work → All tasks (2026-11-08)
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -2,6 +2,7 @@
 // employees, email operations, integrations, monitoring, security, audit logs, backups, business
 // settings, AI operations, AI receptionist, privacy self-service and the signed voice webhook.
 // Every staff route calls requireStaff(ctx, perm) with the permission its nav link declares.
+import { RETIRED_STAFF_PAGES } from "./nav.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatDateTime, formatDate, label, safeHttpsUrl, type SafeHtml } from "../lib/html.ts";
@@ -168,11 +169,23 @@ export function recoveryTargets(settings: Record<string, string>): { rpoHours: n
   return { rpoHours: n("backup.rpo_target_hours"), rtoHours: n("backup.rto_target_hours") };
 }
 
+/** Suppressed addresses on Email operations (the Email suppressions page left the menu; enforcement is unchanged). */
+async function suppressionsCard(ctx: AppContext): Promise<SafeHtml> {
+  const n = (await ctx.db.prepare(`SELECT COUNT(*) AS n FROM email_suppressions WHERE removed_at IS NULL`).first<{ n: number }>().catch(() => null))?.n ?? 0;
+  return html`<section class="card" id="suppressions" style="margin-bottom:1.5rem"><h2 class="card__title">Suppressed addresses</h2>
+<p>${n ? html`<strong>${n}</strong> address${n === 1 ? " is" : "es are"} not being emailed because an email to it bounced or the person marked one as spam.` : "No addresses are suppressed."} Suppression is enforced automatically on every send.</p>
+<p><a href="/staff/email-suppressions">Review suppressed addresses</a> <span class="faint">(remove one only when the person asks to receive email again)</span></p></section>`;
+}
+
 async function settingsPage(ctx: AppContext, errors: string[] = [], v?: Record<string, string>) {
   requireStaff(ctx, "settings.operational");
   const support = await ctx.db.prepare(`SELECT staffed_hours, first_response_target_hours, updated_at FROM support_settings WHERE id = 1`).first<{ staffed_hours: string; first_response_target_hours: number; updated_at: string }>();
   const meta = (await ctx.db.prepare(`SELECT b.key, b.updated_at, u.display_name FROM business_settings b LEFT JOIN users u ON u.id = b.updated_by`).all<{ key: string; updated_at: string; display_name: string | null }>()).results;
   const val = (k: string) => v?.[k] ?? ctx.settings[k] ?? "";
+  const technical = RETIRED_STAFF_PAGES.filter((x) => x.technical);
+  const techCard = html`<details class="card" id="technical-administration" style="margin-top:1.5rem"><summary><strong>Technical administration</strong> <span class="faint">— release readiness, deployments, monitoring, security, backups and other platform tools</span></summary>
+<p class="faint">These pages were taken out of the main menu to keep it simple. Everything behind them keeps running: deployment safeguards, monitoring and alerts, security controls, scheduled backups and their checks.</p>
+<ul class="checklist">${technical.map((x) => html`<li><a href="${x.href}">${x.label}</a></li>`)}<li><a href="/staff/ops/retention">Data retention</a></li><li><a href="/staff/email-suppressions">Email suppressions</a></li></ul></details>`;
   const body = html`${pageHead("Business settings", undefined, "Platform")}
 ${alert("info", html`Package and maintenance <strong>pricing is not editable here</strong>. Prices live in the server-side catalog and change only with Founder approval (CAT-007). Changes below are audited and appear on public pages immediately.`)}
 ${formErrors(errors)}
@@ -207,7 +220,7 @@ ${input({ name: "first_response_target_hours", label: "First-response target (st
   { header: "By", cell: (m) => m.display_name ?? "—" },
 ], { empty: emptyState("No settings saved yet", "Values you save appear here; full history is in the audit log.") })}
 <p><a href="/staff/audit?action=settings.">Full change history in the audit log</a></p></section>`;
-  return staffPage(ctx, "Business settings", body, errors.length ? 422 : 200);
+  return staffPage(ctx, "Business settings", html`${body}${techCard}`, errors.length ? 422 : 200);
 }
 
 // ───────────── 10. Voice ─────────────
@@ -249,10 +262,9 @@ async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instr
     : sync.status === "in_sync" && sync.config_version !== (activeCfg?.version ?? null) ? badge("degraded", `Stale: last in sync for v${sync.config_version}`)
     : badge(sync.status === "in_sync" ? "verified" : sync.status === "not_configured" ? "not_configured" : "failing", label(sync.status));
   const costCards = html`<div class="grid grid-2" style="margin-top:1.5rem">
-<section class="card" id="budget" data-testid="voice-budget"><h2 class="card__title">Monthly voice budget</h2>
-<p>${budget.state === "not_set" ? badge("not_configured", "Not set") : badge(budget.state === "exhausted" ? "failing" : budget.state === "warning" ? "degraded" : "active", `${usd2(budget.spentMicro)} of ${usd2(budget.budgetMicro!)} used (${budget.month})`)}</p>
-<p class="muted">${budget.state === "not_set" ? "Without a budget, Retell calls are answered in voicemail-only mode (take a message, no transfer, no booking) and no outbound call is dialled." : budget.state === "exhausted" ? "Budget reached: calls are answered in voicemail-only mode until the budget is raised or the month ends." : "Spend is the provider-reported cost of every call this month, test calls included."}${budget.unknownCostCalls ? ` ${budget.unknownCostCalls} ended calls have no cost reported yet (not counted as zero).` : ""} Also set a spending limit in the Retell dashboard.</p>
-<form method="post" action="/staff/voice/budget" class="row">${csrf(ctx)}${input({ name: "monthly_budget_usd", label: "Monthly budget (USD, blank = off)", type: "number", min: 0, max: 100000, value: budget.budgetMicro ? String(budget.budgetMicro / 1e6) : "" })}<div class="field">${button("Save budget", { variant: "secondary", size: "sm" })}</div></form></section>
+<section class="card" id="voice-costs" data-testid="voice-costs"><h2 class="card__title">Voice costs this month</h2>
+<p><strong>${usd2(budget.spentMicro)}</strong> <span class="faint">provider-reported cost of all calls in ${budget.month}${budget.unknownCostCalls ? `, plus ${budget.unknownCostCalls} call${budget.unknownCostCalls === 1 ? "" : "s"} whose cost has not arrived yet` : ""}</span></p>
+<p class="muted">The receptionist runs continuously. Its funding is managed in the Retell account, with Retell's own spending limit; no monthly budget in Crestmont limits or closes inbound calls. To stop calls in an emergency, pause the receptionist under Operations.</p></section>
 <section class="card" id="prompt-sync" data-testid="voice-prompt-sync"><h2 class="card__title">Retell prompt synchronisation</h2>
 <p>${syncBadge}</p><p class="muted">${sync ? html`${label(sync.mode)} at ${formatDateTime(sync.created_at)}: ${sync.detail}` : "The active configuration has not been pushed to Retell from this environment."}</p>
 <p class="faint">${ctx.env.RETELL_INBOUND_API_KEY ? "Activating a version pushes its full prompt (guardrails + instructions) to the Retell LLM behind this environment's agent and reads it back. Publishing an agent version stays a Retell dashboard action." : "Provider not configured: RETELL_INBOUND_API_KEY is not set in this environment (the receptionist workspace key), so nothing can be pushed to Retell."}</p>
@@ -567,6 +579,7 @@ ${s.disabled_at ? table(items, [
     const c = (s: string) => counts.find((x) => x.status === s)?.n ?? 0;
     const exportQs = new URLSearchParams(ctx.url.search); exportQs.delete("page");
     const body = html`${pageHead("Email operations", html`${linkButton("Export CSV", `/staff/email/export.csv${exportQs.toString() ? `?${exportQs}` : ""}`, "ghost", "sm")}${linkButton("Template catalogue", "/staff/email/templates", "secondary", "sm")}`, "Platform")}
+${await suppressionsCard(ctx)}
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Delivery provider &amp; domain authentication</h2>
 <p>${badge(health?.status ?? "not_configured")} <span class="muted">Adapter in use: <strong>${ctx.email.kind}</strong></span></p><p class="muted">${health?.detail ?? ""}</p>
 ${ctx.email.kind === "dev-outbox" ? html`<p class="faint">Development outbox: messages are rendered and stored here, never sent and never reported as delivered.</p>` : ""}
@@ -1062,13 +1075,14 @@ ${textarea({ name: "evidence", label: "Evidence (row counts compared, checks run
     requireStaff(ctx, "ai.budget"); // Owner-only (OWNER_ONLY in src/domain/authz.ts)
     const raw = String((await ctx.form()).get("monthly_budget_usd") ?? "").trim();
     const n = raw === "" ? 0 : Number(raw);
-    if (!Number.isFinite(n) || n < 0 || n > 100_000) return redirect(ctx, "/staff/ai", { kind: "error", text: "Enter a monthly budget between 0 and 100000 USD." });
+    // The control lives on AI sales optimization since 2026-11-08 (AI operations left the navigation).
+    if (!Number.isFinite(n) || n < 0 || n > 100_000) return redirect(ctx, "/staff/sales-optimization#ai-budget", { kind: "error", text: "Enter a monthly budget between 0 and 100000 USD." });
     const before = (await ctx.db.prepare(`SELECT value FROM business_settings WHERE key = 'ai.monthly_budget_usd'`).first<{ value: string }>())?.value ?? null;
     const value = n > 0 ? String(Math.round(n * 100) / 100) : null;
     if (value) await ctx.db.prepare(`INSERT INTO business_settings (key, value, updated_by, updated_at) VALUES ('ai.monthly_budget_usd', ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`).bind(value, ctx.user!.id, nowIso()).run();
     else await ctx.db.prepare(`DELETE FROM business_settings WHERE key = 'ai.monthly_budget_usd'`).run();
     await audit(ctx.db, { actorUserId: ctx.user!.id, action: "ai.budget_updated", subjectType: "setting", subjectId: "ai.monthly_budget_usd", details: { before, after: value } });
-    return redirect(ctx, "/staff/ai", { kind: "success", text: value ? `Paid AI budget set to $${value} per month.` : "Paid AI budget cleared: paid AI calls are off." });
+    return redirect(ctx, "/staff/sales-optimization#ai-budget", { kind: "success", text: value ? `Monthly AI budget set to $${value}.` : "Monthly AI budget cleared: paid AI drafting is off." });
   });
 
   r.get("/staff/ai", async (ctx) => {
@@ -1192,13 +1206,15 @@ ${dl([["Job id", j.id], ["Status", badge(j.status)], ["Provider / model", `${j.p
     const s = await syncPrompt({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, userId: ctx.user!.id, mode });
     return redirect(ctx, "/staff/voice#prompt-sync", { kind: s.status === "in_sync" ? "success" : "error", text: syncSentence(s) });
   });
+  // The monthly OUTBOUND calling budget (the outbound queues do not dial without it). Since 2026-11-08 it no longer
+  // affects inbound calls; the control lives with the outbound calling status on the Sales page.
   r.post("/staff/voice/budget", async (ctx) => {
     requireStaff(ctx, "voice.manage"); // Owner-only (src/domain/authz.ts)
     try {
       const value = await setVoiceBudget(ctx.db, ctx.user!.id, str(await ctx.form(), "monthly_budget_usd"));
-      return redirect(ctx, "/staff/voice#budget", { kind: "success", text: value ? `Voice budget set to $${value} per month.` : "Voice budget cleared: Retell calls are answered in voicemail-only mode and nothing is dialled." });
+      return redirect(ctx, "/staff/sales#outbound", { kind: "success", text: value ? `Outbound calling budget set to $${value} per month.` : "Outbound calling budget cleared: the outbound queues will not dial. Inbound calls are not affected." });
     } catch (e) {
-      if (e instanceof VoiceBudgetError) return redirect(ctx, "/staff/voice#budget", { kind: "error", text: e.message });
+      if (e instanceof VoiceBudgetError) return redirect(ctx, "/staff/sales#outbound", { kind: "error", text: e.message });
       throw e;
     }
   });

@@ -74,11 +74,48 @@ ${ex ? html`${dl([["In force since", formatDateTime(ex.granted_at)], ["By", ex.d
 </div></details>`;
 }
 
+/**
+ * "Needs your attention" on My Work: the everyday actions that used to live on pages removed from the navigation
+ * (Founder directive 2026-11-08), each shown only to people who may act on it, with a link to where it is handled.
+ * Nothing here changes a record; it only makes sure no required action becomes unreachable.
+ */
+async function needsAttention(ctx: AppContext): Promise<SafeHtml> {
+  const actor = ctx.actor!, db = ctx.db;
+  const items: { text: string; href: string; tone: string }[] = [];
+  if (can(actor, "ai.manage")) {
+    const n = (await db.prepare(`SELECT COUNT(*) AS n FROM ai_jobs WHERE status = 'awaiting_approval'`).first<{ n: number }>())?.n ?? 0;
+    if (n) items.push({ text: `${n} AI draft${n === 1 ? "" : "s"} waiting for your review before anything is sent`, href: "/staff/ai?status=awaiting_approval", tone: "pending" });
+  }
+  if (can(actor, "employee.manage")) {
+    const n = (await db.prepare(`SELECT COUNT(*) AS n FROM privacy_requests WHERE kind = 'deletion' AND status IN ('received','in_progress')`).first<{ n: number }>())?.n ?? 0;
+    if (n) items.push({ text: `${n} customer data-deletion request${n === 1 ? "" : "s"} to process`, href: "/staff/security#privacy", tone: "warn" });
+  }
+  if (can(actor, "finance.read")) {
+    const n = (await db.prepare(`SELECT COUNT(*) AS n FROM reconciliation_findings WHERE status = 'open'`).first<{ n: number }>())?.n ?? 0;
+    if (n) items.push({ text: `${n} payment record${n === 1 ? "" : "s"} that do${n === 1 ? "es" : ""} not match Stripe — review and resolve`, href: "/staff/finance/reconciliation", tone: "warn" });
+  }
+  if (!items.length) return html``;
+  return html`<section class="card" data-needs-attention style="margin-bottom:1.5rem"><h2 class="card__title">Needs your attention</h2>
+<ul class="checklist">${items.map((i) => html`<li>${badge(i.tone, "To do")} <a href="${i.href}">${i.text}</a></li>`)}</ul></section>`;
+}
+
 export function register(r: Router): void {
+  // Assigned below, next to the task routes it belongs with; My Work renders it as its "All tasks" tab.
+  let allTasksSection: (ctx: AppContext) => Promise<SafeHtml> = async () => html``;
   // ───────────── My work ─────────────
   r.get("/staff", async (ctx) => {
     requireStaff(ctx);
     const db = ctx.db, me = ctx.user!.id, actor = ctx.actor!;
+    // My Work is the single operational task interface (Founder directive 2026-11-08): "My work" and, for delivery
+    // staff, "All tasks" (what used to be the separate Tasks page).
+    const tab = ctx.url.searchParams.get("tab") === "tasks" && can(actor, "delivery.access") ? "tasks" : "mine";
+    const workTabs = can(actor, "delivery.access")
+      ? tabs([{ href: "/staff", label: "My work", current: tab === "mine" }, { href: "/staff?tab=tasks", label: "All tasks", current: tab === "tasks" }], "My work views")
+      : html``;
+    if (tab === "tasks") {
+      return page(ctx, "All tasks", html`${pageHead("My work", undefined, label(ctx.user!.memberships.find((m) => m.organizationId)?.role ?? "staff"))}${workTabs}
+<section class="card">${await allTasksSection(ctx)}</section>`);
+    }
     const today = ctx.now().toISOString().slice(0, 10);
     const tasks = (await db.prepare(`SELECT t.id, t.title, t.status, t.due_at, p.id AS project_id, p.name AS project_name FROM assignments a JOIN tasks t ON t.id = a.subject_id JOIN projects p ON p.id = t.project_id
         WHERE a.subject_type = 'task' AND a.user_id = ? AND a.ended_at IS NULL AND t.status <> 'done' ORDER BY CASE WHEN t.due_at IS NULL THEN 1 ELSE 0 END, t.due_at LIMIT 50`).bind(me)
@@ -123,7 +160,9 @@ export function register(r: Router): void {
     }
     if (can(actor, "crm.access")) roleKpis.push(kpi("My open leads", leadsTotal));
     if (can(actor, "support.access")) roleKpis.push(kpi("My open tickets", ticketsTotal));
-    const body = html`${pageHead("My work", undefined, label(ctx.user!.memberships.find((m) => m.organizationId)?.role ?? "staff"))}
+    const attention = await needsAttention(ctx);
+    const body = html`${pageHead("My work", undefined, label(ctx.user!.memberships.find((m) => m.organizationId)?.role ?? "staff"))}${workTabs}
+${attention}
 <div class="kpis">${kpi("Open tasks", taskTotals.n, overdue ? `${overdue} overdue` : "None overdue")}${kpi("Due in 7 days", dueSoon)}${kpi("Unread customer messages", unreadMsgs)}${roleKpis}</div>
 ${can(actor, "customers.read") ? await generalConversationsNotice(ctx) : ""}
 <div class="grid grid-2">
@@ -131,7 +170,9 @@ ${can(actor, "customers.read") ? await generalConversationsNotice(ctx) : ""}
   { header: "Task", cell: (t) => html`<a href="/staff/tasks/${t.id}">${t.title}</a><br><span class="faint">${t.project_name}</span>` },
   { header: "Status", cell: (t) => badge(t.status) },
   { header: "Due", cell: (t) => (t.due_at ? html`${fmtDay(t.due_at)}${t.due_at < today ? html` ${badge("past_due", "Overdue")}` : ""}` : "—") },
-], { empty: html`<p class="muted">No open tasks assigned to you.</p>` })}${more(tasks.length, taskTotals.n, "open tasks", can(actor, "delivery.access") ? "/staff/tasks?assignee=me" : null)}</section>
+  ...(can(actor, "task.update_assigned") || can(actor, "project.coordinate") ? [{ header: "Update", cell: (t: { id: string; title: string; status: string }) => html`<form method="post" action="/staff/tasks/${t.id}/status" class="row" style="gap:.25rem;flex-wrap:nowrap">${csrf(ctx)}<input type="hidden" name="back" value="/staff">
+<label class="visually-hidden" for="ts-${t.id}">New status for ${t.title}</label><select class="select" id="ts-${t.id}" name="status">${P.TASK_STATUSES.map((st) => html`<option value="${st}"${st === t.status ? html` selected` : ""}>${label(st)}</option>`)}</select>${button("Save", { variant: "secondary", size: "sm" })}</form>` }] : []),
+], { empty: html`<p class="muted">No open tasks assigned to you.</p>` })}${more(tasks.length, taskTotals.n, "open tasks", can(actor, "delivery.access") ? "/staff?tab=tasks&assignee=me" : null)}</section>
 <section class="card"><div class="row row--between"><h2 class="card__title">Notifications</h2><div class="row">${notes.some((n) => !n.read_at) ? actionForm(ctx, "/staff/notifications/read", "Mark all read", { variant: "ghost" }) : ""}${linkButton("View all", "/staff/notifications", "ghost", "sm")}</div></div>
 ${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = noteHrefs.get(n.id); return html`<li>${n.read_at ? "" : badge("new", "New")} ${href ? html`<a href="${href}">${n.body}</a>` : n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`; })}</ul>` : html`<p class="muted">No notifications.</p>`}</section>
 ${can(actor, "delivery.access") ? html`<section class="card"><h2 class="card__title">My projects</h2>${table(myProjects, [
@@ -705,8 +746,9 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
         t.estimate_minutes ?? "", t.logged, t.open_deps, t.created_at.slice(0, 10), t.completed_at?.slice(0, 10) ?? ""]));
     return download(ctx, csv, `crestmont-tasks-${tq.today}.csv`, "text/csv; charset=utf-8");
   });
-  r.get("/staff/tasks", async (ctx) => {
-    requireStaff(ctx, "delivery.access");
+  // The full, filterable task list. Rendered inside My Work ("All tasks" tab, /staff?tab=tasks): My Work is the single
+  // task interface (Founder directive 2026-11-08). /staff/tasks redirects there, keeping its filters, so old links work.
+  allTasksSection = async (ctx: AppContext): Promise<SafeHtml> => {
     const actor = ctx.actor!;
     const tq = taskQuery(ctx);
     const { status, projectId, assignee, due, search, blocked } = tq.v;
@@ -719,7 +761,7 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
     const projects = (await ctx.db.prepare(`SELECT p.id, p.name FROM projects p WHERE ${vis.sql} AND p.status NOT IN ('cancelled') ORDER BY p.name`).bind(...vis.binds).all<{ id: string; name: string }>()).results;
     const people = can(actor, "project.read_all") ? await staffUsers(ctx) : [];
     const exportHref = (() => { const u = new URL(ctx.url); u.pathname = "/staff/tasks/export.csv"; u.searchParams.delete("page"); return u.pathname + u.search; })();
-    const body = html`${pageHead("Tasks", linkButton("Export CSV", exportHref, "ghost", "sm"))}<form method="get" action="/staff/tasks" class="filters">
+    return html`<div class="row row--between"><h2 class="card__title">All tasks</h2>${linkButton("Export CSV", exportHref, "ghost", "sm")}</div><form method="get" action="/staff" class="filters"><input type="hidden" name="tab" value="tasks">
 ${input({ name: "q", label: "Search", value: search, placeholder: "Task, description or project" })}
 ${select({ name: "status", label: "Status", options: [{ value: "open", label: "Open" }, { value: "all", label: "All" }, ...P.TASK_STATUSES.map((s) => ({ value: s, label: label(s) }))], value: status })}
 ${select({ name: "project", label: "Project", options: projects.map((x) => ({ value: x.id, label: x.name })), value: projectId, includeBlank: "All projects" })}
@@ -735,7 +777,12 @@ ${table(rows, [
   { header: "Due", cell: (t) => (t.due_at ? html`${fmtDay(t.due_at)}${t.due_at.slice(0, 10) < today && t.status !== "done" ? html` ${badge("past_due", "Overdue")}` : ""}` : "—") },
 ], { empty: emptyState("No tasks match", search || projectId || due || blocked ? "Try a different search or filter." : "Tasks appear here when a project manager assigns them.") })}
 ${pagination(ctx, pageNo, hasNext)}`;
-    return page(ctx, "Tasks", body);
+  };
+  r.get("/staff/tasks", async (ctx) => {
+    requireStaff(ctx, "delivery.access");
+    const u = new URL(ctx.url);
+    u.searchParams.set("tab", "tasks");
+    return redirect(ctx, `/staff?${u.searchParams.toString()}`);
   });
 
   const taskPage = async (ctx: AppContext, id: string, errors: string[] = [], status = 200) => {
@@ -781,13 +828,15 @@ ${coord ? html`<section class="card"><h2 class="card__title">Edit task</h2><form
 <div style="margin-top:1rem">${actionForm(ctx, `/staff/tasks/${t.id}/delete`, "Delete task", { variant: "danger", confirm: "Delete this task?" })}</div></section>` : ""}</div>`;
     return page(ctx, t.title, body, status);
   };
-  const taskAct = async (ctx: AppContext, id: string, fn: () => Promise<string>) => {
+  const taskAct = async (ctx: AppContext, id: string, fn: () => Promise<string>, back?: string) => {
     requireStaff(ctx, "delivery.access");
     const t = await P.getTask(ctx.db, id);
     if (!t) throw new HttpError(404, "Task not found");
     await P.getStaffProject(ctx, t.project_id);
     try {
-      return redirect(ctx, `/staff/tasks/${id}`, { kind: "success", text: await fn() });
+      // From My Work, return to My Work (only ever a same-site /staff path).
+      const to = back && /^\/staff(\?[A-Za-z0-9=&_%.-]*)?$/.test(back) ? back : `/staff/tasks/${id}`;
+      return redirect(ctx, to, { kind: "success", text: await fn() });
     } catch (e) {
       if (e instanceof HttpError && (e.status === 409 || e.status === 422)) return taskPage(ctx, id, [e.message], e.status);
       throw e;
@@ -795,8 +844,9 @@ ${coord ? html`<section class="card"><h2 class="card__title">Edit task</h2><form
   };
   r.get("/staff/tasks/:id", async (ctx, p) => taskPage(ctx, p.id));
   r.post("/staff/tasks/:id/status", async (ctx, p) => {
-    const s = str(await ctx.form(), "status");
-    return taskAct(ctx, p.id, async () => { await P.setTaskStatus(ctx.db, ctx.actor!, ctx.user!.id, p.id, s); return `Task marked ${label(s)}.`; });
+    const f = await ctx.form();
+    const s = str(f, "status");
+    return taskAct(ctx, p.id, async () => { await P.setTaskStatus(ctx.db, ctx.actor!, ctx.user!.id, p.id, s); return `Task marked ${label(s)}.`; }, str(f, "back"));
   });
   r.post("/staff/tasks/:id", async (ctx, p) => {
     const f = await ctx.form();

@@ -14,6 +14,7 @@
 //  POST /staff/sales-optimization/experiments             propose
 //  POST /staff/sales-optimization/experiments/:id/decide  action=start|stop
 //  POST /staff/sales-optimization/run                     run one optimization cycle now
+import { paidAiBudget } from "../services/ai.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatDateTime, label, type SafeHtml } from "../lib/html.ts";
@@ -94,8 +95,6 @@ async function dashboard(ctx: AppContext, errors: string[] = [], status = 200) {
     .all<{ status: string; detail: string | null; created_at: string; vid: string | null; seq: number | null; vstatus: string | null; pseq: number | null }>()).results;
   const proposalTotal = (await db.prepare(`SELECT COUNT(*) AS n FROM so_proposal_jobs`).first<{ n: number }>())!.n;
   const jobs = (await db.prepare(`SELECT status, COUNT(*) AS n FROM ai_jobs WHERE workflow LIKE 'salesopt_%' AND created_at >= ? GROUP BY status`).bind(from).all<{ status: string; n: number }>()).results;
-  const experiments = (await db.prepare(`SELECT e.*, b.seq AS bseq, c.seq AS cseq FROM so_experiments e JOIN so_versions b ON b.id = e.baseline_version_id JOIN so_versions c ON c.id = e.candidate_version_id ORDER BY e.created_at DESC LIMIT 5`)
-    .all<{ id: string; status: string; bseq: number; cseq: number; candidate_share: number; min_connected_per_arm: number; decision: string | null; decision_detail: string | null; created_at: string }>()).results;
   const rbStaging = await rollbackCandidate(db, "staging"), rbProd = await rollbackCandidate(db, "production");
   // Per stage: current version, the previous version (the rollback target the buttons below use) and the latest deployment.
   const current: Record<reg.Stage, reg.VersionRow | null> = { staging: stg, production: prod };
@@ -103,15 +102,6 @@ async function dashboard(ctx: AppContext, errors: string[] = [], status = 200) {
   const latestDeployment = (s: reg.Stage) => db.prepare(`SELECT d.kind, d.status, d.created_at, d.published, v.seq FROM so_deployments d JOIN so_versions v ON v.id = d.version_id
       WHERE d.stage = ? ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1`).bind(s).first<{ kind: string; status: string; created_at: string; published: number | null; seq: number }>();
   const lastDep = { staging: await latestDeployment("staging"), production: await latestDeployment("production") };
-  // Rollback history: every kind=rollback deployment (from = the version it replaced, i.e. its compare-and-swap
-  // expected_current_version_id; to = the restored version) and whether Retell's read-back matched the restored prompt.
-  const rollbacks = (await db.prepare(`SELECT d.stage, d.status, d.reason, d.detail, d.created_at, d.readback_sha256, d.initiated_by, tv.seq AS to_seq, tv.prompt_sha256 AS to_sha, fv.seq AS from_seq,
-        u.display_name, u.email
-      FROM so_deployments d JOIN so_versions tv ON tv.id = d.version_id LEFT JOIN so_versions fv ON fv.id = d.expected_current_version_id LEFT JOIN users u ON u.id = d.initiated_by
-      WHERE d.kind = 'rollback' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 50`)
-    .all<{ stage: string; status: string; reason: string | null; detail: string | null; created_at: string; readback_sha256: string | null; initiated_by: string | null; to_seq: number; to_sha: string; from_seq: number | null; display_name: string | null; email: string | null }>()).results;
-  const rolledBack = (await db.prepare(`SELECT d.stage, d.created_at, v.seq FROM so_deployments d JOIN so_versions v ON v.id = d.version_id WHERE d.status = 'rolled_back' ORDER BY d.created_at DESC LIMIT 50`)
-    .all<{ stage: string; created_at: string; seq: number }>()).results;
   const decisionIn = DECISION_ACTIONS.map(() => "?").join(",");
   const decisions = (await db.prepare(`SELECT a.action, a.actor_kind, a.created_at, u.display_name, u.email, v.id AS vid, v.seq, v.decision_note, eb.seq AS bseq, ec.seq AS cseq
       FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id
@@ -167,6 +157,15 @@ async function dashboard(ctx: AppContext, errors: string[] = [], status = 200) {
 <form method="post" action="${BASE}/targets/${s}/adopt">${csrf(ctx)}${button("Adopt live prompt", { size: "sm", variant: "secondary" })}</form>` : ""}</td></tr>`;
   };
 
+  // The monthly AI budget (moved here from AI operations, 2026-11-08). It caps PAID AI drafting only (Anthropic: CRM
+  // and support draft replies, the website assistant); the self-hosted model used for sales optimization and the Retell
+  // voice service are not limited by it.
+  const aiBudget = await paidAiBudget(db);
+  const usdM = (m: number) => `$${(m / 1_000_000).toFixed(2)}`;
+  const aiBudgetCard = html`<section class="card stack" id="ai-budget"><h2 class="card__title">Monthly AI budget</h2>
+<p>${aiBudget.budgetMicro === null ? badge("not_configured", "Not set: paid AI drafting is off") : badge(aiBudget.spentMicro >= aiBudget.budgetMicro ? "failing" : "active", `${usdM(aiBudget.spentMicro)} of ${usdM(aiBudget.budgetMicro)} used this month`)}</p>
+<p class="faint">Applies to paid AI drafting only (CRM and support draft replies, the website assistant). Sales-call analysis runs on the self-hosted model, and the AI receptionist and outbound calls are funded in Retell — neither is limited by this budget.</p>
+${can(ctx.actor!, "ai.budget") ? html`<form method="post" action="/staff/ai/budget" class="row">${csrf(ctx)}${input({ name: "monthly_budget_usd", label: "Monthly budget (USD)", type: "number", value: aiBudget.budgetMicro === null ? "" : String(aiBudget.budgetMicro / 1_000_000), hint: "0 or empty turns paid AI drafting off." })}${button("Save budget", { variant: "secondary" })}</form>` : html`<p class="faint">Set by the Owner.</p>`}</section>`;
   const body = html`${pageHead("AI Sales Optimization", html`<form method="post" action="${BASE}/run" class="row">${csrf(ctx)}${button("Run cycle now", { size: "sm", variant: "secondary" })}</form>`, "AI")}
 ${formErrors(errors)}
 ${alert("info", html`<strong>Scope.</strong> This engine evaluates and improves the prompt of a <em>registered Retell sales agent</em>; the engine itself does not dial. Outbound AI sales calls are placed by the separate dialler (<code>src/services/sales-outbound.ts</code>, <a href="/staff/sales-outbound">AI sales calls</a>), which is off by default and dials only with RETELL_SALES_OUTBOUND=on, the Owner's switch, an active Founder + counsel compliance approval (Founder decision D-14, MSA Sched. C.7), documented prior express written consent and a clear Do Not Call scrub for the number. The engine never targets the inbound receptionist agent.`)}
@@ -263,6 +262,7 @@ ${input({ name: "maxRefundRate", label: "Max refund/dispute rate (%)", value: +(
 </div>
 <div>${button("Save controls")}</div></form>` : ""}
 
+${aiBudgetCard}
 <section class="section--tight"><h2>Top findings (30 days)</h2>${table(top, [
   { header: "Finding", cell: (r) => label(r.category) },
   { header: "Count", cell: (r) => r.count, numeric: true },
@@ -302,19 +302,9 @@ ${table(decisions, [
 ], { empty: emptyState("No decisions yet", "Approvals, rejections and experiment decisions appear here with who made them and when.") })}
 </section>
 
-<section class="section--tight"><h2>Rollback history</h2>
-${table(rollbacks, [
-  { header: "When", cell: (r) => formatDateTime(r.created_at) },
-  { header: "Stage", cell: (r) => label(r.stage) },
-  { header: "From → to", cell: (r) => `v${r.from_seq ?? "?"} → v${r.to_seq}` },
-  { header: "Result", cell: (r) => badge(deployResultTone(r.status), label(r.status)) },
-  { header: "Read-back verified", cell: (r) => r.readback_sha256 && r.readback_sha256 === r.to_sha ? badge("verified", "Yes") : badge("failed", "No") },
-  { header: "By", cell: (r) => r.initiated_by ? who(r) : "Automatic (safety monitor)" },
-  { header: "Reason", cell: (r) => html`${r.reason ?? ""}${["failed", "aborted"].includes(r.status) && r.detail ? html` <span class="faint">${r.detail.slice(0, 200)}</span>` : ""}` },
-], { empty: emptyState("No rollbacks", "Founder and automatic rollbacks appear here with the versions involved and Retell's read-back.") })}
-${rolledBack.length ? html`<p class="faint">Deployments marked rolled back: ${rolledBack.map((r) => `v${r.seq} on ${r.stage} (deployed ${formatDateTime(r.created_at)})`).join(" · ")}</p>` : ""}
-</section>
-
+<!-- Rollback history and Experiments are no longer shown (Founder directive 2026-11-08). Their records, the version
+     history and experiment evidence are untouched; recovery stays available: the automatic rollback control above, and
+     the manual "Roll back" buttons under Deployment history. -->
 <section class="section--tight"><h2>Deployment history</h2>${table(deployments, [
   { header: "When", cell: (r) => formatDateTime(r.created_at) },
   { header: "Stage", cell: (r) => label(r.stage) },
@@ -325,21 +315,6 @@ ${rolledBack.length ? html`<p class="faint">Deployments marked rolled back: ${ro
 ], { empty: emptyState("Nothing deployed yet", "Deploy an evaluated version to the staging agent first.") })}
 ${canDecide ? html`<div class="row">${rbStaging ? html`<form method="post" action="${BASE}/rollback">${csrf(ctx)}<input type="hidden" name="stage" value="staging">${button("Roll back staging", { size: "sm", variant: "danger" })}</form>` : ""}
 ${rbProd ? html`<form method="post" action="${BASE}/rollback">${csrf(ctx)}<input type="hidden" name="stage" value="production">${button("Roll back production to last known-good", { size: "sm", variant: "danger" })}</form>` : ""}</div>` : ""}
-</section>
-
-<section class="section--tight"><h2>Experiments</h2>${table(experiments, [
-  { header: "Created", cell: (r) => formatDateTime(r.created_at) },
-  { header: "Baseline → candidate", cell: (r) => `v${r.bseq} → v${r.cseq}` },
-  { header: "Candidate share", cell: (r) => pct(r.candidate_share, 0), numeric: true },
-  { header: "Minimum per arm", cell: (r) => r.min_connected_per_arm, numeric: true },
-  { header: "Status", cell: (r) => badge(r.status === "running" ? "in_progress" : r.status === "proposed" ? "requires_founder_approval" : "closed", label(r.status)) },
-  { header: "Recommendation", cell: (r) => html`${r.decision ? label(r.decision) : "—"} <span class="faint">${r.decision_detail ?? ""}</span>` },
-  { header: "", cell: (r) => canDecide && ["proposed", "running"].includes(r.status) ? html`<form method="post" action="${BASE}/experiments/${r.id}/decide" class="row">${csrf(ctx)}${r.status === "proposed" ? button("Start", { size: "sm", name: "action", value: "start" }) : ""}${button("Stop", { size: "sm", variant: "danger", name: "action", value: "stop" })}</form>` : "" },
-], { empty: emptyState("No experiments", "An experiment compares the production version with an evaluated candidate on balanced traffic.") })}
-${canDecide && prod ? html`<form method="post" action="${BASE}/experiments" class="row">${csrf(ctx)}<input type="hidden" name="baseline_id" value="${prod.id}">
-${select({ name: "candidate_id", label: "Candidate", options: versions.filter((v) => ["eval_passed", "approved"].includes(v.status) && v.id !== prod.id).map((v) => ({ value: v.id, label: `v${v.seq}` })), includeBlank: "Choose…" })}
-${input({ name: "share", label: "Candidate share (%)", value: 20, maxlength: 2 })}${input({ name: "min", label: "Minimum connected calls per arm", value: 400, maxlength: 6 })}${button("Propose experiment", { variant: "secondary" })}</form>
-<p class="faint">Traffic is split by the outbound sales dialler (src/services/sales-outbound.ts), which stamps the experiment only when the lead's arm is the version verified on its agent; the engine deploys one prompt per stage, so a candidate arm needs its own Retell agent or version (docs/voice/SALES-OPTIMIZATION.md §5).</p>` : ""}
 </section>
 
 <section class="section--tight"><h2>Compliance incidents</h2>${table(incidents, [

@@ -72,10 +72,11 @@ export async function serviceChecks(db: Db, storage: StorageAdapter | null, now 
   try {
     const b = await voiceBudget(db, now);
     const usd = (m: number) => `$${(m / 1e6).toFixed(2)}`;
+    // Since 2026-11-08 this budget governs OUTBOUND calling only; the inbound receptionist runs continuously.
     out.push(b.state === "not_set"
-      ? { name: "AI receptionist budget", status: "not_configured", detail: "No monthly voice budget is set: Retell calls are answered in voicemail-only mode and nothing is dialled." }
-      : { name: "AI receptionist budget", status: b.state === "exhausted" ? "failing" : "healthy",
-          detail: `${usd(b.spentMicro)} of ${usd(b.budgetMicro!)} used in ${b.month}${b.state === "warning" ? " (over 80%)" : ""}${b.state === "exhausted" ? " — budget reached; calls go to voicemail" : ""}${b.unknownCostCalls ? ` · ${b.unknownCostCalls} calls with unknown cost` : ""}` });
+      ? { name: "Outbound calling budget", status: "not_configured", detail: `No monthly outbound calling budget is set, so the outbound queues do not dial. Inbound calls are not affected. Voice costs this month: ${usd(b.spentMicro)}.` }
+      : { name: "Outbound calling budget", status: b.state === "exhausted" ? "failing" : "healthy",
+          detail: `${usd(b.spentMicro)} of ${usd(b.budgetMicro!)} used in ${b.month}${b.state === "warning" ? " (over 80%)" : ""}${b.state === "exhausted" ? " — budget reached; outbound calls stop (inbound calls continue)" : ""}${b.unknownCostCalls ? ` · ${b.unknownCostCalls} calls with unknown cost` : ""}` });
     const s = await latestPromptSync(db);
     const active = (await db.prepare(`SELECT version FROM voice_agent_configs WHERE active = 1`).first<{ version: number }>())?.version ?? null;
     if (!s) out.push({ name: "Retell prompt sync", status: "not_configured", detail: "The active receptionist prompt has never been pushed to or checked against Retell." });

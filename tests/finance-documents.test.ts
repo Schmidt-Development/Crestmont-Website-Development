@@ -499,8 +499,10 @@ test("[PAY-009] ledger reconciliation is skipped without a test key, is schedule
   assert.match((await runStripeLedgerReconciliation(t.db, { ...t.env, STRIPE_SECRET_KEY: "sk_live_x" })).detail, /not authorised/);
   assert.ok(SCHEDULE["17 11 * * *"].includes("stripe_ledger_reconcile"));
   const finance = staffNav({} as never).find((g) => g.label === "Finance")!;
-  assert.ok(finance.items.some((i) => i.href === "/staff/finance/reconciliation" && i.label === "Reconciliation" && i.perm === "finance.read"));
-  assert.equal(OWNER_MODULE_LABELS.length, 32);
+  // Founder directive 2026-11-08: reconciliation left the menu; open discrepancies are surfaced in My Work instead, and
+  // the page itself still answers for finance staff (tests/navigation.test.ts).
+  assert.ok(!finance.items.some((i) => i.href === "/staff/finance/reconciliation"));
+  assert.equal(OWNER_MODULE_LABELS.length, 20);
 });
 
 // ───────────── PAY-008: dispute lifecycle ─────────────

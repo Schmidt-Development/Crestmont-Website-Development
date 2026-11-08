@@ -239,41 +239,44 @@ test("[VOICE-003] [SEC-002] Retell webhooks fail closed without RETELL_INBOUND_A
 
 // ───────────── Cost controls ─────────────
 
-test("[VOICE-005] no Owner voice budget → inbound answers in voicemail-only mode; only message-taking functions run (fixture)", async () => {
+test("[VOICE-005] the inbound receptionist runs continuously: with no application voice budget it answers in full mode; the emergency pause still rejects calls (fixture)", async () => {
   const t = await app({}, { now: MON_9AM, budget: null });
   await saveVoiceConfig(t.db, t.owner.id, configured({ transfer: { enabled: true, number: "+15550107777" }, scheduling: { ...defaultVoiceConfig().scheduling, enabled: true } }));
   const r = await t.post("/api/webhooks/retell/inbound", inbound("b_1"));
   const ci = r.json.call_inbound;
-  assert.equal(ci.dynamic_variables.receptionist_mode, "voicemail");
-  assert.equal(ci.dynamic_variables.transfer_available, "false");
-  assert.equal(ci.dynamic_variables.transfer_number, "", "no transfer while closed, even inside hours");
-  assert.equal(ci.dynamic_variables.scheduling_available, "false");
-  assert.deepEqual(ci.agent_override, { agent: { max_call_duration_ms: 180000 }, retell_llm: { begin_message: VOICEMAIL_GREETING } });
+  // Founder directive 2026-11-08: funding is managed in the Retell account; no application budget closes inbound calls.
+  assert.equal(ci.dynamic_variables.receptionist_mode, "full");
+  assert.equal(ci.dynamic_variables.transfer_available, "true", "transfer works inside staffed hours");
+  assert.equal(ci.dynamic_variables.scheduling_available, "true");
+  assert.equal(ci.agent_override, undefined, "no voicemail-only override");
   for (const v of Object.values(ci.dynamic_variables)) assert.equal(typeof v, "string");
   const lead = await t.post("/api/webhooks/retell/functions", fn("b_1", "create_lead", { name: "Pat", phone: "+15550100123", interest: "business", requirements: "A new website" }));
-  assert.equal(lead.json.refused, "voicemail_mode");
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM leads`), 0, "refused in code, not only in the prompt");
-  const cb = await t.post("/api/webhooks/retell/functions", fn("b_1", "request_callback", { name: "Pat", phone: "+15550100123", reason: "Wants a website quote" }));
-  assert.equal(cb.json.callbackRequested, true);
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM crm_activities WHERE kind = 'task'`), 1, "message becomes a callback task");
+  assert.equal(lead.json.refused, undefined, "the receptionist can capture the lead");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM leads`), 1);
   assert.equal((await voiceBudget(t.db)).state, "not_set");
-  assert.equal((await serviceChecks(t.db, t.storage)).find((x) => x.name === "AI receptionist budget")?.status, "not_configured");
+  assert.equal((await serviceChecks(t.db, t.storage)).find((x) => x.name === "Outbound calling budget")?.status, "not_configured");
+  // The emergency control stays: a paused receptionist rejects inbound calls.
+  const paused = configured({ transfer: { enabled: true, number: "+15550107777" } });
+  paused.inbound = { ...paused.inbound, mode: "reject" };
+  await saveVoiceConfig(t.db, t.owner.id, paused);
+  const rej = await t.post("/api/webhooks/retell/inbound", inbound("b_2"));
+  assert.equal(rej.json.call_inbound.reject, true);
 });
 
-test("[VOICE-005] voice budget: costs are recorded per call, the month's spend closes the line when reached, Owners are told once, outbound stops (fixture)", async () => {
+test("[VOICE-005] voice costs are recorded per call; the monthly budget governs outbound only — reached, outbound stops and Owners are told once, while inbound keeps answering (fixture)", async () => {
   // Real clock here: the month's spend is keyed on each call's started_at.
   const t = await app({ RETELL_OUTBOUND: "on" }, { budget: "1" });
   const ob = configured({ inbound: { mode: "answer", numbers: ["+15550109999"], agent_id: null } });
   ob.outbound = { ...ob.outbound, enabled: true, agent_id: "agent_fixture01", from_number: "+15550109999" };
   await saveVoiceConfig(t.db, t.owner.id, ob);
   const c = await t.staff();
-  // Owner sets the budget through /staff/voice (Owner-only route).
-  assert.equal((await c.post("/staff/voice/budget", { monthly_budget_usd: "1.50" })).status, 303);
+  // The Owner sets the outbound calling budget (Owner-only route).
+  const set = await c.post("/staff/voice/budget", { monthly_budget_usd: "1.50" });
+  assert.equal(set.status, 303);
+  assert.equal(set.headers.get("location"), "/staff/sales#outbound");
   assert.equal((await voiceBudget(t.db)).budgetMicro, 1_500_000);
   assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'voice.budget_updated'`).first());
-  const open = await t.post("/api/webhooks/retell/inbound", inbound("k_1"));
-  assert.equal(open.json.call_inbound.dynamic_variables.receptionist_mode, "full");
-  assert.equal(open.json.call_inbound.agent_override, undefined);
+  await t.post("/api/webhooks/retell/inbound", inbound("k_1"));
   // Retell reports combined_cost in cents: 120 cents = $1.20 → 80% warning.
   await t.post("/api/webhooks/retell", { event: "call_ended", call: phoneCall("k_1", { call_cost: { combined_cost: 120 }, disconnection_reason: "user_hangup", transcript: "Caller: hi" }) });
   assert.equal((await t.db.prepare(`SELECT cost_microusd FROM calls WHERE provider_call_id = 'k_1'`).first<{ cost_microusd: number }>())!.cost_microusd, 1_200_000);
@@ -285,17 +288,23 @@ test("[VOICE-005] voice budget: costs are recorded per call, the month's spend c
   const b = await voiceBudget(t.db);
   assert.equal(b.spentMicro, 1_655_000);
   assert.equal(b.state, "exhausted");
-  const closed = await t.post("/api/webhooks/retell/inbound", inbound("k_3"));
-  assert.equal(closed.json.call_inbound.dynamic_variables.receptionist_mode, "voicemail");
-  await t.post("/api/webhooks/retell/inbound", inbound("k_4"));
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM notifications WHERE kind = 'voice_budget_exhausted' AND user_id = ?`, t.owner.id), 1, "Owners are notified once per month");
-  assert.equal((await serviceChecks(t.db, t.storage)).find((x) => x.name === "AI receptionist budget")?.status, "failing");
-  const page = await (await c.get("/staff/voice")).text();
-  assert.match(page, /\$1\.66 of \$1\.50 used/);
-  assert.match(page, /Budget reached/);
-  const q = await processOutboundQueue({ db: t.db, env: { ...t.env, RETELL_OUTBOUND: "on" }, fetch: (() => { throw new Error("must not dial"); }) as unknown as typeof fetch });
+  // Inbound keeps answering in full mode even with the budget reached.
+  const still = await t.post("/api/webhooks/retell/inbound", inbound("k_3"));
+  assert.equal(still.json.call_inbound.dynamic_variables.receptionist_mode, "full");
+  // Outbound stops, and Owners are told once per month.
+  const fetchNever = (() => { throw new Error("must not dial"); }) as unknown as typeof fetch;
+  const q = await processOutboundQueue({ db: t.db, env: { ...t.env, RETELL_OUTBOUND: "on" }, fetch: fetchNever });
   assert.equal(q.detail, "skipped: voice budget reached");
-  // Only Owners may change it.
+  await processOutboundQueue({ db: t.db, env: { ...t.env, RETELL_OUTBOUND: "on" }, fetch: fetchNever });
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM notifications WHERE kind = 'voice_budget_exhausted' AND user_id = ?`, t.owner.id), 1, "Owners are notified once per month");
+  assert.match((await t.db.prepare(`SELECT body FROM notifications WHERE kind = 'voice_budget_exhausted'`).first<{ body: string }>())!.body, /Inbound calls are not affected/);
+  assert.equal((await serviceChecks(t.db, t.storage)).find((x) => x.name === "Outbound calling budget")?.status, "failing");
+  // The receptionist page reports the costs and has no budget section.
+  const page = await (await c.get("/staff/voice")).text();
+  assert.match(page, /Voice costs this month/);
+  assert.match(page, /\$1\.66/);
+  assert.doesNotMatch(page, /Monthly voice budget/);
+  // Only Owners may change it, and invalid input changes nothing.
   const admin = await createStaff(t.db, "administrator", "admin@crestmont.test");
   const ac = await t.client().login(admin.email, TEST_PASSWORD, admin.secret);
   assert.equal((await ac.post("/staff/voice/budget", { monthly_budget_usd: "1000" })).status, 403);

@@ -150,7 +150,7 @@ test("[BRAND-005] slow staff sections are marked for skeleton loaders; forms lin
   const home = await (await c.get("/staff")).text();
   assert.match(home, /<template id="skeleton-tpl">/);
   assert.match(home, /class="skeleton skeleton--line"/);
-  assert.match(home, /href="\/staff\/readiness"[^>]*data-slow/, "navigating to the readiness overview shows a skeleton");
+  assert.match(home, /href="\/staff\/finance"[^>]*data-slow/, "navigating to Revenue shows a skeleton");
   assert.match(home, /<main id="main" class="page" data-slow-target>/, "page stays fully server-rendered");
   // Validation errors are announced and linked to their fields.
   const res = await app.client().post("/contact", { name: "A", email: "nope", interest: "other", message: "short" });
