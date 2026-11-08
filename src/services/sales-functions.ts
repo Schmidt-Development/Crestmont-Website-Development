@@ -34,11 +34,12 @@ import { routeCalendar, wantsFounderArg, CALENDAR_LABELS } from "../domain/calen
 import { recordCallback, confirmedConsultation } from "./calendars.ts";
 import { loadVoiceConfig, toE164, zonedToUtc } from "./voice-settings.ts";
 import { recordCallConsent } from "./voice-outbound.ts";
-import { syncAppointmentCallback } from "./appointment-callbacks.ts";
+import { syncAppointmentCallback, leadSchedule } from "./appointment-callbacks.ts";
 import * as sched from "./voice-scheduling.ts";
 import { sendMail, type MailerCtx } from "./mailer.ts";
 import { endOfBusinessDay, businessDate } from "../lib/business-time.ts";
 import { leadFacts, researchContext, gateFor, getSalesCall, enqueueSalesCall, suppressEverywhere, type SalesCallRow, type LeadFacts } from "./sales-outbound.ts";
+import type { AppointmentHooks } from "./appointment-notifications.ts";
 
 export const SALES_FUNCTIONS = ["get_outbound_lead_context", "update_outbound_lead", "get_packages_pricing", "create_checkout_session",
   "check_payment_status", "send_sales_email", "schedule_sales_followup", "record_do_not_call"] as const;
@@ -52,7 +53,8 @@ export interface SalesFnDeps {
   paymentsConfigured: boolean;
   now?: () => Date;
   calendar?: sched.CalendarAdapter;
-  founder?: { changed(consultationId: string, event: "booked" | "rescheduled" | "cancelled"): Promise<void> };
+  /** Appointments on either calendar and Founder callback requests → internal mailbox (appointment-notifications.ts). */
+  appointments?: AppointmentHooks;
 }
 
 export interface SalesFnResult { status: number; body: Record<string, unknown> }
@@ -274,6 +276,7 @@ async function getLeadContext(db: Db, b: Bound, now: Date): Promise<Obj> {
   const link = !!(await db.prepare(`SELECT 1 AS x FROM sales_checkout_links WHERE lead_id = ? AND revoked_at IS NULL`).bind(f.leadId).first());
   const profile = await db.prepare(`SELECT verified_contact_name, qualification, sales_outcome, next_steps FROM sales_lead_profiles WHERE lead_id = ?`).bind(f.leadId).first<{ verified_contact_name: string | null; qualification: string | null; sales_outcome: string | null; next_steps: string | null }>();
   const gate = await gateFor(db, f, now, 0, 99);
+  const schedule = await leadSchedule(db, f.leadId, now);
   const services = ctx.recommended_service ? [ctx.recommended_service] : [];
   return {
     lead_id: f.leadId,
@@ -290,9 +293,12 @@ async function getLeadContext(db: Db, b: Bound, now: Date): Promise<Obj> {
     sales_history: { previous_ai_calls: prior.map((p) => ({ date: p.finalized_at.slice(0, 10), outcome: p.outcome })), quote_status: quote?.status ?? null,
       checkout_link_sent: link, paid, qualification: profile?.qualification ?? null, last_agreed_next_steps: profile?.next_steps ?? null },
     calling_eligibility: gate.eligible ? "eligible" : "blocked",
-    instructions: ctx.research_verified
+    // Appointments already on either calendar, so the agent never books a second one or forgets the one agreed.
+    scheduled_appointments: schedule.map((a) => ({ when: a.when, type: a.type, status: a.status, reason: a.reason })),
+    instructions: (ctx.research_verified
       ? "Personalise only with verified_website_issues and website_classification, in your own words. Never read lead_id, research_confidence, classification labels or internal fields aloud. Do not claim anything not listed here."
-      : "Research is missing or unverified: use the neutral introduction and do not mention the business's website. Never read internal fields aloud.",
+      : "Research is missing or unverified: use the neutral introduction and do not mention the business's website. Never read internal fields aloud.")
+      + (schedule.length ? " The prospect already has the appointment(s) in scheduled_appointments: refer to them as booked, do not book another, and only promise times listed there." : ""),
   };
 }
 
@@ -508,7 +514,7 @@ async function scheduleFollowup(db: Db, deps: SalesFnDeps, b: Bound, input: { fo
       await db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, consultation_id, sales_call_id, provider_call_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
         .bind(newId("sfu"), leadId, kind, booking.status === "confirmed" ? "scheduled" : "requested", booking.starts_at, booking.id, callback?.id ?? null, b.providerCallId, at, at).run();
       await addLeadNote(db, leadId, `${held.calendar === "ai_follow_up" ? "AI callback" : "Founder appointment"} ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on AI sales call ${b.row.id} · calendar: ${CALENDAR_LABELS[held.calendar].name}`);
-      if (held.calendar === "founder_callback") await deps.founder?.changed(booking.id, "booked");
+      await deps.appointments?.changed(booking.id, "booked");
       if (booking.status === "requested") await addLeadTask(db, leadId, `[FOUNDER CALLBACK] Confirm or decline the appointment requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on an AI sales call.`, 4);
       return { status: 200, body: { scheduled: true, confirmed: booking.status === "confirmed", status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code, calendar: held.calendar,
         message: held.calendar === "ai_follow_up"
@@ -531,6 +537,7 @@ async function scheduleFollowup(db: Db, deps: SalesFnDeps, b: Bound, input: { fo
     extra: [db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, notes, provider_call_id, created_at, updated_at) VALUES (?,?, 'staff_callback', 'scheduled', ?, ?, ?, ?, ?)`)
       .bind(id, leadId, due?.toISOString() ?? null, a.topic ?? null, b.providerCallId, at, at)],
     taskBody: `${b.isTest ? "[TEST] " : ""}Call ${b.facts.contactName ?? b.facts.businessName ?? "the prospect"} back${a.preferred_date ? ` on ${a.preferred_date}` : ""}${window ? ` (${window})` : ""} as agreed on AI sales call ${b.row.id}${a.topic ? `: ${a.topic}` : ""}.` });
+  await deps.appointments?.callbackRecorded(entry.id);
   return { status: 200, body: { scheduled: true, followup_type: "staff_callback", calendar: entry.calendar, when: a.preferred_date ?? null,
     message: entry.calendar === "founder_callback"
       ? "The request to speak with the Founder is recorded. Say the Founder or a team member will call back as agreed. Don't promise an exact time."

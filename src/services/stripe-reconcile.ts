@@ -66,8 +66,10 @@ export const RESOLUTIONS = {
   escalated_to_accountant: "Escalated to the accountant",
 } as const;
 export type Resolution = keyof typeof RESOLUTIONS;
+/** Resolutions that claim the problem was fixed: if the same finding is seen again afterwards, it genuinely recurred. */
+export const FIXED_RESOLUTIONS: string[] = ["corrected_locally", "corrected_in_stripe", "refunded_or_credited"];
 
-interface Finding { kind: FindingKind; key: string; stripeObjectId: string | null; invoiceId?: string | null; paymentId?: string | null; organizationId?: string | null; stripeAmount?: number | null; localAmount?: number | null; detail: string }
+export interface Finding { kind: FindingKind; key: string; stripeObjectId: string | null; invoiceId?: string | null; paymentId?: string | null; organizationId?: string | null; stripeAmount?: number | null; localAmount?: number | null; detail: string }
 
 export interface ReconcileResult { status: "ok" | "skipped" | "failed"; detail: string; checked: number; opened: number; cleared: number; runId: string }
 
@@ -159,19 +161,31 @@ export async function runStripeReconciliation(db: Db, env: Env, now = Date.now()
 }
 
 /** Open findings of this scope that the run did not see again are marked cleared. */
-async function autoClear(db: Db, runId: string, scope: ReconcileScope): Promise<number> {
+export async function autoClear(db: Db, runId: string, scope: ReconcileScope): Promise<number> {
   const res = await db.prepare(`UPDATE reconciliation_findings SET status = 'cleared' WHERE status = 'open' AND scope = ? AND (last_run_id IS NULL OR last_run_id <> ?)`).bind(scope, runId).run();
   return res.meta.changes;
 }
 
-async function storeFindings(db: Db, runId: string, findings: Finding[], scope: ReconcileScope): Promise<number> {
+export async function storeFindings(db: Db, runId: string, findings: Finding[], scope: ReconcileScope): Promise<number> {
   let opened = 0;
   const at = nowIso();
   for (const f of findings) {
     const fp = `${f.kind}:${f.key}`;
-    const prev = await db.prepare(`SELECT id, status FROM reconciliation_findings WHERE fingerprint = ?`).bind(fp).first<{ id: string; status: string }>();
+    const prev = await db.prepare(`SELECT id, status, resolution, resolution_note, resolved_at, organization_id FROM reconciliation_findings WHERE fingerprint = ?`).bind(fp)
+      .first<{ id: string; status: string; resolution: string | null; resolution_note: string | null; resolved_at: string | null; organization_id: string | null }>();
     if (prev) {
-      // A human-resolved finding stays resolved; an auto-cleared one re-opens if it comes back.
+      // An auto-cleared finding re-opens if it comes back. A human-resolved one stays resolved when the reviewer
+      // explained it (no action needed) or handed it to the accountant -- but if they recorded it as FIXED and the same
+      // problem is seen again, it genuinely recurred: it re-opens (Founder directive 2026-11-08, "never silently dismiss
+      // an unresolved discrepancy"), and the earlier resolution is kept in the audit log.
+      const recurred = prev.status === "resolved" && FIXED_RESOLUTIONS.includes(prev.resolution ?? "");
+      if (recurred) {
+        await db.prepare(`UPDATE reconciliation_findings SET last_seen_at = ?, last_run_id = ?, detail = ?, status = 'open', resolved_by = NULL, resolved_at = NULL,
+            resolution = NULL, resolution_note = NULL, reopened_count = reopened_count + 1 WHERE id = ? AND status = 'resolved'`).bind(at, runId, f.detail, prev.id).run();
+        await audit(db, { actorKind: "system", action: "reconciliation.finding_recurred", subjectType: "reconciliation_finding", subjectId: prev.id, organizationId: prev.organization_id,
+          details: { kind: f.kind, previousResolution: prev.resolution, previousNote: prev.resolution_note, resolvedAt: prev.resolved_at, runId } });
+        continue;
+      }
       await db.prepare(`UPDATE reconciliation_findings SET last_seen_at = ?, last_run_id = ?, detail = ?, status = CASE WHEN status = 'cleared' THEN 'open' ELSE status END WHERE id = ?`)
         .bind(at, runId, f.detail, prev.id).run();
       continue;

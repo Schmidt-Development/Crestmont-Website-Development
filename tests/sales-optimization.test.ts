@@ -819,3 +819,45 @@ test("[SALESOPT-010] the dashboard and docs name the outbound dialler (no stale 
   assert.ok(!page.includes("carry no prompt-version stamp"), "the dialler's agent is the staging target: no warning");
   assert.match(page, /the staging target: calls carry crestmont_so_version/);
 });
+
+test("[SALESOPT-010] at a glance: plain-English status from recorded events only; nothing is claimed before it happened, blockers are named", async () => {
+  const t = await app();
+  const owner = await t.staff();
+  const glance = async () => {
+    const page = await (await owner.get("/staff/sales-optimization")).text();
+    const m = /<section class="card stack" data-optimization-glance>[\s\S]*?<\/section>/.exec(page);
+    assert.ok(m, "the glance card is on the page");
+    return m![0];
+  };
+
+  // Nothing has happened yet: every step says "Not yet", and the reasons are spelled out.
+  let g = await glance();
+  assert.match(g, /None deployed yet/);
+  assert.match(g, /Not yet: no call has been analysed/);
+  assert.match(g, /No improvement has been proposed yet/);
+  assert.equal((g.match(/>Not yet</g) ?? []).length, 8, "no loop step is claimed without a record");
+  assert.match(g, /No production sales agent is registered/);
+  assert.match(g, /Optimization is paused by the Founder/);
+  assert.match(g, /No connected sales calls in the last 30 days/);
+
+  // A real call, its analysis with a grounded finding, and an AI proposal awaiting testing.
+  await registerTargets(t.db, t.owner.id);
+  const v1 = await reg.ensureBaseline(t.db, baselineSalesInstructions());
+  const callId = newId("call"), at = new Date(Date.now() - 60_000).toISOString();
+  await t.db.prepare(`INSERT INTO calls (id, provider, provider_call_id, direction, started_at, created_at) VALUES (?, 'retell', ?, 'outbound', ?, ?)`).bind(callId, callId, at, at).run();
+  await t.db.prepare(`INSERT INTO so_call_facts (call_id, provider_call_id, stage, agent_id, version_id, started_at, ended_at, connected, opt_out, last_event, last_event_rank, updated_at) VALUES (?,?, 'production', ?, ?, ?, ?, 1, 0, 'call_ended', 2, ?)`)
+    .bind(callId, callId, PROD, v1.id, at, at, at).run();
+  const an = newId("soan");
+  await t.db.prepare(`INSERT INTO so_analyses (id, call_id, analyzer, status, model, created_at, completed_at) VALUES (?,?, 'test', 'done', 'self-hosted:test', ?, ?)`).bind(an, callId, at, at).run();
+  await t.db.prepare(`INSERT INTO so_findings (id, analysis_id, call_id, category, label, basis, confidence, created_at) VALUES (?,?,?, 'failed_qualification', 'Did not ask about their current website', 'interpreted', 0.5, ?)`).bind(newId("sof"), an, callId, at).run();
+  const v2 = await reg.createVersion(t.db, { parentId: v1.id, instructions: `${v1.instructions}\nAsk what their current website does for them before discussing packages.`, rationale: "Discovery questions were weak on recent calls.", authorKind: "ai", author: "self-hosted:test" });
+
+  g = await glance();
+  assert.match(g, /1 of 1 connected call eligible for analysis/);
+  assert.match(g, /Weak discovery questions \(1\)/);
+  assert.match(g, new RegExp(`v${v2.seq}</a>, [^<]+?: Discovery questions were weak on recent calls\\.`));
+  assert.match(g, /Pending: being tested or awaiting the Founder&#39;s decision|Pending: being tested or awaiting the Founder's decision/);
+  assert.doesNotMatch(g, /Active on the sales agent/, "a proposal is never shown as active before a verified deployment");
+  assert.match(g, /Last successful deployment to Retell<\/dt>\s*<dd>Never/);
+  assert.equal((g.match(/>Not yet</g) ?? []).length, 5, "call received, analysed and proposed now have records; the rest still say Not yet");
+});

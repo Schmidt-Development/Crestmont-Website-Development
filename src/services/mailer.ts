@@ -34,7 +34,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "founder_appointment", "voice_escalation", "email_change_confirm", "voice_followup", "sales_info"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "founder_appointment", "voice_escalation", "email_change_confirm", "voice_followup", "sales_info", "internal_alert"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -110,6 +110,9 @@ export interface TemplateData {
   staff_invitation: { inviterName: string; roleLabel: string; acceptUrl: string };
   quote_sent: { contactName: string; totalCents: number; validUntil: string | null; proposalUrl: string };
   lead_received: { name: string; kind: "quote" | "contact" };
+  /** Internal operational notification to Crestmont's own mailbox (internal-notify.ts): one plain-English template for
+   *  paid orders, appointments, callbacks, escalations, refund requests, disputes, failed automation, launch blockers. */
+  internal_alert: { subject: string; heading: string; summary: string; facts: [string, string][]; nextAction: string | null; url: string | null; urlLabel?: string };
   /** Staff alert for a new web lead (CREST-GAP-005). */
   lead_alert: { kind: "quote" | "contact" | "lead"; name: string; company: string | null; interest: string | null; assigned: boolean; url: string };
   /** Confirmation of an accepted proposal, listing the exact agreement versions accepted (CREST-GAP-039). */
@@ -120,7 +123,9 @@ export interface TemplateData {
   consultation: { event: "requested" | "confirmed" | "rescheduled" | "cancelled"; name: string; when: string; code: string };
   /** Founder alert: an appointment with the Founder was requested, moved or cancelled (internal Founder Calendar). */
   founder_appointment: { event: "booked" | "rescheduled" | "cancelled"; prospect: string; business: string | null; when: string; timeZone: string; durationMinutes: number;
-    contact: string; reason: string; salesContext: string | null; status: string; reference: string; crmUrl: string | null; test: boolean };
+    contact: string; reason: string; salesContext: string | null; status: string; reference: string; crmUrl: string | null; test: boolean;
+    /** What to prepare before the call (appointment-notifications.ts). Optional so older call sites still type-check. */
+    preparation?: string | null };
   /** Staff alert: the AI receptionist escalated a call that could not be transferred live (CREST-GAP-053). */
   voice_escalation: { reason: string; caller: string; why: "outside_hours" | "no_transfer" | "unavailable"; test: boolean; url: string };
   /** Sent to the NEW address of a requested account email change (CREST-GAP-073); the change applies only after confirmation. */
@@ -555,6 +560,19 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
     }),
     samples: [{ name: "Morgan Hale", kind: "quote" }, { name: "Morgan Hale", kind: "contact" }],
   },
+  internal_alert: {
+    name: "internal_alert", category: "transactional", audience: "staff",
+    description: "Internal notification to Crestmont's operations mailbox (paid orders, appointments, callbacks, escalations, refund requests, disputes, failed automation, launch blockers).",
+    render: (d) => ({
+      subject: d.subject,
+      heading: d.heading,
+      paragraphs: [d.summary, ...d.facts.map(([k, v]) => `${k}: ${v}`), ...(d.nextAction ? [`Next action: ${d.nextAction}`] : [])],
+      ...(d.url ? { cta: { label: d.urlLabel ?? "Open in Crestmont", url: d.url } } : {}),
+    }),
+    samples: [{ subject: "New Website Order — Payment Confirmed", heading: "A new website order was paid", summary: "Stripe confirmed the payment for a new website package.",
+      facts: [["Customer", "Morgan Hale"], ["Business", "Sample Bakery LLC"], ["Package", "Business website"], ["Amount paid", "$2,999.00"], ["Payment date", "November 8, 2026"], ["Order reference", "Invoice 0042"]],
+      nextAction: "Assign a project manager and review the customer's intake.", url: "https://example.com/staff/projects/prj_preview", urlLabel: "Open project" }],
+  },
   lead_alert: {
     name: "lead_alert", category: "transactional", audience: "staff",
     description: "Staff alert: a new lead arrived from the public site or the lead API.",
@@ -615,7 +633,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
   },
   founder_appointment: {
     name: "founder_appointment", category: "transactional", audience: "staff",
-    description: "Founder alert: a prospect's appointment with the Founder (requested only when the prospect asked for the Founder) was booked, moved or cancelled.",
+    description: "Founder Calendar alert to the internal operations mailbox: a prospect's appointment with the Founder (requested only when the prospect asked for the Founder) was booked, moved or cancelled.",
     render: (d) => {
       const what = d.event === "booked" ? (d.status === "requested" ? "requested — confirm or decline it" : "booked") : d.event === "rescheduled" ? "moved" : "cancelled";
       return {
@@ -627,12 +645,13 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
           `Reason: ${d.reason}`,
           ...(d.salesContext ? [`Sales context: ${d.salesContext}`] : []),
           `Reference ${d.reference}. ${d.status === "requested" && d.event !== "cancelled" ? "It holds the slot until you confirm it on the receptionist operations page." : ""}`.trim(),
+          ...(d.preparation && d.event !== "cancelled" ? [`To prepare: ${d.preparation}`] : []),
         ],
         ...(d.crmUrl ? { cta: { label: "Open the CRM record", url: d.crmUrl } } : {}),
       };
     },
     samples: [
-      { event: "booked", prospect: "Morgan Hale", business: "Hale Bakery", when: "Tuesday, November 3 at 10:00 AM EST", timeZone: "America/New_York", durationMinutes: 30, contact: "+15550100123 · morgan@example.com", reason: "Wants to talk to the Founder about a custom portal", salesContext: "Interest: custom", status: "requested", reference: "K7MP4Q", crmUrl: "https://example.com/staff/crm/leads/ld_sample", test: false },
+      { event: "booked", prospect: "Morgan Hale", business: "Hale Bakery", when: "Tuesday, November 3 at 10:00 AM EST", timeZone: "America/New_York", durationMinutes: 30, contact: "+15550100123 · morgan@example.com", reason: "Wants to talk to the Founder about a custom portal", salesContext: "Interest: custom", status: "requested", reference: "K7MP4Q", crmUrl: "https://example.com/staff/crm/leads/ld_sample", test: false, preparation: "Review the CRM record and the latest call summary before you call." },
       { event: "cancelled", prospect: "Morgan Hale", business: null, when: "Tuesday, November 3 at 10:00 AM EST", timeZone: "America/New_York", durationMinutes: 30, contact: "+15550100123", reason: "—", salesContext: null, status: "cancelled", reference: "K7MP4Q", crmUrl: null, test: true },
     ],
   },

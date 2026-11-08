@@ -16,7 +16,7 @@ import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import type { Env } from "../app/context.ts";
 import { audit } from "./security.ts";
-import { toE164, validTimeZone, loadVoiceConfig } from "./voice-settings.ts";
+import { toE164, validTimeZone, loadVoiceConfig, slotLabel } from "./voice-settings.ts";
 import { createRetellPhoneCall, RETELL_PROVIDER } from "../adapters/retell.ts";
 import { retellKey, keysAmbiguous } from "../adapters/retell-workspaces.ts";
 import { addLeadNote, addLeadTask, notifyOwners } from "./voice-common.ts";
@@ -24,6 +24,7 @@ import { addDnc, isDnc } from "./voice-outbound.ts";
 import { voiceBudget, budgetOpen, noteBudgetClosed } from "./voice-budget.ts";
 import { reservePhone, releasePhone, markDialing, recordPhoneOutcome } from "./outreach-ledger.ts";
 import { suppressionFor } from "./contact-identity.ts";
+import { activeAppointmentFor, queueMissingCallbacks } from "./appointment-callbacks.ts";
 import { applySuppressions } from "./research.ts";
 import { timeZoneForState } from "../domain/research.ts";
 import { listTargets, deployedVersion } from "./sales-opt/registry.ts";
@@ -541,6 +542,9 @@ export async function processSalesQueue(d: SalesQueueDeps): Promise<{ detail: st
   const budget = await voiceBudget(d.db, now());
   if (!budgetOpen(budget)) { await noteBudgetClosed(d.db, budget); return { detail: `skipped: voice budget ${budget.state === "not_set" ? "not set" : "reached"}`, dialled: 0, byMode: { callback: 0, cold: 0 } }; }
   const s = await loadSalesSettings(d.db);
+  // Never miss an eligible scheduled callback: an active AI appointment whose callback was never queued is queued now
+  // (it still passes the callback gate, here and again immediately before the dial).
+  if (sw.callback.enabled) await queueMissingCallbacks(d.db, now());
   if (sw.cold.enabled) await topUpColdCandidates(d.db, s, now());
   const notes: string[] = [];
   const byMode: Record<OutboundMode, number> = { callback: 0, cold: 0 };
@@ -563,6 +567,27 @@ async function dispatchMode(d: SalesQueueDeps, s: SalesSettings, mode: OutboundM
   let dialled = 0;
   for (const row of due) {
     if (dialled >= perRun) break;
+    if (mode === "callback" && row.appointment_id) {
+      // The appointment is the authority, not the queue row: re-read it (following a reschedule) right before dialling.
+      const appt = await activeAppointmentFor(d.db, row.appointment_id);
+      if (!appt) {
+        const c = await d.db.prepare(`UPDATE sales_calls SET status = 'cancelled', status_detail = 'Appointment cancelled or no longer active', updated_at = ? WHERE id = ? AND status = 'queued'`).bind(nowIso(), row.id).run();
+        if (c.meta.changes) await audit(d.db, { actorKind: "system", action: "sales_outbound.callback_cancelled", subjectType: "sales_call", subjectId: row.id, details: { appointment: row.appointment_id, why: "appointment_not_active" } });
+        notes.push(`${row.id}: appointment no longer active`);
+        continue;
+      }
+      if (appt.id !== row.appointment_id || Date.parse(appt.starts_at) > now().getTime()) {
+        let context: Record<string, unknown> = {};
+        try { context = JSON.parse(row.context_json || "{}"); } catch { context = {}; }
+        context = { ...context, appointment_id: appt.id, appointment_label: slotLabel(appt.starts_at, appt.timezone) };
+        const early = Date.parse(appt.starts_at) > now().getTime();
+        // Never early: a callback is placed at its appointment time (a moved appointment takes its call with it).
+        await d.db.prepare(`UPDATE sales_calls SET appointment_id = ?, context_json = ?, not_before = CASE WHEN ? THEN ? ELSE not_before END, updated_at = ? WHERE id = ? AND status = 'queued'`)
+          .bind(appt.id, JSON.stringify(context).slice(0, 4000), early ? 1 : 0, appt.starts_at, nowIso(), row.id).run();
+        if (early) { notes.push(`${row.id}: not due until its appointment`); continue; }
+        row.appointment_id = appt.id; row.context_json = JSON.stringify(context);
+      }
+    }
     if (mode === "callback" && callbackMissed(row.not_before, now())) { await markMissed(d.db, row, "its appointment time passed before it could be placed (callbacks paused, outside calling hours or no capacity)", now()); notes.push(`${row.id}: missed`); continue; }
     const f = await leadFacts(d.db, row.lead_id);
     if (!f) { await block(d.db, row, "blocked", "lead no longer exists", false); continue; }
@@ -575,6 +600,17 @@ async function dispatchMode(d: SalesQueueDeps, s: SalesSettings, mode: OutboundM
       await d.db.prepare(`UPDATE sales_calls SET eligibility_json = ? WHERE id = ?`).bind(JSON.stringify(gate.reasons), row.id).run();
       notes.push(`${row.id}: blocked`);
       continue;
+    }
+    if (mode === "cold") {
+      // A prospect who already has an appointment (either calendar) or a scheduled callback is never cold-called on top.
+      const engaged = await d.db.prepare(`SELECT (SELECT COUNT(*) FROM consultations WHERE lead_id = ? AND status IN ('requested','confirmed') AND starts_at >= ?)
+          + (SELECT COUNT(*) FROM sales_calls WHERE lead_id = ? AND mode = 'callback' AND status IN ('queued','dialing','in_progress')) AS n`)
+        .bind(row.lead_id, new Date(now().getTime() - 3_600_000).toISOString(), row.lead_id).first<{ n: number }>();
+      if (engaged && engaged.n > 0) {
+        await d.db.prepare(`UPDATE sales_calls SET status = 'cancelled', status_detail = 'Superseded by a scheduled appointment or callback', updated_at = ? WHERE id = ? AND status = 'queued'`).bind(nowIso(), row.id).run();
+        notes.push(`${row.id}: superseded by a scheduled appointment`);
+        continue;
+      }
     }
     if (mode === "cold" && !withinSalesWindow(now(), f.timeZone, f.state)) {
       const next = nextSalesWindow(now(), f.timeZone, f.state);

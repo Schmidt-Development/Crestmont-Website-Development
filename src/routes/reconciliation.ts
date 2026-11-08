@@ -118,8 +118,10 @@ export function registerReconciliation(r: Router): void {
     const f = await ctx.form();
     try {
       await rec.resolveFinding(ctx.db, p.id, ctx.user!.id, str(f, "note"), str(f, "resolution") || "no_action_needed");
-      return redirect(ctx, BASE, { kind: "success", text: "Finding marked as reviewed. No payment or invoice was changed." });
+      const back = str(f, "back") === "mywork" ? "/staff?tab=finance" : BASE;
+      return redirect(ctx, back, { kind: "success", text: "Issue marked as resolved. No payment or invoice was changed." });
     } catch (e) {
+      if (e instanceof rec.FindingError && str(f, "back") === "mywork") return redirect(ctx, "/staff?tab=finance", { kind: "error", text: e.message });
       if (e instanceof rec.FindingError) return reconciliationPage(ctx, [e.message], 422);
       throw e;
     }

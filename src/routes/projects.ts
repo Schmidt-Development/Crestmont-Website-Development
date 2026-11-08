@@ -4,7 +4,10 @@ import { aiBuildGate } from "../domain/ai-build-gate.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatCents, formatDate, formatDateTime, label, safeUrl, type SafeHtml } from "../lib/html.ts";
-import { HttpError, download, htmlResponse, redirect, str } from "../app/http.ts";
+import { HttpError, download, htmlResponse, jsonResponse, redirect, str } from "../app/http.ts";
+import { DraftError, assertDraftUsable, draftConversationReply, draftStatus, isDraftJobId, type DraftStatus } from "../services/ai-drafts.ts";
+import { decideAiJob } from "../services/ai.ts";
+import { draftControls, draftJobField, wantsJson } from "../ui/ai-draft.ts";
 import { requireStaff } from "../app/app.ts";
 import { likeContains } from "../lib/db.ts";
 import { appLayout } from "../ui/layout.ts";
@@ -14,6 +17,8 @@ import {
 } from "../ui/components.ts";
 import { toCsv } from "../services/finance.ts";
 import * as P from "../services/projects.ts";
+import * as FW from "../services/finance-work.ts";
+import { RESOLUTIONS } from "../services/stripe-reconcile.ts";
 import { launchEligibility } from "../services/launch-gate.ts";
 import * as F from "../services/files.ts";
 import * as M from "../services/messages.ts";
@@ -90,16 +95,67 @@ async function needsAttention(ctx: AppContext): Promise<SafeHtml> {
     const n = (await db.prepare(`SELECT COUNT(*) AS n FROM privacy_requests WHERE kind = 'deletion' AND status IN ('received','in_progress')`).first<{ n: number }>())?.n ?? 0;
     if (n) items.push({ text: `${n} customer data-deletion request${n === 1 ? "" : "s"} to process`, href: "/staff/security#privacy", tone: "warn" });
   }
-  if (can(actor, "finance.read")) {
-    const n = (await db.prepare(`SELECT COUNT(*) AS n FROM reconciliation_findings WHERE status = 'open'`).first<{ n: number }>())?.n ?? 0;
-    if (n) items.push({ text: `${n} payment record${n === 1 ? "" : "s"} that do${n === 1 ? "es" : ""} not match Stripe — review and resolve`, href: "/staff/finance/reconciliation", tone: "warn" });
+  if (can(actor, "finance.read") || can(actor, "refund.review")) {
+    const n = (await FW.financeWorkItems(db, actor, ctx.now())).length;
+    if (n) items.push({ text: `${n} financial issue${n === 1 ? "" : "s"} to review (payments, refunds, disputes, cost import)`, href: "/staff?tab=finance", tone: "warn" });
   }
   if (!items.length) return html``;
   return html`<section class="card" data-needs-attention style="margin-bottom:1.5rem"><h2 class="card__title">Needs your attention</h2>
 <ul class="checklist">${items.map((i) => html`<li>${badge(i.tone, "To do")} <a href="${i.href}">${i.text}</a></li>`)}</ul></section>`;
 }
 
+/** My Work → Financial issues (finance-work.ts): each issue in plain English, with what to do and where. */
+async function financeIssuesSection(ctx: AppContext): Promise<SafeHtml> {
+  const items = await FW.financeWorkItems(ctx.db, ctx.actor!, ctx.now());
+  const me = ctx.user!.id;
+  const assignees = new Map<string, { id: string; display_name: string }[]>();
+  const peopleFor = async (key: string) => { const k = key.startsWith("refund:") ? "refund" : "finance"; if (!assignees.has(k)) assignees.set(k, await FW.financeAssignees(ctx.db, key)); return assignees.get(k)!; };
+  const canAssign = can(ctx.actor!, "finance.read");
+  const cards: SafeHtml[] = [];
+  for (const i of items) {
+    const people = canAssign ? await peopleFor(i.key) : [];
+    cards.push(html`<article class="card" data-finance-issue="${i.key}" style="margin-bottom:1rem">
+<div class="row row--between" style="flex-wrap:wrap;gap:.5rem"><h3 style="margin:0">${i.title}</h3><div>${badge(i.priority === "urgent" ? "urgent" : i.priority === "high" ? "high" : "normal", i.priority === "urgent" ? "Urgent" : i.priority === "high" ? "High priority" : "Normal")} ${badge("open", i.status)}</div></div>
+<p>${i.explanation}</p>
+${dl([["Customer", i.customer ?? "—"], ["Project", i.project ? html`<a href="/staff/projects/${i.project.id}">${i.project.name}</a>` : "—"],
+  ["Amount", i.amountCents === null ? "—" : formatCents(i.amountCents)], ["Found", formatDateTime(i.discoveredAt)],
+  ["Assigned to", i.assignedTo ? (i.assignedTo.id === me ? "You" : i.assignedTo.name) : html`<span class="faint">Not assigned</span>`],
+  ["Recommended next step", i.nextAction]])}
+<div class="row" style="gap:.5rem;flex-wrap:wrap;margin-top:.5rem">
+${linkButton("Open the record", i.href, "secondary", "sm")}
+${canAssign ? html`<form method="post" action="/staff/finance-work/assign" class="row" style="gap:.25rem">${csrf(ctx)}<input type="hidden" name="key" value="${i.key}">
+<label class="visually-hidden" for="as-${i.key}">Assign ${i.title}</label><select class="select" id="as-${i.key}" name="user_id"><option value="">Not assigned</option>${people.map((p) => html`<option value="${p.id}"${i.assignedTo?.id === p.id ? html` selected` : ""}>${p.id === me ? "Me" : p.display_name}</option>`)}</select>${button("Assign", { variant: "ghost", size: "sm" })}</form>` : ""}
+</div>
+${i.findingId && can(ctx.actor!, "finance.read") ? html`<details style="margin-top:.5rem"><summary>Mark as resolved</summary>
+<form method="post" action="/staff/finance/reconciliation/${i.findingId}/resolve" class="stack" style="margin-top:.5rem">${csrf(ctx)}<input type="hidden" name="back" value="mywork">
+${select({ name: "resolution", label: "What was done", options: Object.entries(RESOLUTIONS).map(([value, l]) => ({ value, label: l })), id: `res-${i.findingId}` })}
+${textarea({ name: "note", label: "What you checked and did", rows: 2, maxlength: 1000, required: true, id: `note-${i.findingId}` })}
+<p class="faint">Resolving records your note; it does not change any payment or invoice. If the same problem is found again after being fixed, it re-opens here.</p>
+<div>${button("Mark as resolved", { variant: "secondary", size: "sm" })}</div></form></details>` : ""}
+${i.technical ? html`<details style="margin-top:.5rem"><summary class="faint">Technical details</summary><p class="faint"><code>${i.technical}</code></p></details>` : ""}
+</article>`);
+  }
+  return html`<section><h2 class="card__title">Financial issues</h2>
+<p class="muted">Problems found automatically in payments, refunds, disputes and cost imports. Each one disappears by itself when it is genuinely resolved. <a href="/staff/finance/reconciliation">Full reconciliation records</a></p>
+${items.length ? html`${cards}` : emptyState("Nothing to review", "No payment discrepancies, failed maintenance payments, refund requests, disputes or failed cost imports right now.")}</section>`;
+}
+
 export function register(r: Router): void {
+  r.post("/staff/finance-work/assign", async (ctx) => {
+    requireStaff(ctx, "finance.read");
+    const f = await ctx.form();
+    try {
+      await FW.assignFinanceWork(ctx.db, ctx.actor!, ctx.user!.id, str(f, "key"), str(f, "user_id") || null);
+      return redirect(ctx, "/staff?tab=finance", { kind: "success", text: str(f, "user_id") ? "Issue assigned." : "Issue unassigned." });
+    } catch (e) {
+      if (e instanceof FW.FinanceWorkError) {
+        if (e.status === 403) throw new HttpError(403, e.message);
+        if (e.status === 404) throw new HttpError(404, e.message);
+        return redirect(ctx, "/staff?tab=finance", { kind: "error", text: e.message });
+      }
+      throw e;
+    }
+  });
   // Assigned below, next to the task routes it belongs with; My Work renders it as its "All tasks" tab.
   let allTasksSection: (ctx: AppContext) => Promise<SafeHtml> = async () => html``;
   // ───────────── My work ─────────────
@@ -108,10 +164,17 @@ export function register(r: Router): void {
     const db = ctx.db, me = ctx.user!.id, actor = ctx.actor!;
     // My Work is the single operational task interface (Founder directive 2026-11-08): "My work" and, for delivery
     // staff, "All tasks" (what used to be the separate Tasks page).
-    const tab = ctx.url.searchParams.get("tab") === "tasks" && can(actor, "delivery.access") ? "tasks" : "mine";
-    const workTabs = can(actor, "delivery.access")
-      ? tabs([{ href: "/staff", label: "My work", current: tab === "mine" }, { href: "/staff?tab=tasks", label: "All tasks", current: tab === "tasks" }], "My work views")
-      : html``;
+    const wanted = ctx.url.searchParams.get("tab");
+    const seesFinance = can(actor, "finance.read") || can(actor, "refund.review");
+    const tab = wanted === "tasks" && can(actor, "delivery.access") ? "tasks" : wanted === "finance" && seesFinance ? "finance" : "mine";
+    const tabItems = [{ href: "/staff", label: "My work", current: tab === "mine" },
+      ...(can(actor, "delivery.access") ? [{ href: "/staff?tab=tasks", label: "All tasks", current: tab === "tasks" }] : []),
+      ...(seesFinance ? [{ href: "/staff?tab=finance", label: "Financial issues", current: tab === "finance" }] : [])];
+    const workTabs = tabItems.length > 1 ? tabs(tabItems, "My work views") : html``;
+    if (tab === "finance") {
+      return page(ctx, "Financial issues", html`${pageHead("My work", undefined, label(ctx.user!.memberships.find((m) => m.organizationId)?.role ?? "staff"))}${workTabs}
+${await financeIssuesSection(ctx)}`);
+    }
     if (tab === "tasks") {
       return page(ctx, "All tasks", html`${pageHead("My work", undefined, label(ctx.user!.memberships.find((m) => m.organizationId)?.role ?? "staff"))}${workTabs}
 <section class="card">${await allTasksSection(ctx)}</section>`);
@@ -208,10 +271,15 @@ ${table(rows, [
 ], { empty: emptyState(q ? "No customers match" : "No general conversations yet", q ? "Try another name." : "Customers start one from Messages in their portal. Search for a customer to message them first.") })}
 ${total > limit ? html`<p class="faint" data-showing>Showing ${offset + (rows.length ? 1 : 0)}–${offset + rows.length} of ${total} conversations.</p>${pagination(ctx, pg, offset + rows.length < total)}` : ""}`);
   });
-  const conversationPage = async (ctx: AppContext, orgId: string, errors: string[] = [], status = 200, draft = "") => {
+  const conversationPage = async (ctx: AppContext, orgId: string, errors: string[] = [], status = 200, draft = "", draftJobId = "") => {
     requireStaff(ctx, "customers.read");
     const org = await ctx.db.prepare(`SELECT id, name FROM organizations WHERE id = ? AND kind = 'customer'`).bind(orgId).first<{ id: string; name: string }>();
     if (!org) throw new HttpError(404, "Customer not found");
+    // AI draft reply (shared drafting service): text re-shown after a refused send, or the job named by ?draft= (no-JS path).
+    const draftParam = ctx.url.searchParams.get("draft");
+    const draftState: DraftStatus | null = draft ? (isDraftJobId(draftJobId) ? { jobId: draftJobId, state: "ready", draft, error: null } : null)
+      : isDraftJobId(draftParam) ? await draftStatus(ctx.db, { kind: "conversation", organizationId: org.id }, draftParam) : null;
+    const bodyValue = draft || (draftState?.state === "ready" ? draftState.draft ?? "" : "");
     const thread = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.id, staff: true }, null, { before: ctx.url.searchParams.get("before") });
     const msgs = thread.messages;
     await M.markThreadRead(ctx.db, ctx.user!.id, org.id, null, true, msgs.map((m) => m.id));
@@ -220,7 +288,8 @@ ${total > limit ? html`<p class="faint" data-showing>Showing ${offset + (rows.le
     const body = html`${pageHead(org.name, html`${linkButton("All conversations", "/staff/conversations", "ghost", "sm")}${linkButton("Customer record", `/staff/customers/${org.id}`, "ghost", "sm")}`, "General conversation")}
 ${formErrors(errors)}
 ${threadEarlierNav(ctx, thread)}<div class="thread">${msgs.length ? msgs.map((m) => html`<article class="msg${m.internal ? " msg--internal" : m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.internal ? "Internal note · " : ""}${m.author_name}${m.author_is_staff ? " · Crestmont" : " · Customer"} · ${formatDateTime(m.created_at)}${!m.internal && m.author_is_staff ? (m.read_by_other_side ? " · Seen by customer" : " · Not yet read by customer") : ""}</div>${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Send the first message, or leave an internal note for the team.")}</div>
-<form method="post" action="/staff/conversations/${org.id}" enctype="multipart/form-data" class="card" style="margin-top:1.5rem">${csrf(ctx)}${textarea({ name: "body", label: "Message", required: true, rows: 4, maxlength: 10000, value: draft })}
+<div style="margin-top:1.5rem">${draftControls(ctx, { startAction: `/staff/conversations/${org.id}/draft`, statusBase: `/staff/conversations/${org.id}/draft/`, target: "#reply", status: draftState })}</div>
+<form method="post" action="/staff/conversations/${org.id}" enctype="multipart/form-data" class="card" id="reply" style="margin-top:1rem">${csrf(ctx)}${draftJobField(draftState)}${textarea({ name: "body", label: "Message", required: true, rows: 4, maxlength: 10000, value: bodyValue })}
 <div class="field"><label for="f-attachment">Attachment (optional)</label><input class="input" id="f-attachment" type="file" name="attachment"${ctx.storage ? "" : html` disabled`}></div>
 ${checkbox("internal", "Internal note — not visible to the customer")}<div class="form-actions">${button("Send")}</div></form>`;
     return page(ctx, `${org.name} — conversation`, body, status);
@@ -232,13 +301,55 @@ ${checkbox("internal", "Internal note — not visible to the customer")}<div cla
     if (!org) throw new HttpError(404, "Customer not found");
     const f = await ctx.form();
     const att = f.get("attachment");
+    const internal = !!f.get("internal");
+    // An AI draft sent as a customer message must be an unused draft of THIS conversation; it is marked approved by
+    // the person who sent it. (Saved as an internal note instead, the draft is left as it was.)
+    const aiJob = internal ? "" : str(f, "ai_job_id");
+    const subject = { kind: "conversation" as const, organizationId: org.id };
     try {
-      await M.postMessage(ctx, { organizationId: org.id, projectId: null, authorUserId: ctx.user!.id, body: str(f, "body"), attachment: att && typeof att !== "string" ? att : null, internal: !!f.get("internal"), fromStaff: true });
+      if (aiJob) await assertDraftUsable(ctx.db, subject, aiJob);
+      await M.postMessage(ctx, { organizationId: org.id, projectId: null, authorUserId: ctx.user!.id, body: str(f, "body"), attachment: att && typeof att !== "string" ? att : null, internal, fromStaff: true });
     } catch (e) {
-      if (e instanceof M.MessageError) return conversationPage(ctx, org.id, [e.message], 422, str(f, "body"));
+      if (e instanceof DraftError) return conversationPage(ctx, org.id, [e.message], e.status, str(f, "body"));
+      if (e instanceof M.MessageError) return conversationPage(ctx, org.id, [e.message], 422, str(f, "body"), aiJob);
       throw e;
     }
-    return redirect(ctx, `/staff/conversations/${org.id}`, { kind: "success", text: f.get("internal") ? "Internal note added." : "Message sent." });
+    if (aiJob) {
+      try { await decideAiJob(ctx.db, aiJob, ctx.user!.id, "approved", str(f, "body")); } catch { /* decided concurrently; the message a person wrote was still sent */ }
+    }
+    return redirect(ctx, `/staff/conversations/${org.id}`, { kind: "success", text: internal ? "Internal note added." : "Message sent." });
+  });
+
+  // AI draft reply for the general conversation (shared drafting service, services/ai-drafts.ts). Same permission as the
+  // conversation page. With `Accept: application/json` (app.js) the state is JSON and the page polls the status route;
+  // without JavaScript it redirects to ?draft=. Repeated clicks while a draft is pending return the same job.
+  const conversationDraftJson = (orgId: string, s: DraftStatus) => ({ ...s, sensitive: false, statusUrl: `/staff/conversations/${orgId}/draft/${s.jobId}` });
+  const customerOrg = async (ctx: AppContext, orgId: string) => {
+    const org = await ctx.db.prepare(`SELECT id FROM organizations WHERE id = ? AND kind = 'customer'`).bind(orgId).first<{ id: string }>();
+    if (!org) throw new HttpError(404, "Customer not found");
+    return org;
+  };
+  r.post("/staff/conversations/:orgId/draft", async (ctx, p) => {
+    requireStaff(ctx, "customers.read");
+    const org = await customerOrg(ctx, p.orgId);
+    let res: DraftStatus;
+    try {
+      res = await draftConversationReply(ctx, org.id, ctx.user!.id);
+    } catch (e) {
+      if (!(e instanceof DraftError)) throw e;
+      if (wantsJson(ctx)) return jsonResponse(ctx, e.status, { state: "failed", error: e.message });
+      return redirect(ctx, `/staff/conversations/${org.id}`, { kind: "error", text: `AI draft unavailable: ${e.message} Nothing was sent.` });
+    }
+    if (wantsJson(ctx)) return jsonResponse(ctx, 200, conversationDraftJson(org.id, res));
+    if (res.state === "failed") return redirect(ctx, `/staff/conversations/${org.id}`, { kind: "error", text: `AI draft unavailable: ${res.error} Nothing was sent.` });
+    return redirect(ctx, `/staff/conversations/${org.id}?draft=${res.jobId}#reply`, { kind: "info", text: res.state === "pending" ? "Drafting has started. The draft will appear in the message box as soon as it is ready. Nothing has been sent." : "AI draft ready for review. Nothing has been sent." });
+  });
+  r.get("/staff/conversations/:orgId/draft/:jobId", async (ctx, p) => {
+    requireStaff(ctx, "customers.read");
+    const org = await customerOrg(ctx, p.orgId);
+    const s = await draftStatus(ctx.db, { kind: "conversation", organizationId: org.id }, p.jobId);
+    if (!s) throw new HttpError(404, "No such AI draft for this conversation.");
+    return jsonResponse(ctx, 200, conversationDraftJson(org.id, s));
   });
 
   r.post("/staff/notifications/read", async (ctx) => {

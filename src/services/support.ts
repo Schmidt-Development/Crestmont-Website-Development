@@ -11,7 +11,8 @@ import { sanitizeFilename, validateUpload } from "../adapters/storage.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
 import { notify } from "./notifications.ts";
-import { aiProviderFromEnv, decideAiJob, requestAiDraft } from "./ai.ts";
+import { decideAiJob } from "./ai.ts";
+import { replyPrompt, startDraft, type DraftStatus, type DraftSubject } from "./ai-drafts.ts";
 import { toHex } from "../lib/crypto.ts";
 
 export const TICKET_CATEGORIES = ["technical", "billing", "content_change", "account", "refund", "other"] as const;
@@ -398,13 +399,15 @@ export async function staffReply(ctx: Pick<AppContext, "db" | "storage" | "email
   return { messageId: id };
 }
 
-/** Requests an AI draft. Nothing is sent; the draft is returned for a human to edit. */
-export async function draftReply(ctx: Pick<AppContext, "db" | "env">, ticket: TicketRow, userId: string) {
+export const ticketDraftSubject = (t: Pick<TicketRow, "id" | "organization_id">): DraftSubject => ({ kind: "ticket", id: t.id, organizationId: t.organization_id });
+
+/** Requests an AI draft through the shared drafting service (services/ai-drafts.ts). Nothing is sent; the draft is
+ *  returned for a human to edit. Only this ticket's customer-visible messages are context (internal notes excluded). */
+export async function draftReply(ctx: Pick<AppContext, "db" | "env">, ticket: TicketRow, userId: string): Promise<DraftStatus> {
   const msgs = await ticketMessages(ctx.db, ticket.id, { includeInternal: false });
-  const thread = msgs.slice(-12).map((m) => `${m.author_is_staff ? "Crestmont" : "Customer"}: ${m.body}`).join("\n\n");
-  const prompt = `Draft a reply from Crestmont Website Development support to the customer below.\nTicket subject: ${ticket.subject}\nCategory: ${ticket.category}\n\nConversation (oldest first):\n${thread}\n\nWrite only the reply body. Be courteous and specific; if information is missing, ask for it.`;
-  const res = await requestAiDraft(ctx.db, aiProviderFromEnv(ctx.env), { workflow: "support_reply", inputRef: `ticket:${ticket.id}`, prompt, requestedBy: userId });
-  await audit(ctx.db, { actorUserId: userId, action: "ticket.ai_draft_requested", subjectType: "ticket", subjectId: ticket.id, organizationId: ticket.organization_id, details: { jobId: res.jobId, status: res.status } });
+  const prompt = replyPrompt({ channel: "support ticket", subject: ticket.subject, category: ticket.category, messages: msgs.filter((m) => !m.internal).map((m) => ({ fromStaff: !!m.author_is_staff, body: m.body })) });
+  const res = await startDraft(ctx, ticketDraftSubject(ticket), userId, prompt);
+  await audit(ctx.db, { actorUserId: userId, action: "ticket.ai_draft_requested", subjectType: "ticket", subjectId: ticket.id, organizationId: ticket.organization_id, details: { jobId: res.jobId, state: res.state, reused: !!res.reused } });
   return res;
 }
 
@@ -412,12 +415,6 @@ export async function discardDraft(db: Db, ticket: TicketRow, jobId: string, use
   const job = await db.prepare(`SELECT input_ref FROM ai_jobs WHERE id = ? AND workflow = 'support_reply'`).bind(jobId).first<{ input_ref: string }>();
   if (!job || job.input_ref !== `ticket:${ticket.id}`) throw new SupportError("That AI draft does not belong to this ticket.", 400);
   try { await decideAiJob(db, jobId, userId, "rejected"); } catch { throw new SupportError("That AI draft was already used or discarded.", 409); }
-}
-
-export async function pendingDraft(db: Db, ticketId: string, jobId: string | null) {
-  if (!jobId) return null;
-  return db.prepare(`SELECT id, output_ref, provider, model, created_at FROM ai_jobs WHERE id = ? AND workflow = 'support_reply' AND input_ref = ? AND status = 'awaiting_approval'`)
-    .bind(jobId, `ticket:${ticketId}`).first<{ id: string; output_ref: string; provider: string; model: string; created_at: string }>();
 }
 
 // ───────────── Escalation sweep (SUP-003) ─────────────

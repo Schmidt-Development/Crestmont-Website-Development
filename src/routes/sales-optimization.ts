@@ -33,6 +33,7 @@ import { proposeExperiment, decideExperimentStatus, experimentReport, runSalesOp
 import { baselineSalesInstructions, PROTECTED_SALES_POLICY, SALES_POLICY_VERSION } from "../domain/sales-opt/policy.ts";
 import { COMPLIANCE_CATEGORIES } from "../domain/sales-opt/analysis.ts";
 import { SCENARIOS } from "../domain/sales-opt/evaluation.ts";
+import { salesOptSummary, type SalesOptSummary } from "../services/sales-opt/summary.ts";
 import { DEFAULT_THRESHOLDS, type SafetyThresholds } from "../domain/sales-opt/stats.ts";
 
 const BASE = "/staff/sales-optimization";
@@ -172,6 +173,7 @@ ${alert("info", html`<strong>Scope.</strong> This engine evaluates and improves 
 ${agentMismatch ? alert("warn", html`<strong>The dialler's agent is not this engine's ${diallerStage} target.</strong> The outbound sales dialler uses agent <code>${diallerAgent}</code>, but the registered ${diallerStage} sales agent is ${diallerTarget ? html`<code>${diallerTarget.agent_id}</code>` : "not set"}. Its calls carry no prompt-version stamp (crestmont_so_version) and ${diallerOther?.agent_id === diallerAgent ? `are measured under ${diallerOther!.stage} with whatever version is deployed there` : "are not recorded by this engine at all"}, so they get no version attribution. Register the dialler's agent as the ${diallerStage} target, or change the dialler's agent.`) : ""}
 <p class="row"><span class="faint">Metrics shown for:</span> ${kStage === "production" ? html`<strong>production</strong> · <a href="${BASE}?stage=staging">staging</a>` : html`<a href="${BASE}">production</a> · <strong>staging</strong>`}</p>
 ${ctl.paused ? alert("info", "Optimization is paused: no analyses or proposals are queued. Safety monitoring keeps running.") : ""}
+${glanceCard(await salesOptSummary(db, kStage, t))}
 
 <div class="kpis grid grid-4">
 ${kpi("Production prompt version", prod ? `v${prod.seq}` : "None deployed", stg ? `Staging: v${stg.seq}` : "Staging: none")}
@@ -413,6 +415,28 @@ ${metricRow("Average duration", mine.avgDurationS === null ? "Unknown" : `${mine
 }
 
 const pctField = (f: FormData, k: keyof SafetyThresholds) => { const n = Number(str(f, k)); return Number.isFinite(n) && n > 0 && n <= 100 ? n / 100 : DEFAULT_THRESHOLDS[k]; };
+
+/** Phase 10.4: is the script improving itself from real calls? Plain English, only from recorded events. */
+function glanceCard(g: SalesOptSummary): SafeHtml {
+  const rate = (x: number | null) => (x === null ? "not enough data" : `${(x * 100).toFixed(1)}%`);
+  const arrow = (now: number | null, before: number | null, goodUp = true) => now === null || before === null || now === before ? "" : (now > before) === goodUp ? " ▲ better" : " ▼ worse";
+  return html`<section class="card stack" data-optimization-glance><h2 class="card__title">Autonomous optimization at a glance (${g.stage})</h2>
+${dl([
+    ["Active script version", g.active ? `v${g.active.seq}${g.active.since ? ` (live since ${formatDateTime(g.active.since)})` : ""}` : "None deployed yet"],
+    ["Last analysis of real calls", g.lastAnalysisAt ? formatDateTime(g.lastAnalysisAt) : "Not yet: no call has been analysed"],
+    ["Calls analysed (30 days)", `${g.analysed30} of ${g.eligible30} connected call${g.eligible30 === 1 ? "" : "s"} eligible for analysis`],
+    ["Main improvement opportunities", g.opportunities.length ? html`<ul>${g.opportunities.map((o) => html`<li>${o.text} (${o.count})</li>`)}</ul>` : "None identified yet"],
+    ["Latest proposed improvement", g.latestProposal ? html`<a href="${BASE}/versions/${g.latestProposal.id}">v${g.latestProposal.seq}</a>, ${formatDateTime(g.latestProposal.createdAt)}: ${g.latestProposal.rationale}` : "No improvement has been proposed yet"],
+    ["Its status", g.latestProposal ? g.latestProposal.stateText : "—"],
+    ["Outcome trend (last 30 days vs the 30 before)", html`Connected calls ${g.trend.connectedNow} (was ${g.trend.connectedBefore}) · verified conversion ${rate(g.trend.conversionNow)} (was ${rate(g.trend.conversionBefore)})${arrow(g.trend.conversionNow, g.trend.conversionBefore)} · opt-outs ${rate(g.trend.optOutNow)} (was ${rate(g.trend.optOutBefore)})${arrow(g.trend.optOutNow, g.trend.optOutBefore, false)}`],
+    ["Last successful deployment to Retell", g.lastDeployment ? `${label(g.lastDeployment.kind)} of v${g.lastDeployment.seq} to ${g.lastDeployment.stage}, ${formatDateTime(g.lastDeployment.at)}` : "Never"],
+  ])}
+${g.blockers.length ? html`<div data-optimization-blockers>${alert("warn", html`<strong>What is stopping optimization:</strong><ul>${g.blockers.map((b) => html`<li>${b}</li>`)}</ul>`)}</div>` : html`<p>${badge("active", "Nothing is blocking optimization")}</p>`}
+<details><summary>How the improvement loop is running (when each step last happened)</summary>
+${table(g.loop, [{ header: "Step", cell: (x) => x.step }, { header: "Last happened", cell: (x) => (x.last ? formatDateTime(x.last) : html`<span class="faint">Not yet</span>`) }, { header: "How", cell: (x) => html`<span class="faint">${x.detail}</span>` }], { caption: "Optimization loop steps" })}
+<p class="faint">"Not yet" means there is no record of that step: the page never reports an improvement without an analysis, evaluation and version record behind it.</p></details>
+</section>`;
+}
 
 export function register(r: Router): void {
   r.get(BASE, (ctx) => dashboard(ctx));

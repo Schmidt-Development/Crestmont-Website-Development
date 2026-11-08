@@ -744,4 +744,132 @@
       progress();
     });
   }
+
+  // ── AI draft replies (staff: support tickets and customer conversations; src/ui/ai-draft.ts) ──
+  // Without JavaScript the "AI draft reply" form posts and the page shows the draft after a reload. With it, the same
+  // form is sent with fetch, a loading state shows, the staff-only status endpoint is polled (2 s, backing off to 10 s)
+  // and the finished draft is placed in the editable reply field. Nothing is ever sent from here: sending stays the
+  // employee's own press of Send. Repeated clicks while a draft is pending return the same job (server-side).
+  document.querySelectorAll("[data-ai-draft]").forEach((box) => {
+    if (!window.fetch) return;
+    const start = box.querySelector("form[data-ai-draft-start]");
+    const btn = box.querySelector("[data-ai-draft-button]");
+    const status = box.querySelector("[data-ai-draft-status]");
+    const discard = box.querySelector("form[data-ai-draft-discard]");
+    const target = document.querySelector(box.getAttribute("data-ai-draft-target") || "#reply");
+    const base = box.getAttribute("data-ai-draft-status-base") || "";
+    if (!start || !btn || !status || !target) return;
+    const field = target.querySelector("textarea[name=body]");
+    const jobField = target.querySelector("[data-ai-draft-job]");
+    const sensitive = target.querySelector("[data-ai-draft-sensitive]");
+    const MAX_WAIT_MS = 6 * 60 * 1000;
+    let run = 0; // incremented per drafting attempt, so a stale poll never overwrites a newer one
+    let timer = null;
+
+    const setBusy = (busy) => {
+      btn.disabled = busy;
+      if (busy) { btn.setAttribute("aria-disabled", "true"); btn.setAttribute("data-busy", "true"); box.setAttribute("aria-busy", "true"); }
+      else { btn.removeAttribute("aria-disabled"); btn.removeAttribute("data-busy"); box.removeAttribute("aria-busy"); }
+    };
+    const say = (state, text, action) => {
+      status.hidden = false;
+      status.setAttribute("data-state", state);
+      status.textContent = text;
+      if (action) {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "btn btn--secondary btn--sm ai-draft__action"; b.textContent = action.label;
+        b.addEventListener("click", action.run);
+        status.appendChild(document.createTextNode(" "));
+        status.appendChild(b);
+      }
+    };
+    // The hover tile layer (M03) copies the label, so it is dropped and rebuilt on the next hover when the label changes.
+    const setLabel = (text) => { if (btn.textContent === text) return; if (btn._fx) { btn._fx.el.remove(); btn._fx = null; } btn.textContent = text; };
+    const fail = (text) => {
+      setBusy(false);
+      setLabel("Retry AI draft");
+      say("failed", `AI draft unavailable: ${text} Nothing was sent.`, { label: "Retry", run: () => begin() });
+    };
+    const httpProblem = (r) => {
+      if (r.type === "opaqueredirect" || r.status === 0 || r.redirected) return "Your session has ended. Reload the page and sign in again.";
+      if (r.status === 403) return "You do not have permission to draft replies here.";
+      if (r.status === 404) return "This ticket or conversation could not be found.";
+      if (r.status === 429) return "Too many requests in a short time. Wait a minute, then retry.";
+      return `The server could not complete the request (error ${r.status}).`;
+    };
+    const readJson = async (r) => {
+      if (!(r.headers.get("content-type") || "").includes("application/json")) return null;
+      try { return await r.json(); } catch { return null; }
+    };
+    const insert = (d) => {
+      field.value = d.draft;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      if (jobField) jobField.value = d.jobId;
+      if (sensitive) sensitive.hidden = !d.sensitive;
+      if (discard) { const j = discard.querySelector("input[name=ai_job_id]"); if (j) j.value = d.jobId; discard.hidden = false; }
+      say("ready", d.sensitive
+        ? "AI draft placed in the reply box. This is a sensitive ticket: review and edit it, then tick the approval box. Nothing is sent until you press Send."
+        : "AI draft placed in the reply box. Review and edit it — nothing is sent until you press Send.");
+      field.focus({ preventScroll: true });
+      field.scrollIntoView({ block: "center", behavior: reduceMotion.matches ? "auto" : "smooth" });
+    };
+    const ready = (d) => {
+      setBusy(false);
+      setLabel("AI draft reply");
+      if (!field) { say("ready", "The AI draft is ready. Reload the page to see it."); return; }
+      const mine = field.value.trim();
+      if (mine && mine !== d.draft.trim()) {
+        // Never overwrite what the employee has typed without asking.
+        say("ready", "The AI draft is ready. Your own text in the reply box was kept.", { label: "Replace my text with the draft", run: () => insert(d) });
+        return;
+      }
+      insert(d);
+    };
+    const handle = (d, my, startedAt, delay) => {
+      if (my !== run) return;
+      if (!d || typeof d.state !== "string") { fail("The server sent an unexpected answer."); return; }
+      if (d.state === "ready" && typeof d.draft === "string") { ready(d); return; }
+      if (d.state === "failed") { fail(d.error || "The AI model returned an error."); return; }
+      if (d.state === "used" || d.state === "discarded") { setBusy(false); say(d.state, d.state === "used" ? "That draft was already sent. Press AI draft reply for a new one." : "That draft was discarded. Press AI draft reply for a new one."); return; }
+      // Pending: keep the loading state and poll this job (never start a new one).
+      say("pending", "Drafting a reply… The draft will appear in the reply box as soon as it is ready. You can keep working on this page.");
+      if (Date.now() - startedAt > MAX_WAIT_MS) {
+        setBusy(false);
+        say("pending", "This draft is taking longer than usual. It will still appear here when it is ready.", { label: "Check again", run: () => { setBusy(true); poll(d.jobId, my, Date.now(), 2000, 0); } });
+        return;
+      }
+      clearTimeout(timer);
+      timer = setTimeout(() => poll(d.jobId, my, startedAt, Math.min(10000, Math.round(delay * 1.4)), 0), delay);
+    };
+    const poll = async (jobId, my, startedAt, delay, failures) => {
+      if (my !== run) return;
+      if (!/^ai_[0-9a-f]{24}$/.test(jobId)) { fail("The server sent an unexpected answer."); return; }
+      try {
+        const r = await fetch(base + jobId, { credentials: "same-origin", headers: { accept: "application/json" }, redirect: "manual" });
+        if (!r.ok) { fail(httpProblem(r)); return; }
+        handle(await readJson(r), my, startedAt, delay);
+      } catch {
+        // Offline or a dropped connection: retry quietly a few times before reporting it.
+        if (failures >= 4) { fail("The connection to the server was lost."); return; }
+        clearTimeout(timer);
+        timer = setTimeout(() => poll(jobId, my, startedAt, Math.min(10000, delay * 2), failures + 1), delay);
+      }
+    };
+    const begin = async () => {
+      const my = ++run;
+      clearTimeout(timer);
+      setBusy(true);
+      say("pending", "Starting the AI draft…");
+      try {
+        const r = await fetch(start.action, { method: "POST", body: new FormData(start), credentials: "same-origin", headers: { accept: "application/json" }, redirect: "manual" });
+        const d = await readJson(r);
+        if (!r.ok) { if (my === run) fail(d && d.error ? d.error : httpProblem(r)); return; }
+        handle(d, my, Date.now(), 2000);
+      } catch { if (my === run) fail("The connection to the server was lost."); }
+    };
+    start.addEventListener("submit", (e) => { e.preventDefault(); if (!btn.disabled) begin(); });
+    // Opened with a pending job (no-JS redirect, or a reload while drafting): pick up polling straight away.
+    const pending = box.getAttribute("data-ai-draft-pending");
+    if (pending) { const my = ++run; setBusy(true); poll(pending, my, Date.now(), 2000, 0); }
+  });
 })();

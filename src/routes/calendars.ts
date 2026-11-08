@@ -7,7 +7,8 @@ import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import type { Permission } from "../domain/authz.ts";
 import { can } from "../domain/authz.ts";
-import { html, formatDateTime, label } from "../lib/html.ts";
+import { html, label } from "../lib/html.ts";
+import { loadVoiceConfig, validTimeZone } from "../services/voice-settings.ts";
 import { requireStaff } from "../app/app.ts";
 import { badge, table, emptyState, pageHead, tabs } from "../ui/components.ts";
 import { staffPage } from "./crm.ts";
@@ -22,17 +23,26 @@ const KIND_LABEL: Record<string, string> = {
   sales_staff_callback: "Sales callback", sales_ai_follow_up: "AI follow-up call",
 };
 
+/** A calendar time in the booking's own time zone (else the business time zone), always with the zone named. */
+function whenLabel(iso: string, tz: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(d);
+}
+
 async function calendarPage(ctx: AppContext, id: CalendarId) {
   requireStaff(ctx, CALENDAR_PERMISSION[id]);
   const now = ctx.env.overrides?.now?.() ?? new Date();
   const meta = CALENDAR_LABELS[id];
   const rows = await upcomingEntries(ctx.db, id, now);
+  const businessTz = (await loadVoiceConfig(ctx.db)).timezone;
+  const tzOf = (r: { time_zone: string | null }) => [r.time_zone, businessTz].find((z): z is string => !!z && validTimeZone(z)) ?? "America/New_York";
   const nav = tabs(CALENDARS.filter((c) => can(ctx.actor!, CALENDAR_PERMISSION[c])).map((c) => ({ href: `/staff/calendars/${CALENDAR_LABELS[c].slug}`, label: CALENDAR_LABELS[c].name, current: c === id })), "Calendars");
   const body = html`${pageHead(`${meta.name} calendar`, undefined, "Internal calendar")}
 ${nav}
 <p class="muted">${meta.purpose} Internal only: customers never see this calendar. Every entry below exists in the database; nothing is listed that was not recorded.</p>
 ${table(rows, [
-    { header: "When", cell: (r) => html`${r.when_at ? formatDateTime(r.when_at) : "No date agreed"}${r.is_test ? html` ${badge("in_progress", "Test")}` : ""}` },
+    { header: "When", cell: (r) => html`${r.when_at ? html`<time datetime="${r.when_at}">${whenLabel(r.when_at, tzOf(r))}</time>` : "No date agreed"}${r.is_test ? html` ${badge("in_progress", "Test")}` : ""}` },
     { header: "Type", cell: (r) => KIND_LABEL[r.kind] ?? label(r.kind) },
     { header: "Contact", cell: (r) => (r.lead_id ? html`<a href="/staff/crm/leads/${r.lead_id}">${r.contact_name ?? "Lead"}</a>` : r.contact_name ?? "—") },
     { header: "Details", cell: (r) => html`${r.detail ?? "—"}${r.reference ? html`<br><span class="faint">Ref <code>${r.reference}</code></span>` : ""}` },

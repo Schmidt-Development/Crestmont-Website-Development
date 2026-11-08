@@ -71,6 +71,8 @@ export interface CalendarEntry {
   detail: string | null;
   reference: string | null;
   is_test: number;
+  /** The booking's own time zone (consultations); null for callbacks, which are shown in the business time zone. */
+  time_zone: string | null;
 }
 
 /**
@@ -80,11 +82,11 @@ export interface CalendarEntry {
 export async function upcomingEntries(db: Db, calendar: CalendarId, now: Date, limit = 200): Promise<CalendarEntry[]> {
   const from = new Date(now.getTime() - 3_600_000).toISOString();
   const consultations = (await db.prepare(`SELECT 'consultation' AS entry_type, c.id, c.starts_at AS when_at, 'consultation' AS kind, c.status, c.founder_reason, c.source,
-        c.lead_id, c.name AS contact_name, c.topic AS detail, c.confirmation_code AS reference, c.is_test
+        c.lead_id, c.name AS contact_name, c.topic AS detail, c.confirmation_code AS reference, c.is_test, c.timezone AS time_zone
       FROM consultations c WHERE c.calendar = ? AND c.status IN ('requested','confirmed') AND c.starts_at >= ? ORDER BY c.starts_at LIMIT ?`)
     .bind(calendar, from, limit).all<CalendarEntry>()).results;
   const callbacks = (await db.prepare(`SELECT 'callback' AS entry_type, e.id, e.due_at AS when_at, e.kind, CASE WHEN f.status IS NOT NULL THEN f.status ELSE 'open' END AS status,
-        e.founder_reason, e.source, e.lead_id, ct.name AS contact_name, COALESCE(a.body, f.notes) AS detail, NULL AS reference, e.is_test
+        e.founder_reason, e.source, e.lead_id, ct.name AS contact_name, COALESCE(a.body, f.notes) AS detail, NULL AS reference, e.is_test, NULL AS time_zone
       FROM calendar_callbacks e
       LEFT JOIN crm_activities a ON a.id = e.task_activity_id
       LEFT JOIN sales_followups f ON f.id = e.sales_followup_id

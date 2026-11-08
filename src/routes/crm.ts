@@ -39,6 +39,7 @@ import { requireVerifiedForPayment } from "./verify-gate.ts";
 import { effectivePrices } from "../services/pricing-approvals.ts";
 import { staffCanSeeProject } from "../services/projects.ts";
 import { disabledOwnerFlag } from "../services/offboarding.ts";
+import { outboundStatus, leadOutboundEligibility, OUTCOME_LABELS } from "../services/outbound-status.ts";
 
 /** LEGAL-005: estimated tax per quote line under the current configuration (null when tax is not configured). */
 async function quoteTax(ctx: AppContext, packageId: string | null, lines: QuoteLine[]): Promise<TaxResult | null> {
@@ -208,6 +209,18 @@ ${d.suppressed.phone ? html` <span>Phone is on the do-not-call list.</span>` : "
 }
 
 // ── lead detail ──
+/** Whether the outbound AI agent may call this lead, and why (Phase 11.2), with its call results. */
+async function outboundEligibilityCard(ctx: AppContext, leadId: string): Promise<SafeHtml> {
+  const e = await leadOutboundEligibility(ctx.db, leadId, ctx.now());
+  if (!e) return html``;
+  return html`<details class="card" data-outbound-eligibility><summary>AI outbound calling: ${e.eligible ? "eligible" : "not eligible"}</summary>
+${e.eligible ? html`<p>All checks pass: consent on file, not on a do-not-call list, recent registry check, known time zone, and attempts remaining. Calls are still only placed inside the recipient's calling hours.</p>`
+    : html`<p>The outbound AI agent will not call this lead because:</p><ul>${e.reasons.map((r) => html`<li>${r}</li>`)}</ul>`}
+${e.calls.length ? table(e.calls, [{ header: "Call", cell: (x) => (x.mode === "callback" ? "Scheduled callback" : "Sales call") }, { header: "Status", cell: (x) => badge(x.status, label(x.status)) },
+    { header: "Result", cell: (x) => (x.outcome ? OUTCOME_LABELS[x.outcome] ?? x.outcome : "—") }, { header: "Updated", cell: (x) => formatDateTime(x.at) }], { caption: "AI calls for this lead" }) : html`<p class="faint">No AI calls have been placed for this lead.</p>`}
+</details>`;
+}
+
 async function leadDetail(ctx: AppContext, id: string, errors: string[] = [], status = 200) {
   requireStaff(ctx, "crm.access");
   const actor = ctx.actor!;
@@ -287,6 +300,7 @@ ${aiCard}
 ${/* Contact identity, provenance, suppression and the outreach ledger are compliance records, not sales reading.
       Nothing is deleted or permission-gated differently: the same panel, one click away. */ ""}
 <details class="card"><summary>Contact identity, provenance and duplicate protection</summary>${identityCard(ctx, idp)}</details>
+${await outboundEligibilityCard(ctx, id)}
 <section class="card stack"><h2 style="font-size:1.2rem">Linked records</h2>
 <h3 style="font-size:1rem">Quotes</h3>${table(links.quotes, [
     { header: "Quote", cell: (q) => html`<a href="/staff/quotes/${q.id}">${q.id}</a>` }, { header: "Version", cell: (q) => `v${q.current_version}` }, { header: "Status", cell: (q) => badge(q.status) },
@@ -559,7 +573,45 @@ ${rangeForm(ctx, range.from, range.to)}
 </div>
 ${/* Phase 9: the detailed campaign attribution tables are not sales reading. Collection and storage are untouched
       (UTM capture, leads.utm_*, crm.attributionReport) and the report remains available to reporting. */ ""}
+${can(ctx.actor!, "voice.manage") || can(ctx.actor!, "lead.read_all") ? await outboundSection(ctx) : ""}
 ${definitions(crm.SALES_DEFINITIONS)}`);
+}
+
+/** Phase 11: CRM → Retell outbound calling, in plain English (read-only; src/services/outbound-status.ts). */
+async function outboundSection(ctx: AppContext): Promise<SafeHtml> {
+  const st = await outboundStatus(ctx.db, ctx.env, ctx.now());
+  const c = st.counts, w = st.workspace, owner = can(ctx.actor!, "voice.manage");
+  const usd = (m: number) => `$${(m / 1e6).toFixed(2)}`;
+  const modeLine = (name: string, m: { on: boolean; running: boolean; reasons: string[] }) =>
+    html`<li><strong>${name}:</strong> ${m.running ? badge("active", "Running") : m.on ? badge("not_configured", "On, but not calling") : badge("cancelled", "Off")}${m.running ? "" : html` <span class="faint">${m.reasons.join(" · ")}</span>`}</li>`;
+  const wsOk = w.keyConfigured && !w.ambiguous && !!w.agentId && !!w.fromNumber;
+  return html`<section class="card stack" id="outbound" data-outbound-status><h2 style="font-size:1.2rem">Outbound calling (AI sales calls)</h2>
+<p class="muted">How CRM leads move to the outbound Retell agent and what happened on each call. Only leads with documented consent for AI calls are ever queued; imported leads are never called just because they are in the CRM. Every call is re-checked against consent, do-not-call lists, calling hours and attempt limits immediately before dialling.</p>
+<div class="kpis">${kpi("Eligible for calling", c.eligible, "consent on file, not yet called")}${kpi("Waiting for a call", c.waiting)}${kpi("Scheduled", c.scheduled, "callbacks and retries")}${kpi("In progress", c.inProgress)}
+${kpi("Completed", c.completed, `last ${st.periodDays} days`)}${kpi("Need follow-up", c.followUp, `last ${st.periodDays} days`)}${kpi("Stopped or suppressed", c.stopped, `last ${st.periodDays} days`)}${kpi("Failed or missed", c.failed, `last ${st.periodDays} days`)}</div>
+<p class="faint" data-not-eligible>Not eligible: ${c.noConsent.toLocaleString("en-US")} open CRM lead${c.noConsent === 1 ? "" : "s"} without documented consent for AI calls (never called automatically) · ${c.doNotCall.toLocaleString("en-US")} number${c.doNotCall === 1 ? "" : "s"} on the do-not-call list.</p>
+<h3 style="font-size:1rem">Call results (last ${st.periodDays} days)</h3>
+${st.outcomes.length ? table(st.outcomes, [{ header: "Result", cell: (o) => o.label }, { header: "Calls", cell: (o) => String(o.n), numeric: true }], { caption: "Call results" }) : html`<p class="muted">No calls have finished in this period.</p>`}
+<p class="faint">Results are written back to the CRM lead automatically, once per call: a note, the next follow-up task, and a forward-only stage change. AI interpretations never overwrite verified contact details.</p>
+${st.candidates.length ? html`<details><summary>Next leads in line and why they can or cannot be called now</summary>${table(st.candidates, [
+    { header: "Lead", cell: (x) => html`<a href="/staff/crm/leads/${x.leadId}">${x.who ?? x.leadId}</a>` },
+    { header: "Can be called now?", cell: (x) => (x.eligible ? badge("active", "Yes") : badge("blocked", "Not yet")) },
+    { header: "Why", cell: (x) => (x.eligible ? "All checks pass." : x.reasons.join("; ")) }], { caption: "Next outbound candidates" })}</details>` : ""}
+${st.failures.length ? html`<details><summary>Failed, blocked or missed calls (${st.failures.length})</summary>${table(st.failures, [
+    { header: "Lead", cell: (x) => html`<a href="/staff/crm/leads/${x.lead_id}">${x.who ?? x.lead_id}</a>` }, { header: "Status", cell: (x) => badge(x.status, label(x.status)) },
+    { header: "What happened", cell: (x) => x.detail ?? "—" }, { header: "When", cell: (x) => formatDateTime(x.at) }], { caption: "Failed or blocked outbound calls" })}</details>` : ""}
+<h3 style="font-size:1rem">Connection to Retell</h3>
+<ul class="stack" style="list-style:none;padding:0">${modeLine("Scheduled AI callbacks", st.modes.callback)}${modeLine("AI cold outreach", st.modes.cold)}
+<li><strong>Outbound Retell workspace (${w.environment}):</strong> ${wsOk ? badge("active", "Configured") : badge("not_configured", "Not fully configured")} <span class="faint">${[
+    w.keyConfigured ? "sales workspace key set" : "sales workspace key (RETELL_OUTBOUND_API_KEY) not set",
+    w.ambiguous ? "the inbound and outbound keys are identical, so calls could reach the wrong workspace" : "",
+    w.agentId ? "sales agent saved" : "no sales agent saved", w.fromNumber ? `caller number ending ${w.fromNumber.slice(-4)}` : "no caller number"].filter(Boolean).join(" · ")}</span></li>
+<li><strong>Last live check with Retell:</strong> ${w.lastAudit ? html`${w.lastAudit.status === "ok" ? badge("active", "Verified") : badge("blocked", w.lastAudit.status === "issues" ? "Issues found" : label(w.lastAudit.status))} <span class="faint">${formatDateTime(w.lastAudit.at)}</span>` : html`${badge("not_configured", "Not verified yet")} <span class="faint">Configured is not the same as verified: no read-only check of the sales agent has been run in this environment.</span>`}</li></ul>
+<h3 style="font-size:1rem">Outbound calling budget</h3>
+<p>${st.budget.budgetMicro === null ? html`${badge("not_configured", "Not set")} The outbound queues do not dial until a monthly budget is set.` : html`${usd(st.budget.spentMicro)} of ${usd(st.budget.budgetMicro)} used in ${st.budget.month}${st.budget.state === "exhausted" ? html` ${badge("blocked", "Reached: outbound calling paused")}` : ""}.`} <span class="faint">Inbound receptionist calls are never limited by this budget.</span></p>
+${owner ? html`<form method="post" action="/staff/voice/budget" class="row">${csrf(ctx)}${input({ name: "monthly_budget_usd", label: "Monthly outbound budget (USD)", type: "number", value: st.budget.budgetMicro === null ? "" : String(st.budget.budgetMicro / 1e6), hint: "0 or empty pauses outbound calling. Inbound is not affected." })}${button("Save budget", { variant: "secondary" })}</form>
+<p>${linkButton("Outbound calling settings", "/staff/sales-outbound", "ghost", "sm")}</p>` : ""}
+</section>`;
 }
 
 // ── quotes ──
