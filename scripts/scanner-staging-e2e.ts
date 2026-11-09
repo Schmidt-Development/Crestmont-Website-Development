@@ -36,7 +36,7 @@ const CLAMD = { host: "127.0.0.1", port: Number(process.env.CLAMD_PORT ?? 3310),
 // one on Node 1 -- instead of running one here. A scanner that passes its own tests in CI proves the code; only this
 // proves the DEPLOYMENT: real portal upload, the platform's own queue, that scanner's signed verdict, the row it
 // writes. It costs a wait, because that scanner polls on its own schedule.
-const REMOTE = process.env.E2E_REMOTE_SCANNER === "1";
+const FORCED_REMOTE = process.env.E2E_REMOTE_SCANNER === "1";
 const REMOTE_WAIT_MS = Number(process.env.E2E_REMOTE_WAIT_SECONDS ?? 420) * 1000;
 if (!BASE || !SECRET || !ACCOUNTS) { console.error("::error::E2E_BASE_URL, FILE_SCANNER_SECRET and E2E_ACCOUNTS_FILE are required"); process.exit(2); }
 // E2E_LOCAL_DB: run the same checks against `npm run dev` and its SQLite file, to rehearse this script before staging.
@@ -46,6 +46,16 @@ const d1 = process.env.E2E_LOCAL_DB
   : wranglerOps();
 const q = async <T = Record<string, unknown>>(sql: string) => d1.query<T>(sql);
 const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
+// The operational scanner (Node 1) polls staging's queue on its own schedule. While it is serving, it -- not the scanner
+// started below -- may claim this run's files first; deploy 42537012650 measured exactly that (correct verdicts, but
+// "the queue offers 0 of this run's 3 files" and an EICAR link already revoked). The local-only orderings then stop
+// being facts about the platform, so the run verifies the scanner that is actually serving, with the same claims
+// E2E_REMOTE_SCANNER=1 makes: every verdict correct, the engine named, the link unusable, revoked when it predated the
+// verdict, and a file still pending at the deadline is a failure.
+const otherScanner = FORCED_REMOTE ? null : (await q<{ scanner_id: string; seen_at: string }>(
+  `SELECT scanner_id, seen_at FROM scanner_heartbeats WHERE scanner_id <> 'staging-ci-clamav' AND daemon_ok = 1 AND seen_at >= ${lit(new Date(Date.now() - 15 * 60_000).toISOString())} ORDER BY seen_at DESC LIMIT 1`))[0] ?? null;
+const REMOTE = FORCED_REMOTE || !!otherScanner;
+if (otherScanner) console.log(`Scanner ${otherScanner.scanner_id} is serving this platform (healthy heartbeat ${otherScanner.seen_at}): verifying its verdicts instead of racing it with a second scanner.`);
 
 type Result = { id: string; ok: boolean; detail: string };
 const results: Result[] = [];
