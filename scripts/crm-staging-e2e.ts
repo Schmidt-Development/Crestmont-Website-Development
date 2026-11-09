@@ -198,11 +198,20 @@ async function main() {
     assert(Number(r.unlinked) === 0, `${r.unlinked} contacts with an identifier but no identity link`);
     return `${r.contacts} contacts, ${r.identities} canonical identities, 0 unlinked`;
   });
+  // The CRM identity tables this E2E writes, checked table by table. A whole-database `PRAGMA foreign_key_check` on the
+  // LIVE staging D1 read ~10.5 M rows (D1 analytics, deploy 42557412273) and exhausted the 10-second window that this
+  // E2E's own imports needed one second later (every import answered 500). Whole-database integrity is proven where it
+  // costs nothing live: staging-restore-drill.yml runs integrity_check and foreign_key_check on a scratch restore.
+  const FK_TABLES = ["contact_identities", "contact_identity_links", "phone_outreach_ledger", "phone_outreach_events", "email_outreach_enrollments", "crm_intake_decisions", "crm_identity_reviews", "crm_field_changes", "crm_import_batches", "crm_erasure_tombstones"];
   await check("d1.integrity", async () => {
-    const fk = await q(`PRAGMA foreign_key_check`).catch(() => null);
-    if (fk === null) return "PRAGMA foreign_key_check not permitted by D1 here (skipped)";
-    assert(fk.length === 0, `${fk.length} foreign-key violations`);
-    return "foreign_key_check clean";
+    let violations = 0;
+    for (const t of FK_TABLES) {
+      const fk = await q(`PRAGMA foreign_key_check(${t})`).catch(() => null);
+      if (fk === null) return "D1 does not permit the foreign-key check here (skipped)";
+      violations += fk.length;
+    }
+    assert(violations === 0, `${violations} foreign-key violations in the CRM identity tables`);
+    return `foreign_key_check clean on the ${FK_TABLES.length} CRM identity tables (whole database: restore drill)`;
   });
 
   // ── 2. Signed import API ──
