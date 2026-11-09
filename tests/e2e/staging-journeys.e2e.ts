@@ -1183,7 +1183,8 @@ test("[PAY-001] [PAY-003] standard packages from the real /pricing buttons: inta
     assert.equal(new URL(c.url()).pathname, `/checkout/${id}/review`, `${name}: intake first, then review. ${await alerts(c)}`);
     assert.match(await text(c, '[data-testid="checkout-price"]'), re(usd(cents)), `${name}: the exact package price`);
     assert.ok(await c.locator('[data-testid="checkout-scope"] li').count(), `${name}: the scope is listed`);
-    assert.match(await text(c, '[data-testid="checkout-intake-summary"]'), re(contact.company), `${name}: the order summary carries the intake`);
+    // The intake summary is a collapsed <details>: innerText omits closed content, so read its full text.
+    assert.match((await c.locator('[data-testid="checkout-intake-summary"]').textContent()) ?? "", re(`Cafés (${RUN})`), `${name}: the order summary carries this intake`);
     await c.locator(`input[name=maintenance_plan][value=${plan}]`).check();
     await c.locator("input[name=terms]").check(); // the development agreement, terms, refund policy and DPA
     await nav(c, c.getByRole("button", { name: new RegExp(`^Pay ${esc(usd(cents))}`) }).first());
