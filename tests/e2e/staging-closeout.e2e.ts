@@ -47,7 +47,7 @@ const save = () => writeFileSync(RUN_FILE, JSON.stringify(record, null, 2));
 let browser: Awaited<ReturnType<typeof launchBrowser>>;
 const pages = new Map<string, Page>();
 before(async () => { if (unset) return; browser = await launchBrowser(); const f = fx(); Object.assign(record, { run: f.run, orgId: f.orgId, projectId: f.projectId }); save(); });
-after(async () => { save(); await browser?.close(); });
+after(async () => { if (!unset) save(); await browser?.close(); }); // skipped outside its workflow: nothing to record
 
 async function signIn(a: Account): Promise<Page> {
   if (pages.has(a.email)) return pages.get(a.email);
