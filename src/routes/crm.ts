@@ -802,19 +802,75 @@ async function checkoutEntry(ctx: AppContext, packageId: string) {
   return redirect(ctx, `/checkout/${pkg.id}/${done ? "review" : "intake"}${ctx.url.search}`);
 }
 
-async function checkoutIntakePage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200) {
+async function checkoutIntakePage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200, preview = false) {
   const pkg = checkoutPackage(packageId);
-  const org = requireCustomerOrg(ctx);
-  const intake = await findIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
+  const org = preview ? requireOwnerCheckoutPreview(ctx) : requireCustomerOrg(ctx);
+  const intake = preview ? null : await findIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
   const a = intake?.answers ?? { business_name: org.organizationName, contact_name: ctx.user!.displayName, contact_email: ctx.user!.email };
   const sections = await intakeSections(ctx, org.organizationId, pkg.id, a);
+  // Owner preview: the same form, sent with GET to the preview review (answers travel in the address, are shown back in
+  // the order summary and are never stored). No CSRF token, no draft, no file upload, no submit to the real route.
+  const form = preview
+    ? html`<form method="get" action="${PREVIEW_BASE}/${pkg.id}/review" class="stack" data-testid="checkout-preview-intake">${sections}
+<div class="form-actions">${button("Continue to review (preview)")}</div></form>`
+    : html`<form method="post" action="/checkout/${pkg.id}/intake" enctype="multipart/form-data" class="stack">${csrf(ctx)}${sections}
+<div class="form-actions">${button("Save draft", { variant: "secondary", name: "intent", value: "draft" })}${button("Continue to review", { name: "intent", value: "submit" })}</div></form>`;
   return htmlResponse(ctx, publicLayout(ctx, { title: `Website intake — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:860px">
-<div class="eyebrow">Checkout · ${pkg.name} website package</div><h1>Tell us about your website</h1>${checkoutSteps(0)}
+${preview ? previewBanner(ctx) : ""}<div class="eyebrow">Checkout · ${pkg.name} website package</div><h1>Tell us about your website</h1>${checkoutSteps(0)}
 <p class="lede">Before you pay, describe the website you want: your business, goals, pages and content. You review the scope and price next, and pay only after that. Save a draft any time and come back to finish it. Never send passwords here — we arrange access securely.</p>
 ${intake?.completed_at ? alert("info", html`You completed this intake ${formatDateTime(intake.completed_at)}. <a href="/checkout/${pkg.id}/review">Continue to review</a>, or change your answers and submit again.`) : intake ? html`<p class="faint" data-testid="intake-draft-saved">Draft last saved ${formatDateTime(intake.updated_at)}.</p>` : ""}${formErrors(errors)}
-<form method="post" action="/checkout/${pkg.id}/intake" enctype="multipart/form-data" class="stack">${csrf(ctx)}${sections}
-<div class="form-actions">${button("Save draft", { variant: "secondary", name: "intent", value: "draft" })}${button("Continue to review", { name: "intent", value: "submit" })}</div></form>
+${form}
 </div></section>`), status);
+}
+
+// ───────────── Owner preview of the package checkout (Founder, 2026-11-09) ─────────────
+// Before the public launch, production closes /checkout/* to everyone (src/app/prelaunch.ts). The Owner reviews the
+// real customer pages here: the same intake form, server-side price, tax, scope, maintenance plan and agreements,
+// rendered by the same functions as /checkout/:packageId. Owner + staff MFA only. Read-only by construction: GET routes,
+// no customer organization, no intake, order, agreement acceptance or Stripe session is ever created, and the payment
+// button is disabled.
+const PREVIEW_BASE = "/staff/checkout-preview";
+const PREVIEW_ORG = { organizationId: "owner-checkout-preview", organizationName: "Your business (preview)", role: "customer_admin" };
+
+const nowIsoPreview = (ctx: AppContext) => ctx.now().toISOString();
+
+function requireOwnerCheckoutPreview(ctx: AppContext): typeof PREVIEW_ORG {
+  requireStaff(ctx);
+  if (!isOwner(ctx.actor!)) throw new HttpError(403, "Only the Owner can preview the checkout.");
+  return PREVIEW_ORG;
+}
+
+function previewBanner(ctx: AppContext): SafeHtml {
+  return alert("info", html`<strong>Owner preview.</strong> This is the page customers see. Nothing here is saved, and no order, agreement acceptance or payment can be created. Online payment in this environment: ${ctx.payments.configured ? "open" : html`closed (${commerceClosedReason(ctx)})`}. <a href="${PREVIEW_BASE}">All packages</a>`);
+}
+
+function commerceClosedReason(ctx: AppContext): string {
+  const r = (ctx.payments as unknown as { reason?: string }).reason;
+  return r ?? NOT_CONFIGURED;
+}
+
+/** The answers typed into the preview intake, from the query string; never stored. */
+function previewAnswers(ctx: AppContext): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+  for (const k of new Set(ctx.url.searchParams.keys())) {
+    const v = ctx.url.searchParams.getAll(k).map((x) => x.slice(0, 2000)).filter((x) => x !== "");
+    if (v.length) out[k] = v.length > 1 ? v : v[0];
+  }
+  return out;
+}
+
+async function checkoutPreviewIndex(ctx: AppContext) {
+  requireOwnerCheckoutPreview(ctx);
+  const rows = await Promise.all((["starter", "business", "premium"] as const).map(async (id) => ({ id, name: PACKAGES[id].name, cents: (await effectivePrice(ctx.db, "package", id, ctx.now())).cents, floor: PACKAGES[id].priceIsFloor })));
+  return htmlResponse(ctx, appLayout(ctx, { title: "Checkout preview", nav: staffNav(ctx), home: "/staff", area: "Owner" }, html`${pageHead("Checkout preview", undefined, "Owner")}
+<p class="lede">Walk through the customer purchase exactly as customers will see it: website intake, then scope, price, maintenance plan and agreements. Nothing is saved and nothing can be paid.</p>
+${table(rows, [
+    { header: "Package", cell: (r) => r.name },
+    { header: "Price charged at checkout", cell: (r) => html`${formatCents(r.cents)}${r.floor ? html` <small class="faint">(standard Premium scope; larger scopes are quoted)</small>` : ""}` },
+    { header: "Preview", cell: (r) => html`<a href="${PREVIEW_BASE}/${r.id}/intake" data-testid="preview-${r.id}">Intake</a> · <a href="${PREVIEW_BASE}/${r.id}/review">Review</a>` },
+  ])}
+<p>Custom projects are quoted, not bought online: customers use the <a href="/quote?package=custom">custom quote form</a> (50% / 25% / 25% milestones once a quote is accepted).</p>
+${previewBanner(ctx)}`));
 }
 
 async function checkoutIntakePost(ctx: AppContext, packageId: string) {
@@ -835,12 +891,13 @@ async function checkoutIntakePost(ctx: AppContext, packageId: string) {
 }
 
 /** GET /checkout/:packageId/review — scope, server-side price and tax, plan choice and agreements, then payment. */
-async function checkoutReviewPage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200, selectedPlan: string | null = null) {
+async function checkoutReviewPage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200, selectedPlan: string | null = null, preview = false) {
   const pkg = checkoutPackage(packageId);
-  const org = requireCustomerOrg(ctx);
-  const intake = await completedOpenIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
+  const org = preview ? requireOwnerCheckoutPreview(ctx) : requireCustomerOrg(ctx);
+  const intake = preview ? { completed_at: nowIsoPreview(ctx), answers: previewAnswers(ctx) } : await completedOpenIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
   if (!intake) return redirect(ctx, `/checkout/${pkg.id}/intake`, { kind: "info", text: "Complete the website intake first. You review the scope and price next." });
   const configured = ctx.payments.configured;
+  const base = preview ? `${PREVIEW_BASE}/${pkg.id}` : `/checkout/${pkg.id}`;
   const cancelled = ctx.url.searchParams.get("checkout") === "cancelled";
   const priceCents = (await effectivePrice(ctx.db, "package", pkg.id, ctx.now())).cents; // CAT-007
   // LEGAL-005: configured sales tax is shown per jurisdiction and included in the amount charged.
@@ -855,7 +912,7 @@ async function checkoutReviewPage(ctx: AppContext, packageId: string, errors: st
 ${planChoices.map((p) => html`<label class="row"><input type="radio" name="maintenance_plan" value="${p.id}" required${selectedPlan === p.id ? html` checked` : ""}> ${p.name} — ${formatCents(p.monthlyCents)}/month${p.id === minPlan ? html` <small>(minimum)</small>` : ""}</label>`)}
 <p class="faint" data-testid="checkout-maintenance-billing">You are not charged for the plan today. Monthly billing starts only when you approve and launch your completed website. <a href="/hosting-maintenance">Compare plans</a></p></fieldset>`;
   return htmlResponse(ctx, publicLayout(ctx, { title: `Checkout — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:760px">
-<div class="eyebrow">Checkout</div><h1>${pkg.name} website package</h1>${checkoutSteps(1)}
+${preview ? previewBanner(ctx) : ""}<div class="eyebrow">Checkout</div><h1>${pkg.name} website package</h1>${checkoutSteps(1)}
 ${cancelled ? alert("info", "Checkout was cancelled. Nothing was charged.") : ""}${formErrors(errors)}
 <div class="card card--gold stack"><h2 style="font-size:1.2rem">Scope and price</h2><p class="price" data-testid="checkout-price">${formatCents(priceCents)}${pkg.priceIsFloor ? html` <small>starting price</small>` : ""}</p>
 ${tax.configured ? html`<div data-testid="checkout-tax">${tax.byJurisdiction.map((j) => html`<p>${taxLabel(j)}: ${usd(j.taxCents)}</p>`)}<p><strong>Total due ${usd(tax.totalCents)}</strong></p></div>` : ""}
@@ -863,8 +920,15 @@ ${tax.configured ? html`<div data-testid="checkout-tax">${tax.byJurisdiction.map
 <ul class="checklist" data-testid="checkout-scope">${pkg.includes.map((i) => html`<li>${i}</li>`)}</ul>
 ${pkg.priceIsFloor ? html`<p class="faint">Need more than the standard Premium scope? <a href="/quote">Request a custom quote</a> — work above the starting price is quoted separately.</p>` : ""}
 <p class="faint">Your project manager confirms the final scope with you against your intake after payment, before design starts.</p></div>
-<details class="card" data-testid="checkout-intake-summary"><summary><strong>Your website intake</strong> · submitted ${formatDateTime(intake.completed_at)} · <a href="/checkout/${pkg.id}/intake">Edit</a></summary>${intakeSummary(pkg.id, intake.answers)}</details>
-${configured ? html`<form method="post" action="/checkout/${pkg.id}" class="card stack">${csrf(ctx)}
+<details class="card" data-testid="checkout-intake-summary"${preview ? html` open` : ""}><summary><strong>Your website intake</strong> · submitted ${formatDateTime(intake.completed_at)} · <a href="${base}/intake">Edit</a></summary>${intakeSummary(pkg.id, intake.answers as never)}</details>
+${preview ? html`<form class="card stack" data-testid="checkout-preview-payment">
+${planFieldset}
+${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Refund Policy and Data Processing Addendum.", { required: true })}
+<p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p>
+<p class="faint">You will be taken to Stripe's secure checkout. Your payment is confirmed only when Stripe notifies us.</p>
+<div class="form-actions"><button class="btn btn--primary" type="button" disabled aria-disabled="true">Pay ${formatCents(dueCents)}</button></div>
+<p class="faint" data-testid="checkout-preview-note">Owner preview: the payment button is disabled. ${configured ? "" : html`Customers currently see "${NOT_CONFIGURED} You cannot pay online right now." here instead of this form.`}</p></form>`
+    : configured ? html`<form method="post" action="/checkout/${pkg.id}" class="card stack">${csrf(ctx)}
 ${planFieldset}
 ${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Refund Policy and Data Processing Addendum.", { required: true })}
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p>
@@ -1142,5 +1206,9 @@ export function register(r: Router): void {
   r.get("/checkout/:packageId/intake", (ctx, p) => checkoutIntakePage(ctx, p.packageId));
   r.post("/checkout/:packageId/intake", (ctx, p) => checkoutIntakePost(ctx, p.packageId));
   r.get("/checkout/:packageId/review", (ctx, p) => checkoutReviewPage(ctx, p.packageId));
+  // Owner preview of the same pages (read-only; see requireOwnerCheckoutPreview).
+  r.get(PREVIEW_BASE, (ctx) => checkoutPreviewIndex(ctx));
+  r.get(`${PREVIEW_BASE}/:packageId/intake`, (ctx, p) => checkoutIntakePage(ctx, p.packageId, [], 200, true));
+  r.get(`${PREVIEW_BASE}/:packageId/review`, (ctx, p) => checkoutReviewPage(ctx, p.packageId, [], 200, null, true));
 }
 
