@@ -108,10 +108,10 @@ test("[PAY-010] adapters compare every key and object with the expected mode (FI
 });
 
 test("[PAY-010] production with a test key shows payments as not configured; production checkout CTAs route to /quote and POST /checkout is refused (CREST-GAP-010)", async () => {
-  const t = await createTestApp({ ENVIRONMENT: "production", STRIPE_SECRET_KEY: "sk_test_fixture", STRIPE_WEBHOOK_SECRET: WHSEC });
+  const t = await createTestApp({ ENVIRONMENT: "production", PUBLIC_LAUNCH: "open", STRIPE_SECRET_KEY: "sk_test_fixture", STRIPE_WEBHOOK_SECRET: WHSEC });
   const ctx = await buildContext(new Request("http://crestmont.test/pricing"), t.env);
   assert.equal(ctx.payments.configured, false, "production + test key → checkout not configured");
-  const authorised = await createTestApp({ ENVIRONMENT: "production", STRIPE_SECRET_KEY: "sk_live_fixture", PAYMENTS_LIVE_AUTHORIZED: "yes", STRIPE_WEBHOOK_SECRET: WHSEC });
+  const authorised = await createTestApp({ ENVIRONMENT: "production", PUBLIC_LAUNCH: "open", STRIPE_SECRET_KEY: "sk_live_fixture", PAYMENTS_LIVE_AUTHORIZED: "yes", STRIPE_WEBHOOK_SECRET: WHSEC });
   await authorised.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('business.legal_name','Crestmont Test Entity LLC (TEST DATA)',?)`).bind(nowIso()).run();
   const actx = await buildContext(new Request("http://crestmont.test/pricing"), authorised.env);
   assert.equal(actx.payments.configured, false, "draft policies keep production checkout closed even when live is authorised");
