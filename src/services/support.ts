@@ -14,6 +14,10 @@ import { sendInternalTemplate } from "./internal-notify.ts";
 import { notify } from "./notifications.ts";
 import { decideAiJob } from "./ai.ts";
 import { replyPrompt, startDraft, type DraftStatus, type DraftSubject } from "./ai-drafts.ts";
+
+/** The reference a customer and staff can quote: derived from the ticket id, so it needs no column and never changes.
+ *  Emails and both ticket pages show this, never the raw database id (F2 review, 2026-11-09). */
+export const ticketReference = (id: string): string => `S-${id.replace(/^tkt_/, "").slice(0, 8).toUpperCase()}`;
 import { toHex } from "../lib/crypto.ts";
 
 export const TICKET_CATEGORIES = ["technical", "billing", "content_change", "account", "refund", "other"] as const;
@@ -246,7 +250,7 @@ export async function createTicket(ctx: Pick<AppContext, "db" | "storage" | "ema
   await audit(ctx.db, { actorUserId: user.id, action: "ticket.created", subjectType: "ticket", subjectId: id, organizationId: org.organizationId, details: { category: input.category, attachments: input.files.length } });
   const settings = await getSupportSettings(ctx);
   await sendMail(ctx, { template: "support_ticket", to: user.email, idempotencyKey: `ticket-confirm:${id}`,
-    data: { event: "received", name: user.displayName, subject, ticketRef: id, hoursNotice: hoursDisclosure(settings), url: `${ctx.baseUrl}/portal/support/${id}` } });
+    data: { event: "received", name: user.displayName, subject, ticketRef: ticketReference(id), hoursNotice: hoursDisclosure(settings), url: `${ctx.baseUrl}/portal/support/${id}` } });
   for (const s of await supportAgents(ctx.db)) await notify(ctx.db, s.id, { kind: "ticket_new", subjectType: "ticket", subjectId: id, body: `New ${input.category.replace("_", " ")} ticket: ${subject}` });
   return id;
 }
@@ -321,7 +325,7 @@ export async function escalateTicket(ctx: MailCtx, ticket: TicketRow, userId: st
     await notify(ctx.db, s.id, { kind: "ticket_escalated", subjectType: "ticket", subjectId: ticket.id, body: `Escalated: ${ticket.subject}` });
   }
   // Phase 14: an important support escalation is emailed once to the internal operations mailbox.
-  await sendInternalTemplate(ctx, "support_escalation", `ticket:${ticket.id}:${ticket.updated_at}`, { template: "support_ticket", data: { event: "escalated", subject: ticket.subject, ticketRef: ticket.id, url: `${ctx.baseUrl}/staff/support/${ticket.id}` } });
+  await sendInternalTemplate(ctx, "support_escalation", `ticket:${ticket.id}:${ticket.updated_at}`, { template: "support_ticket", data: { event: "escalated", subject: ticket.subject, ticketRef: ticketReference(ticket.id), url: `${ctx.baseUrl}/staff/support/${ticket.id}` } });
 }
 
 export async function assignTicket(ctx: MailCtx, ticket: TicketRow, assigneeId: string, byUserId: string): Promise<void> {
@@ -338,7 +342,7 @@ export async function assignTicket(ctx: MailCtx, ticket: TicketRow, assigneeId: 
   await audit(ctx.db, { actorUserId: byUserId, action: "ticket.assigned", subjectType: "ticket", subjectId: ticket.id, organizationId: ticket.organization_id, details: { assigneeId, previous: current?.user_id ?? null } });
   if (assigneeId !== byUserId) {
     await notify(ctx.db, assigneeId, { kind: "ticket_assigned", subjectType: "ticket", subjectId: ticket.id, body: `Assigned to you: ${ticket.subject}` });
-    await sendMail(ctx, { template: "support_ticket", to: agent.email, data: { event: "assigned", subject: ticket.subject, ticketRef: ticket.id, priority: ticket.priority, url: `${ctx.baseUrl}/staff/support/${ticket.id}` }, idempotencyKey: `assign:${ticket.id}:${assigneeId}:${at}` });
+    await sendMail(ctx, { template: "support_ticket", to: agent.email, data: { event: "assigned", subject: ticket.subject, ticketRef: ticketReference(ticket.id), priority: ticket.priority, url: `${ctx.baseUrl}/staff/support/${ticket.id}` }, idempotencyKey: `assign:${ticket.id}:${assigneeId}:${at}` });
   }
 }
 
@@ -444,7 +448,7 @@ export async function runSupportEscalationSweep(ctx: Pick<AppContext, "db" | "em
       await notify(ctx.db, p.id, { kind: "ticket_sla_breached", subjectType: "ticket", subjectId: t.id, body: `No first response within ${s.firstResponseTargetHours}h: ${t.subject}` });
     }
     // Phase 14: one email per breached ticket to the internal operations mailbox.
-    await sendInternalTemplate(ctx, "support_escalation", `sla:${t.id}`, { template: "support_ticket", data: { event: "sla_breached", subject: t.subject, ticketRef: t.id, targetHours: s.firstResponseTargetHours, url: `${ctx.baseUrl}/staff/support/${t.id}` } });
+    await sendInternalTemplate(ctx, "support_escalation", `sla:${t.id}`, { template: "support_ticket", data: { event: "sla_breached", subject: t.subject, ticketRef: ticketReference(t.id), targetHours: s.firstResponseTargetHours, url: `${ctx.baseUrl}/staff/support/${t.id}` } });
   }
   return { flagged, checked: due.length, targetHours: s.firstResponseTargetHours };
 }

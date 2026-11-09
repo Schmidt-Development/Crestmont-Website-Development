@@ -118,10 +118,11 @@ test("[EMP-002] non-permitted roles get 403 on every platform page", async () =>
   const cc = await app.client().login(cust.email);
   for (const p of pages) assert.equal((await cc.get(p)).status, 403, `customer ${p}`);
   assert.equal((await app.client().get("/staff/audit")).status, 303, "anonymous redirected to login");
-  // Administrators: everything except voice.manage
+  // Administrators: everything except voice.manage and the Owner's email template review (F2)
   const { c: admin } = await staffClient(app, "administrator");
-  for (const p of pages.filter((x) => x !== "/staff/voice")) assert.equal((await admin.get(p)).status, 200, `admin ${p}`);
+  for (const p of pages.filter((x) => x !== "/staff/voice" && x !== "/staff/email/templates")) assert.equal((await admin.get(p)).status, 200, `admin ${p}`);
   assert.equal((await admin.get("/staff/voice")).status, 403);
+  assert.equal((await admin.get("/staff/email/templates")).status, 403);
   const { c: owner } = await staffClient(app, "owner");
   assert.equal((await owner.get("/staff/voice")).status, 200);
 });
@@ -283,14 +284,17 @@ test("[OWN-003] settings warn about residential addresses, require confirmation,
 });
 
 // ── Email ──
-test("[EMAIL-002] template catalogue renders every template as a labelled preview", async () => {
+test("[EMAIL-002] template review renders every template as a labelled preview, for the Owner only", async () => {
   const app = await createTestApp();
-  const { c } = await staffClient(app, "administrator");
+  const { c } = await staffClient(app, "owner");
   const html = await (await c.get("/staff/email/templates")).text();
-  assert.match(html, /Preview only/);
-  for (const t of EMAIL_TEMPLATES) assert.ok(html.includes(`/staff/email/templates/${t}/html`), t);
+  assert.match(html, /Review only — nothing on this page sends email/);
+  for (const t of EMAIL_TEMPLATES) assert.ok(html.includes(`/staff/email/templates/${t}/view?sample=0`), t);
   const dl = await c.get("/staff/email/templates/invoice/html");
   assert.match(dl.headers.get("content-disposition") ?? "", /attachment/);
+  const admin = (await staffClient(app, "administrator")).c;
+  assert.equal((await admin.get("/staff/email/templates")).status, 403, "administrators do not review the Founder's wording");
+  assert.equal((await admin.get("/staff/email/templates/invoice/view")).status, 403);
 });
 
 test("[EMAIL-003] delivery log shows the dev outbox escaped and refuses retry when Resend is absent", async () => {

@@ -92,3 +92,30 @@ test("[INFRA-002] live bindings: script settings, else the serving version; refu
   const none = async (p: string) => (p.endsWith("/deployments") ? { deployments: [{ versions: [{ version_id: vid, percentage: 100 }] }] } : {});
   await assert.rejects(liveBindings("crestmont-platform-staging", none), /no bindings/);
 });
+
+test("[INFRA-002] the production deploy keeps dashboard variables too and is wrapped by the same guard", () => {
+  // Staging was fixed after 2026-10-31; production deployed without --keep-vars, so its first release would have deleted
+  // every plain-text variable the Founder set in the Cloudflare dashboard (STRIPE_PUBLISHABLE_KEY, later
+  // PAYMENTS_LIVE_AUTHORIZED). Secrets are never deleted by a deploy; plain-text variables were.
+  const prod = readFileSync(".github/workflows/deploy-production.yml", "utf8");
+  const deploys = [...prod.matchAll(/\$WRANGLER deploy\b[^\n|]*/g)].map((m) => m[0]);
+  assert.equal(deploys.length, 1, "one production deploy");
+  assert.match(deploys[0], /--env production --keep-vars /);
+  const at = (s: string) => { const i = prod.indexOf(s); assert.ok(i > 0, s); return i; };
+  const snap = at("staging-binding-guard.ts snapshot --env production");
+  assert.ok(snap < at("d1 migrations apply crestmont-production"), "snapshot before anything on production changes");
+  const verify = at("staging-binding-guard.ts verify --env production");
+  assert.ok(verify > at("$WRANGLER deploy --env production"), "verified after the deploy");
+  assert.ok(verify < at("Roll back on failed production checks"), "a failed verification is rolled back like any failed check");
+  assert.doesNotMatch(prod.slice(prod.lastIndexOf("- name:", verify), verify), /continue-on-error/);
+  assert.equal(tomlScriptName(toml, "production"), "crestmont-platform-production");
+});
+
+test("[INFRA-002] a Worker that was never deployed snapshots as empty instead of refusing the first release", async () => {
+  const neverDeployed = async (p: string) => { if (p.endsWith("/settings")) throw new Error("not found"); if (p.endsWith("/deployments")) return { deployments: [] }; throw new Error(`unexpected ${p}`); };
+  assert.deepEqual(await liveBindings("crestmont-platform-production", neverDeployed), []);
+  // A deployed Worker whose bindings cannot be read still refuses (unchanged).
+  const vid = "0123abcd-0000-4000-8000-000000000002";
+  const unreadable = async (p: string) => (p.endsWith("/deployments") ? { deployments: [{ versions: [{ version_id: vid, percentage: 100 }] }] } : {});
+  await assert.rejects(liveBindings("crestmont-platform-production", unreadable), /no bindings/);
+});

@@ -89,6 +89,21 @@ Verified locally with a 310 MiB object through real wrangler 4.149.0 (local R2):
 the round trip, deleted completely. To open a chunked backup by hand: download the index and each part listed in
 it, concatenate the parts in order, check the SHA-256, then `node --no-warnings scripts/seal.ts open`.
 
+#### Choosing the destination at zero cost (checked 2026-11-09)
+
+- **Backblaze B2** (off-Cloudflare, the goal): Backblaze's pricing page states the **first 10 GB of storage are always
+  free**, with free egress up to three times the average stored amount; beyond that, storage is billed (currently
+  $6.95/TB/month). Two settings keep it at $0: in B2 → **Caps & Alerts**, set the daily storage cap (and the other caps)
+  to **$0**, so B2 refuses writes instead of billing; and give the bucket a **lifecycle rule** sized to the free tier.
+  Production starts empty and grows; a sealed export the size of today's staging database (>300 MiB) would allow about
+  25 daily copies inside 10 GB, so start with "keep 14 days" and revisit when the run summary shows the export size.
+- **Same-account R2** (`BACKUP_R2_BUCKET`, interim, no new account): R2's free allowance is shared with the customer-files
+  buckets, and it does not survive losing the Cloudflare account. Fine as a stop-gap, never described as off-Cloudflare.
+
+Before production holds data, `production-readiness-check.yml` proves the chosen destination and the seal passphrase
+with a sealed test object (seal, upload, download, sha256, open, delete). It is not a production backup: production
+backup and restore are proven only by `production-backup.yml` after the first deploy.
+
 #### Rehearsal on staging (`backup-rehearsal-staging.yml`, weekly + on demand)
 
 Production's pipeline has never run (no data, no destination). The rehearsal runs the same scripts in the same order

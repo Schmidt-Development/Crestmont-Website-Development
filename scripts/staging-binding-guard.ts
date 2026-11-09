@@ -106,6 +106,10 @@ export async function liveBindings(script: string, get: (path: string) => Promis
   if (fromSettings) return fromSettings;
   const deps = (await get(`${base}/deployments`)) as Obj;
   const list = (Array.isArray(deps?.deployments) ? deps.deployments : Array.isArray(deps) ? deps : []) as Obj[];
+  // A Worker that has never been deployed (production before its first release) serves nothing, so no deploy can lose
+  // a binding it serves: the snapshot is empty rather than a refusal of the first authorized release. Any deployment
+  // at all, and the bindings must be read.
+  if (deps && (Array.isArray(deps.deployments) || Array.isArray(deps)) && list.length === 0) return [];
   const versions = (list[0]?.versions ?? []) as Obj[];
   const serving = versions.find((v) => Number(v.percentage) === 100) ?? versions[0];
   const id = serving?.version_id ?? serving?.id;
@@ -120,8 +124,12 @@ const arg = (k: string) => { const i = process.argv.indexOf(k); return i > 0 ? p
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2];
   const toml = readFileSync("wrangler.toml", "utf8");
-  const declared = tomlEnvVars(toml, "staging");
-  const script = tomlScriptName(toml, "staging");
+  // --env production guards the production deploy the same way (deploy-production.yml); staging is the default.
+  const env = arg("--env") ?? "staging";
+  if (!["staging", "production"].includes(env)) { console.log(`::error title=Binding preservation::unknown --env ${env}`); process.exit(1); }
+  const label = env === "production" ? "Production" : "Staging";
+  const declared = tomlEnvVars(toml, env);
+  const script = tomlScriptName(toml, env);
   try {
     if (mode === "snapshot") {
       const problems = preflightProblems(declared);
@@ -131,9 +139,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, JSON.stringify({ script, takenAt: new Date().toISOString(), bindings } satisfies Snapshot, null, 2));
       const f = founderReport(bindings);
-      console.log(`Staging bindings before deploy: ${bindings.length} (${bindings.filter((b) => b.type === "secret_text").length} secrets). Names only: ${bindings.map((b) => b.name).join(", ")}`);
+      console.log(`${label} bindings before deploy: ${bindings.length} (${bindings.filter((b) => b.type === "secret_text").length} secrets). Names only: ${bindings.map((b) => b.name).join(", ")}`);
       console.log(`Founder-managed present: ${f.present.join(", ") || "none"}`);
-      for (const n of f.absent) console.log(`::warning title=Founder-managed variable absent::${n} is not set on the staging Worker. Restore it in the Cloudflare dashboard (the deploy preserves it from now on; it is never recreated by automation).`);
+      for (const n of f.absent) console.log(env === "production"
+        ? `::notice title=Founder-managed variable absent::${n} is not set on the production Worker. That is expected until the Founder activates the matching service; the deploy preserves it once it exists.`
+        : `::warning title=Founder-managed variable absent::${n} is not set on the staging Worker. Restore it in the Cloudflare dashboard (the deploy preserves it from now on; it is never recreated by automation).`);
     } else if (mode === "verify") {
       const before = JSON.parse(readFileSync(arg("--before") ?? "guard/before.json", "utf8")) as Snapshot;
       const after = await liveBindings(script);
