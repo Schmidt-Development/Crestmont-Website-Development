@@ -154,7 +154,7 @@ test("[PAY-004] clarifications 1–2: a failed payment starts a seven-day clock;
   assert.equal(back.hosting_suspended_at, null);
   assert.ok(back.hosting_restored_at);
   assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'hosting.restored' AND subject_id = ?`).bind(subId).first());
-  assert.match((await lastEmail(t.db, cu.email))!.text_body, /hosting restored/i);
+  assert.match((await lastEmail(t.db, cu.email))!.text_body, /hosting has been restored/i);
 });
 
 test("[PAY-004] clarification 1: the Owner page lists eligible subscriptions; only the Owner may suspend (other staff 403)", async () => {

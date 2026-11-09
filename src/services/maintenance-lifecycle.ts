@@ -109,7 +109,7 @@ export async function openMaintenanceActivation(db: Db, mail: LifecycleCtx | nul
   await audit(db, { actorKind: "system", action: "maintenance.activation_opened", subjectType: "project", subjectId: p.id, organizationId: p.organization_id, details: { activationId: id, planId: plan, status, trigger } });
   if (status === "due") {
     if (mail) for (const to of await customerAdmins(db, p.organization_id)) {
-      await sendMail(mail, { template: "subscription_update", to, idempotencyKey: `mact:${id}:${to}`, data: { planName: MAINTENANCE_PLANS[plan].name, status: "ready to start — sign your maintenance agreement and activate your plan so your website can go live", url: `${mail.baseUrl}/portal/projects/${p.id}` } });
+      await sendMail(mail, { template: "subscription_update", to, idempotencyKey: `mact:${id}:${to}`, data: { planName: MAINTENANCE_PLANS[plan].name, status: "due", kind: "agreement_requested", url: `${mail.baseUrl}/portal/projects/${p.id}` } });
     }
   } else {
     await notifyOwners(db, "maintenance_activation", `${p.name} is ready for its maintenance plan, but its ${MAINTENANCE_PLANS[plan].name} plan cannot be billed yet: the plan's benefits are awaiting operational verification (FD-05). The website cannot launch until the plan can be activated.`, "project", p.id);
@@ -193,7 +193,7 @@ export async function recordPaymentRecovered(ctx: LifecycleCtx, stripeSubscripti
   await notifyOwners(db, "hosting_restored", "Hosting restored automatically after payment was received. Bring the site back online if it was taken offline.", "subscription", s.id);
   const plan = isMaintenanceId(s.product_id) ? MAINTENANCE_PLANS[s.product_id].name : "maintenance";
   for (const to of await customerAdmins(db, s.organization_id)) {
-    await sendMail(ctx, { template: "subscription_update", to, idempotencyKey: `restored:${s.id}:${at}:${to}`, data: { planName: plan, status: "payment received — hosting restored", url: `${ctx.baseUrl}/portal/billing` } });
+    await sendMail(ctx, { template: "subscription_update", to, idempotencyKey: `restored:${s.id}:${at}:${to}`, data: { planName: plan, status: "active", kind: "restored", url: `${ctx.baseUrl}/portal/billing` } });
   }
   return { restored: true };
 }
@@ -264,6 +264,6 @@ export async function restoreHosting(ctx: LifecycleCtx, ownerUserId: string, sub
   await audit(db, { actorUserId: ownerUserId, action: "hosting.restored", subjectType: "subscription", subjectId: s.id, organizationId: s.organization_id, details: { reason: reason.trim().slice(0, 500) } });
   const plan = isMaintenanceId(s.product_id) ? MAINTENANCE_PLANS[s.product_id].name : "maintenance";
   for (const to of await customerAdmins(db, s.organization_id)) {
-    await sendMail(ctx, { template: "subscription_update", to, idempotencyKey: `restored:${s.id}:${at}:${to}`, data: { planName: plan, status: "hosting restored", url: `${ctx.baseUrl}/portal/billing` } });
+    await sendMail(ctx, { template: "subscription_update", to, idempotencyKey: `restored:${s.id}:${at}:${to}`, data: { planName: plan, status: "active", kind: "restored", url: `${ctx.baseUrl}/portal/billing` } });
   }
 }

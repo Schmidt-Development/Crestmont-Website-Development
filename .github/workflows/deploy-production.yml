@@ -165,6 +165,17 @@ jobs:
           EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
         run: node --no-warnings scripts/release-authorization.ts --commit "$TARGET_COMMIT" --config "${{ steps.cfg.outputs.sha256 }}"
 
+      # `wrangler deploy` without --keep-vars deletes every plain-text variable added in the Cloudflare dashboard; that is
+      # how the Founder's STRIPE_PUBLISHABLE_KEY vanished from staging on 2026-10-31 (docs/DEPLOYMENT.md). Staging was
+      # fixed then; production was not. The deploy below keeps dashboard variables, and this guard snapshots the
+      # production Worker's bindings (names and value hashes, never values) before anything on production changes and
+      # proves after the deploy that none was lost (a failure there rolls the release back).
+      - name: Production binding preservation — snapshot before any change
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/staging-binding-guard.ts snapshot --env production --out guard/before.json
+
       - name: Apply D1 migrations (production, additive only)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -185,7 +196,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         id: deploy
-        run: $WRANGLER deploy --env production --message "Release ${RELEASE_TAG} ${TARGET_COMMIT}"
+        run: $WRANGLER deploy --env production --keep-vars --message "Release ${RELEASE_TAG} ${TARGET_COMMIT}"
+
+      - name: Production binding preservation — verify nothing was lost
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/staging-binding-guard.ts verify --env production --before guard/before.json
 
       - name: Record deployment succeeded
         env:

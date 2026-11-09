@@ -61,7 +61,7 @@ async function customerTicketPage(ctx: AppContext, orgId: string, id: string, er
   const project = t.project_id ? await ctx.db.prepare(`SELECT name FROM projects WHERE id = ? AND organization_id = ?`).bind(t.project_id, orgId).first<{ name: string }>() : null;
   const settings = await sup.getSupportSettings(ctx);
   const closed = t.status === "resolved" || t.status === "closed";
-  return portalPage(ctx, t.subject, html`${pageHead(t.subject, linkButton("All tickets", "/portal/support", "ghost", "sm"), `Ticket ${t.id}`)}
+  return portalPage(ctx, t.subject, html`${pageHead(t.subject, linkButton("All tickets", "/portal/support", "ghost", "sm"), `Ticket ${sup.ticketReference(t.id)}`)}
 ${formErrors(errors)}
 <div class="grid grid-2" style="align-items:start"><section class="stack">${thread(msgs, "customer")}
 ${closed ? html`<div class="card">${t.status === "resolved" ? html`<p>This ticket is resolved. If the issue is not fixed, reopen it and we will pick it up again.</p>${actionForm(ctx, `/portal/support/${t.id}/reopen`, "Reopen ticket", { variant: "primary" })}` : html`<p>This ticket is closed. Please <a href="/portal/support/new">open a new ticket</a> if you need more help.</p>`}</div>`
@@ -102,7 +102,7 @@ async function staffTicketPage(ctx: AppContext, id: string, errors: string[] = [
     : `${timing.elapsedHours} h elapsed of ${timing.targetHours} h target`;
 
   const flag = await disabledOwnerFlag(ctx.db, ["ticket"], t.id);
-  return staffPage(ctx, t.subject, html`${pageHead(t.subject, linkButton("Queue", "/staff/support", "ghost", "sm"), `Ticket ${t.id} · ${org?.name ?? ""}`)}${(flag ? alert("warn", html`<strong>Owner disabled.</strong> ${flag.name}'s account was disabled; ${flag.status === "ended" ? "their assignment was ended, so this needs a new owner." : "this is waiting in the offboarding queue for a new owner."}`) : "")}
+  return staffPage(ctx, t.subject, html`${pageHead(t.subject, linkButton("Queue", "/staff/support", "ghost", "sm"), `Ticket ${sup.ticketReference(t.id)} · ${org?.name ?? ""}`)}${(flag ? alert("warn", html`<strong>Owner disabled.</strong> ${flag.name}'s account was disabled; ${flag.status === "ended" ? "their assignment was ended, so this needs a new owner." : "this is waiting in the offboarding queue for a new owner."}`) : "")}
 ${formErrors(errors)}
 <div class="grid grid-2" style="align-items:start"><section class="stack">${thread(msgs, "staff")}
 ${canManage ? html`${draftControls(ctx, { startAction: `/staff/support/${t.id}/draft`, statusBase: `/staff/support/${t.id}/draft/`, target: "#reply", status: draftState, discardAction: `/staff/support/${t.id}/draft/discard` })}

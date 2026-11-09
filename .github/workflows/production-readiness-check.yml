@@ -1,0 +1,125 @@
+name: Production readiness check (read-only)
+
+# Founder actions F3 and F5 (2026-11-09). Answers, before the first production deploy, what can otherwise only be
+# learned by deploying: which secrets and bindings the production Worker holds (NAMES and value hashes only, never
+# values), whether the production D1 database and R2 bucket exist and match wrangler.toml, which backup settings exist,
+# and whether the configured backup destination and seal passphrase actually work. For that last question it
+# round-trips a small SEALED TEST OBJECT (no customer data) through the destination: seal, upload, download, check the
+# sha256, open, delete.
+#
+# It changes nothing on production: no deploy, no migration, no secret written, no database write (D1 is only listed
+# and asked for its table count). It needs the `production` environment's Cloudflare token, so the run waits for the
+# Founder's approval when that environment has required reviewers. Manual only.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-readiness-check
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ vars.BACKUP_ENVIRONMENT || 'production' }}
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+
+      - name: Production Worker secrets (names only)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          trap 'rm -f secrets.json names.txt' EXIT
+          $WRANGLER secret list --env production --format json > secrets.json
+          node --no-warnings scripts/provision-production.ts secret-names secrets.json > names.txt
+          echo "### Production Worker secrets (names only)" >> "$GITHUB_STEP_SUMMARY"
+          echo "$(tr '\n' ' ' < names.txt)" >> "$GITHUB_STEP_SUMMARY"
+          missing=""
+          for n in TURNSTILE_SITE_KEY TURNSTILE_SECRET EVIDENCE_INGEST_SECRET MFA_ENCRYPTION_KEY CRM_ERASURE_HMAC_KEY; do grep -qx "$n" names.txt || missing="$missing $n"; done
+          if [ -n "$missing" ]; then echo "::error title=Required production secret missing::$missing"; else echo "::notice title=Required production secrets::all present (TURNSTILE_SITE_KEY, TURNSTILE_SECRET, EVIDENCE_INGEST_SECRET, MFA_ENCRYPTION_KEY, CRM_ERASURE_HMAC_KEY)"; fi
+          founder=$(grep -xE 'STRIPE_SECRET_KEY|STRIPE_WEBHOOK_SECRET|RESEND_API_KEY|RESEND_WEBHOOK_SECRET' names.txt | sort | paste -sd, - || true)
+          [ -z "$founder" ] || echo "::notice title=Founder-managed activation secrets present::$founder (payments stay off until PAYMENTS_LIVE_AUTHORIZED = yes)"
+          deferred=$(grep -xE 'RETELL_API_KEY|RETELL_INBOUND_API_KEY|RETELL_OUTBOUND_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|AI_BUILD_AUTOMATION|RESEARCH_RUNNER_SECRET|CRM_IMPORT_SECRET|PAYMENT_SIMULATION_ENABLED|STAGING_ACCESS_PASSWORD' names.txt | sort | paste -sd, - || true)
+          [ -z "$deferred" ] || echo "::warning title=Phase-1 secret present::$deferred (voice, AI, simulation or preview; phase 1 never uses it)"
+          [ -z "$missing" ]
+
+      - name: Production Worker bindings and dashboard variables (names and value hashes only)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # The same guard the production deploy now runs before and after `wrangler deploy --keep-vars`. A Worker that
+          # was never deployed reports no bindings (its D1 and R2 bindings are attached by the first deploy).
+          node --no-warnings scripts/staging-binding-guard.ts snapshot --env production --out guard/now.json | tee -a "$GITHUB_STEP_SUMMARY"
+          rm -rf guard
+
+      - name: Production D1 and R2 exist and match wrangler.toml (read-only)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          want=$(node -e 'const t=require("fs").readFileSync("wrangler.toml","utf8");const b=t.slice(t.indexOf("[env.production]"));const m=/database_name = "crestmont-production", database_id = "([0-9a-f-]{36})"/.exec(b);process.stdout.write(m?m[1]:"")')
+          got=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-production");process.stdout.write(r?r.uuid:"")})')
+          if [ -n "$got" ] && [ "$got" = "$want" ]; then echo "::notice title=Production D1::crestmont-production exists and matches wrangler.toml"; else echo "::error title=Production D1::expected ${want:-<none in wrangler.toml>}, found ${got:-no database named crestmont-production}"; exit 1; fi
+          tables=$($WRANGLER d1 execute crestmont-production --remote --env production --json --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s)[0].results[0].n)))')
+          echo "Production D1 tables: $tables ($( [ "$tables" = "0" ] && echo 'empty: migrations 0001-0101 apply on the first deploy' || echo 'already migrated' ))" >> "$GITHUB_STEP_SUMMARY"
+          if $WRANGLER r2 bucket list 2>/dev/null | grep -q "crestmont-files-production"; then echo "::notice title=Production R2::crestmont-files-production exists"; else echo "::error title=Production R2::crestmont-files-production not found"; exit 1; fi
+
+      - name: Backup configuration present (names only)
+        id: backup
+        env:
+          HAS_S3: ${{ secrets.BACKUP_S3_ENDPOINT != '' && secrets.BACKUP_S3_BUCKET != '' && secrets.BACKUP_S3_ACCESS_KEY_ID != '' && secrets.BACKUP_S3_SECRET_ACCESS_KEY != '' }}
+          HAS_R2: ${{ vars.BACKUP_R2_BUCKET != '' }}
+          HAS_SEAL: ${{ secrets.BACKUP_SEAL_PASSPHRASE != '' }}
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+        run: |
+          {
+            echo "### Backup and monitoring configuration"
+            echo "- off-Cloudflare destination (BACKUP_S3_*): $HAS_S3"
+            echo "- same-account R2 destination (BACKUP_R2_BUCKET): $HAS_R2"
+            echo "- seal passphrase (BACKUP_SEAL_PASSPHRASE): $HAS_SEAL"
+            echo "- PRODUCTION_URL: ${PRODUCTION_URL:-not set}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if { [ "$HAS_S3" = "true" ] || [ "$HAS_R2" = "true" ]; } && [ "$HAS_SEAL" = "true" ]; then echo "ready=true" >> "$GITHUB_OUTPUT"
+          else echo "::warning title=Backup destination not configured::Set BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY and BACKUP_SEAL_PASSPHRASE on this environment (or the variable BACKUP_R2_BUCKET plus BACKUP_SEAL_PASSPHRASE). docs/BACKUP-RECOVERY.md §3.2."; echo "ready=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Backup destination round trip with a sealed test object (no customer data)
+        if: steps.backup.outputs.ready == 'true'
+        env:
+          BACKUP_S3_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+          BACKUP_S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+          BACKUP_S3_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
+          BACKUP_S3_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
+          BACKUP_S3_REGION: ${{ secrets.BACKUP_S3_REGION }}
+          BACKUP_R2_BUCKET: ${{ vars.BACKUP_R2_BUCKET }}
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.BACKUP_SEAL_PASSPHRASE }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          node --no-warnings scripts/seal.ts check
+          node --no-warnings scripts/offsite-backup.ts check
+          printf 'Crestmont production readiness check %s: test object, no customer data.\n' "${{ github.run_id }}" > "$work/test.txt"
+          node --no-warnings scripts/seal.ts seal "$work/test.txt" "$work/test.sealed"
+          key="crestmont-production/_readiness/${{ github.run_id }}.sealed"
+          node --no-warnings scripts/offsite-backup.ts put "$work/test.sealed" "$key"
+          node --no-warnings scripts/offsite-backup.ts get "$key" "$work/back.sealed"
+          [ "$(sha256sum < "$work/test.sealed")" = "$(sha256sum < "$work/back.sealed")" ] || { echo "::error title=Backup round trip::the object read back differs from the one written"; exit 1; }
+          node --no-warnings scripts/seal.ts open "$work/back.sealed" "$work/back.txt"
+          cmp -s "$work/test.txt" "$work/back.txt" || { echo "::error title=Backup round trip::the opened object differs from the original"; exit 1; }
+          node --no-warnings scripts/offsite-backup.ts delete "$key"
+          echo "::notice title=Backup destination verified::sealed with BACKUP_SEAL_PASSPHRASE, uploaded, read back byte-identical, opened and deleted. This proves the destination and encryption; a production backup and restore are proven only by production-backup.yml after the first deploy."
+          echo "- backup round trip: PASSED (seal → upload → download → sha256 → open → delete)" >> "$GITHUB_STEP_SUMMARY"

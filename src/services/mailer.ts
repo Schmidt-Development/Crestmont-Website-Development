@@ -41,6 +41,9 @@ export type Audience = "customer" | "staff" | "prospect" | "any";
 
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 const stage = (s: string) => s.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+/** Stripe subscription statuses in the customer's words (unknown values fall back to the plain status). */
+const planStatus = (s: string) => ({ active: "active", past_due: "past due: a payment is needed", canceled: "cancelled", incomplete: "not started yet",
+  incomplete_expired: "not started", unpaid: "unpaid", trialing: "in its trial period", paused: "paused" } as Record<string, string>)[s] ?? stage(s).toLowerCase();
 
 // ───────────── Template data (what call sites pass) ─────────────
 type ProjectBase = { projectName: string; url: string };
@@ -86,7 +89,9 @@ export interface TemplateData {
   /** `kind`: "plan" = maintenance renewal (invoice.payment_failed); "checkout" = a delayed checkout payment failed (CREST-GAP-083). */
   /** "suspension_notice" = the pre-suspension reminder; "suspended" = the Owner suspended hosting (clarifications 1–2). */
   failed_payment: { url: string; kind?: "plan" | "checkout" | "initial_subscription" | "suspension_notice" | "suspended"; suspendAfter?: string };
-  subscription_update: { planName: string; status: string; url: string };
+  /** kind: "agreement_requested" when the website reaches review and the customer must sign and activate before launch;
+   *  "restored" when hosting comes back after a payment; otherwise a Stripe status change (status = Stripe's status). */
+  subscription_update: { planName: string; status: string; url: string; kind?: "agreement_requested" | "restored" };
   support_ticket:
     | { event: "received"; name: string; subject: string; ticketRef: string; hoursNotice: string; url: string }
     | { event: "escalated"; subject: string; ticketRef: string; url: string }
@@ -353,13 +358,28 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
   },
   subscription_update: {
     name: "subscription_update", category: "transactional", audience: "customer",
-    description: "Maintenance plan status changed (from the verified Stripe webhook).",
-    render: (d) => ({
-      subject: `Your ${d.planName} plan: ${stage(d.status).toLowerCase()}`, heading: "Your maintenance plan changed",
-      paragraphs: [`Your ${d.planName} maintenance plan is now ${stage(d.status).toLowerCase()}.`, "Manage your plan and payment method from Billing in your portal."],
+    description: "Maintenance plan: the two steps before launch (agreement, then subscription), a Stripe status change, or hosting restored after payment.",
+    render: (d) => d.kind === "agreement_requested" ? ({
+      subject: "Two steps before your website goes live", heading: "Your website is ready for your review",
+      paragraphs: [`Your website is ready for you to review. Before it goes live, two steps remain, both in your customer portal: sign the maintenance agreement for your ${d.planName} plan, then activate the monthly subscription through Stripe's secure checkout.`,
+        "Your website is published once both are done and Stripe confirms your first payment. Signing the agreement does not charge you."],
+      cta: { label: "Open your project", url: d.url },
+    }) : d.kind === "restored" ? ({
+      subject: "Your website hosting is restored", heading: "Your hosting is back on",
+      paragraphs: [`Thank you: your ${d.planName} maintenance plan is paid up and your website hosting has been restored.`, "Nothing was deleted while hosting was suspended. Manage your plan and payment method from Billing in your portal."],
+      cta: { label: "View billing", url: d.url },
+    }) : ({
+      subject: `Your ${d.planName} plan: ${planStatus(d.status)}`, heading: "Your maintenance plan changed",
+      paragraphs: [`Your ${d.planName} maintenance plan is now ${planStatus(d.status)}.`, "Manage your plan and payment method from Billing in your portal."],
       cta: { label: "View billing", url: d.url },
     }),
-    samples: [{ planName: "Essential", status: "active", url: "https://example.com/portal/billing" }, { planName: "Essential", status: "canceled", url: "https://example.com/portal/billing" }],
+    samples: [
+      { planName: "Essential", status: "due", kind: "agreement_requested", url: "https://example.com/portal/projects/prj_sample" },
+      { planName: "Essential", status: "active", url: "https://example.com/portal/billing" },
+      { planName: "Essential", status: "past_due", url: "https://example.com/portal/billing" },
+      { planName: "Essential", status: "canceled", url: "https://example.com/portal/billing" },
+      { planName: "Essential", status: "active", kind: "restored", url: "https://example.com/portal/billing" },
+    ],
   },
   support_ticket: {
     name: "support_ticket", category: "transactional", audience: "any",
@@ -378,10 +398,10 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       }
     },
     samples: [
-      { event: "received", name: "Jordan Lee", subject: "Contact form not sending", ticketRef: "tkt_sample", hoursNotice: "You can submit a ticket at any time — intake is open 24/7. Our team responds during staffed hours: (staffed hours from Business settings).", url: "https://example.com/portal/support/tkt_sample" },
-      { event: "escalated", subject: "Contact form not sending", ticketRef: "tkt_sample", url: "https://example.com/staff/support/tkt_sample" },
-      { event: "assigned", subject: "Contact form not sending", ticketRef: "tkt_sample", priority: "high", url: "https://example.com/staff/support/tkt_sample" },
-      { event: "sla_breached", subject: "Contact form not sending", ticketRef: "tkt_sample", targetHours: 8, url: "https://example.com/staff/support/tkt_sample" },
+      { event: "received", name: "Jordan Lee", subject: "Contact form not sending", ticketRef: "S-3F9A2C7B", hoursNotice: "You can submit a ticket at any time — intake is open 24/7. Our team responds during staffed hours: (staffed hours from Business settings).", url: "https://example.com/portal/support/tkt_sample" },
+      { event: "escalated", subject: "Contact form not sending", ticketRef: "S-3F9A2C7B", url: "https://example.com/staff/support/tkt_sample" },
+      { event: "assigned", subject: "Contact form not sending", ticketRef: "S-3F9A2C7B", priority: "high", url: "https://example.com/staff/support/tkt_sample" },
+      { event: "sla_breached", subject: "Contact form not sending", ticketRef: "S-3F9A2C7B", targetHours: 8, url: "https://example.com/staff/support/tkt_sample" },
     ],
   },
   support_reply: {

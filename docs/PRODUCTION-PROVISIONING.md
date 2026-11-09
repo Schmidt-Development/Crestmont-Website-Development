@@ -38,18 +38,44 @@ No code, migration, domain or DNS has been applied to production. No payment, em
   erased person being re-imported by automated intake, all of which is off in phase 1). Not a phase 1 blocker; the
   next provisioning run after #148 merges installs it, and re-running is safe.
 
+### Update 2026-11-09 (Founder actions F3 and F5)
+
+- **The "unexpected" secret (provisioning run 42119243249).** The warning fired because the production Worker holds
+  names on its list of secrets setup never installs. Of those names, the Founder's inspection of the Worker
+  (Cloudflare → Workers & Pages → crestmont-platform-production → Settings → Variables and Secrets, 2026-11-09) shows
+  **`STRIPE_SECRET_KEY` and `RESEND_API_KEY`**, alongside `STRIPE_WEBHOOK_SECRET`, `RESEND_WEBHOOK_SECRET` and
+  `STRIPE_PUBLISHABLE_KEY`. No Retell, AI, simulation or preview name is present. These are the Founder-managed payment
+  and email credentials this document always assigned to the Founder "at customer activation", installed ahead of time.
+  They are **legitimate and kept**. They cannot switch anything on early: production refuses every Stripe key and event
+  until the plain variable `PAYMENTS_LIVE_AUTHORIZED = "yes"` exists, and refuses test keys outright (PAY-010);
+  `STRIPE_PUBLISHABLE_KEY` is not read by the application (hosted Checkout). The warning now names what it found and
+  separates these activation secrets (a notice) from phase-1-forbidden ones (still a warning).
+- **Dashboard variables now survive production deploys.** `deploy-production.yml` deployed without `--keep-vars`, which
+  deletes every plain-text variable set in the Cloudflare dashboard (how `STRIPE_PUBLISHABLE_KEY` vanished from staging
+  on 2026-10-31). It now passes `--keep-vars`, and the binding guard snapshots the production Worker's bindings (names
+  and value hashes) before anything changes and verifies them after the deploy; a loss rolls the release back.
+- **"No connected bindings" in the dashboard is expected before the first deploy.** The D1 (`DB` →
+  `crestmont-production`, id `c667f1a9-…`) and R2 (`FILES` → `crestmont-files-production`) bindings are declared in
+  `wrangler.toml [env.production]` and attached by the first `wrangler deploy`; staging uses different resources.
+- **`PRODUCTION_URL` is set** (`https://crestmontwebsitedevelopment.com`, read from the health monitor's own run
+  42552665298). The health monitor and the daily backup open by themselves after the first successful production
+  deploy.
+- **`production-readiness-check.yml`** (manual, read-only, one approval) lists the Worker's secret and binding names,
+  checks D1/R2 against `wrangler.toml`, reports which backup settings exist, and round-trips a sealed test object
+  through the backup destination (no customer data).
+
 ### Production Worker secrets (names only)
 
 | Secret | Phase 1 | Installed by | State |
 |---|---|---|---|
 | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET` | required | provision workflow (from environment secrets) | installed |
 | `EVIDENCE_INGEST_SECRET` | required | provision workflow (generated) | installed |
-| `MFA_ENCRYPTION_KEY` | **required** — the deploy now refuses without it | provision workflow (from `PRODUCTION_MFA_ENCRYPTION_KEY`) | **missing** |
-| `CRM_ERASURE_HMAC_KEY` | recommended | provision workflow (generated, never replaced) | missing |
+| `MFA_ENCRYPTION_KEY` | **required** — the deploy now refuses without it | provision workflow (from `PRODUCTION_MFA_ENCRYPTION_KEY`) | installed (run 42119243249) |
+| `CRM_ERASURE_HMAC_KEY` | recommended | provision workflow (generated, never replaced) | installed (run 42119243249) |
 | `FILE_SCANNER_SECRET` | recommended (closes F-02 on production) | provision workflow, from the `production` environment secret `PRODUCTION_FILE_SCANNER_SECRET` (`openssl rand -hex 32`, saved in the password manager first; the same value goes into the Node 1 scanner's `scanner.env`). Installed once, never generated | not set: `/api/scan/*` answer 503, files stay `pending`, quarantined from share links and never labelled clean. The scanner (`scanner/`, ClamAV) has its own credential, so phase 1 keeps `BUILD_RUNNER_SECRET` forbidden |
 | `FOUNDER_EMAIL` | recommended | Founder (`wrangler secret put`) | not set; launch approvals are recorded on staging, so it does not block production |
-| `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` (+ `EMAIL_FROM` var) | at customer activation | Founder, after the Resend account (BLK-005) | not set |
-| `STRIPE_SECRET_KEY` (live), `STRIPE_WEBHOOK_SECRET` (+ `PAYMENTS_LIVE_AUTHORIZED = "yes"` var) | at customer activation | Founder, separate authorization | not set: production refuses every Stripe event until then |
+| `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` (+ `EMAIL_FROM` var) | at customer activation | Founder, after the Resend account (BLK-005) | present (Founder, reported 2026-11-09) |
+| `STRIPE_SECRET_KEY` (live), `STRIPE_WEBHOOK_SECRET` (+ `PAYMENTS_LIVE_AUTHORIZED = "yes"` var) | at customer activation | Founder, separate authorization | present (Founder, reported 2026-11-09); `PAYMENTS_LIVE_AUTHORIZED` not set, so production refuses every Stripe key and event |
 | `BUILD_*`, `AI_BUILD_AUTOMATION`, `ANTHROPIC_API_KEY`, `RETELL_*`, `RESEARCH_*`, `CRM_IMPORT_SECRET`, `PAYMENT_SIMULATION_ENABLED`, `STAGING_ACCESS_PASSWORD` | **forbidden in phase 1** | — | provisioning warns; the deploy refuses the AI/Retell ones while deferred |
 
 ### Monitoring and backups before launch

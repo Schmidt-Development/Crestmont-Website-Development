@@ -153,15 +153,15 @@ test("[EMAIL-002] real sends use the registry and the Business settings identity
   assert.ok(!body.includes(PENDING.legalName), "the entity exists, so its name is not reported as pending");
 });
 
-test("[EMAIL-002] template preview page: Owner/administrator read-only catalogue of every template; everyone else refused", async () => {
+test("[EMAIL-002] template review page: the Owner's read-only review of every template; everyone else refused", async () => {
   const t = await createTestApp();
-  for (const role of ["owner", "administrator"] as const) {
+  for (const role of ["owner"] as const) {
     const s = await createStaff(t.db, role);
     const c = await t.client().login(s.email, TEST_PASSWORD, s.secret);
     const res = await c.get("/staff/email/templates");
     assert.equal(res.status, 200, role);
     const page = await res.text();
-    assert.match(page, /20 of 20 required workflows have a template/);
+    assert.match(page, /\d+ customer-facing templates and \d+ internal ones/);
     for (const tpl of EMAIL_TEMPLATES) {
       assert.ok(page.includes(`data-template="${tpl}"`), `${role} sees ${tpl}`);
       for (let i = 0; i < defOf(tpl).samples.length; i++) assert.ok(page.includes(`/staff/email/templates/${tpl}/html?sample=${i}`), `${tpl} sample ${i}`);
@@ -177,7 +177,7 @@ test("[EMAIL-002] template preview page: Owner/administrator read-only catalogue
     assert.equal((await c.get("/staff/email/templates/nope/html")).status, 404);
     assert.equal((await c.post("/staff/email/templates", {})).status, 404, "no write route");
   }
-  for (const role of ["sales", "developer", "project_manager", "support"] as const) {
+  for (const role of ["administrator", "sales", "developer", "project_manager", "support"] as const) {
     const s = await createStaff(t.db, role);
     const c = await t.client().login(s.email, TEST_PASSWORD, s.secret);
     assert.equal((await c.get("/staff/email/templates")).status, 403, role);

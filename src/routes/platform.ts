@@ -32,6 +32,7 @@ import { receptionistStatus, type ReceptionistStatus } from "../services/recepti
 import { describeAudit, resolveAuditNames, ACTION_GROUPS, FAILURE_SQL, type DescribedEvent } from "../services/audit-describe.ts";
 import { syncPrompt, latestPromptSync, type PromptSyncResult } from "../services/voice-prompt-sync.ts";
 import { readBody } from "./api.ts";
+import * as emailReview from "./email-review.ts";
 import { ValidationError } from "../lib/validate.ts";
 import { newId, nowIso, likeContains, likePrefix } from "../lib/db.ts";
 
@@ -143,13 +144,6 @@ function actorOf(ctx: AppContext) { return { userId: ctx.user!.id, isOwner: isOw
 // ───────────── 2. Email operations (EMAIL-002, EMAIL-003) ─────────────
 const EMAIL_STATUSES = ["queued", "sent", "delivered", "bounced", "failed", "suppressed"] as const;
 
-/** Renders a template's Nth preview sample with the current Business settings identity (pending text where unset). */
-function previewMail(ctx: AppContext, t: EmailTemplate, sample: number) {
-  const def = TEMPLATES[t] as TemplateDef<EmailTemplate>;
-  const data = def.samples[sample];
-  if (data === undefined) return null;
-  return renderTemplate(t, data as never, identityFrom(ctx.settings), def.category === "marketing" ? `${ctx.baseUrl}/unsubscribe/preview` : undefined);
-}
 
 // ───────────── 7. Backups ─────────────
 const BACKUP_METHODS = ["d1_export", "d1_time_travel_bookmark", "r2_versioning", "r2_copy", "manual_other"] as const;
@@ -594,7 +588,7 @@ ${s.disabled_at ? table(items, [
     const health = (await integ.refreshIntegrationHealth({ db: ctx.db, env: ctx.env, storage: ctx.storage })).find((h) => h.integration === "resend" && h.environment === ctx.env.ENVIRONMENT);
     const c = (s: string) => counts.find((x) => x.status === s)?.n ?? 0;
     const exportQs = new URLSearchParams(ctx.url.search); exportQs.delete("page");
-    const body = html`${pageHead("Email operations", html`${linkButton("Export CSV", `/staff/email/export.csv${exportQs.toString() ? `?${exportQs}` : ""}`, "ghost", "sm")}${linkButton("Template catalogue", "/staff/email/templates", "secondary", "sm")}`, "Platform")}
+    const body = html`${pageHead("Email operations", html`${linkButton("Export CSV", `/staff/email/export.csv${exportQs.toString() ? `?${exportQs}` : ""}`, "ghost", "sm")}${isOwner(ctx.actor!) ? linkButton("Template review", "/staff/email/templates", "secondary", "sm") : ""}`, "Platform")}
 ${await suppressionsCard(ctx)}
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Delivery provider &amp; domain authentication</h2>
 <p>${badge(health?.status ?? "not_configured")} <span class="muted">Adapter in use: <strong>${ctx.email.kind}</strong></span></p><p class="muted">${health?.detail ?? ""}</p>
@@ -624,33 +618,8 @@ ${table(rows.slice(0, limit), [
 ${pagination(ctx, page, rows.length > limit)}`;
     return staffPage(ctx, "Email operations", body);
   });
-  r.get("/staff/email/templates", (ctx) => {
-    requireStaff(ctx, "settings.operational");
-    const required = new Set<string>(REQUIRED_WORKFLOWS);
-    const covered = REQUIRED_WORKFLOWS.filter((w) => w in TEMPLATES).length;
-    const body = html`${pageHead("Email template catalogue", linkButton("Delivery log", "/staff/email", "secondary", "sm"), "Email operations")}
-${alert("warn", html`<strong>Preview only — copy awaiting Founder review.</strong> Each template is rendered with labelled sample data through the same registry and layout the platform uses for real mail. Nothing here is sent. The footer shows the business identity recorded in <a href="/staff/settings">Business settings</a>; anything not yet recorded shows as pending.`)}
-<p class="muted" data-testid="template-coverage">${covered} of ${REQUIRED_WORKFLOWS.length} required workflows have a template; ${EMAIL_TEMPLATES.length} templates in total. HTML previews download as files (the page security policy does not allow embedding mail HTML).</p>
-${EMAIL_TEMPLATES.map((t) => {
-      const def = TEMPLATES[t] as TemplateDef<EmailTemplate>;
-      return html`<section class="card stack" id="tpl-${t}" data-template="${t}"><h2 class="card__title">${label(t)} ${required.has(t) ? badge("active", "Required workflow") : badge("draft", "Additional")} ${badge(def.category === "transactional" ? "info" : "warn", def.category === "transactional" ? "Transactional — no unsubscribe link" : "Marketing — unsubscribe link")}</h2>
-<p class="muted">${def.description} Audience: ${label(def.audience)}.</p>
-${def.samples.map((_, i) => {
-        const m = previewMail(ctx, t, i)!;
-        return html`<details${i === 0 ? html` open` : ""}><summary><strong>Subject:</strong> ${m.subject}</summary><pre class="code-block">${m.text}</pre>
-<a class="btn btn--ghost btn--sm" href="/staff/email/templates/${t}/html?sample=${i}">Download HTML preview</a></details>`;
-      })}</section>`;
-    })}`;
-    return staffPage(ctx, "Email templates", body);
-  });
-  r.get("/staff/email/templates/:name/html", (ctx, p) => {
-    requireStaff(ctx, "settings.operational");
-    if (!(EMAIL_TEMPLATES as readonly string[]).includes(p.name)) throw new HttpError(404, "Unknown template");
-    const n = Number(ctx.url.searchParams.get("sample") ?? "0");
-    const m = Number.isInteger(n) && n >= 0 ? previewMail(ctx, p.name as EmailTemplate, n) : null;
-    if (!m) throw new HttpError(404, "Unknown sample");
-    return download(ctx, m.html, `preview-${p.name}-${n}.html`, "text/html; charset=utf-8");
-  });
+  // Owner-only Email Template Review (F2): src/routes/email-review.ts.
+  emailReview.register(r, staffPage);
   r.get("/staff/email/:id", async (ctx, p) => {
     requireStaff(ctx, "settings.operational");
     const d = await ctx.db.prepare(`SELECT d.*, m.provider, m.subject, m.text_body FROM email_deliveries d LEFT JOIN email_messages m ON m.delivery_id = d.id WHERE d.id = ?`).bind(p.id)
