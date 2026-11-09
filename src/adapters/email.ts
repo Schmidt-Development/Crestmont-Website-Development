@@ -63,6 +63,10 @@ const RESERVED = /(\.(test|invalid|example|localhost)|@example\.(com|net|org)|\.
 export const DEFAULT_STAGING_ALLOWLIST = "@crestmontwebsitedevelopment.com";
 /** Same default as src/services/internal-notify.ts (kept here so the adapter does not depend on services). */
 const INTERNAL_MAILBOX = "crestmontwebsitedevelopment@gmail.com";
+/** Resend's own test inboxes (https://resend.com/docs/dashboard/emails/send-test-emails): they accept mail and answer with
+ *  a delivered, bounced or complained event without reaching a person or harming the domain's reputation. Every
+ *  environment may mail them, so delivery can be certified end to end (src/services/email-certification.ts). */
+export const RESEND_TEST_INBOX = /^(delivered|bounced|complained)(\+[a-z0-9._-]{1,80})?@resend\.dev$/;
 export function recipientPolicy(env: { ENVIRONMENT: string; EMAIL_RECIPIENT_ALLOWLIST?: string; INTERNAL_NOTIFY_EMAIL?: string }): (to: string) => string | null {
   // The internal operations mailbox (Founder directive 2026-11-08) is Crestmont's own inbox, not a customer: staging
   // may always mail it, so internal notifications can be verified end to end before production.
@@ -71,6 +75,7 @@ export function recipientPolicy(env: { ENVIRONMENT: string; EMAIL_RECIPIENT_ALLO
   return (toRaw: string) => {
     const to = toRaw.trim().toLowerCase();
     if (RESERVED.test(to)) return "Not sent: reserved test address that cannot receive mail.";
+    if (RESEND_TEST_INBOX.test(to)) return null;
     if (env.ENVIRONMENT !== "production" && !entries.some((e) => (e.startsWith("@") ? to.endsWith(e) : to === e)))
       return "Not sent: staging only mails addresses on EMAIL_RECIPIENT_ALLOWLIST (staging holds test data).";
     return null;

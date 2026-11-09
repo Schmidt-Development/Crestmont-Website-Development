@@ -27,6 +27,7 @@ import * as ra from "../services/readiness-admin.ts";
 import * as dep from "../services/deployments.ts";
 import * as ret from "../services/retention.ts";
 import { issueFounderOwnerInvitation, deliveryStatus, OwnerBootstrapError } from "../services/owner-bootstrap.ts";
+import { sendCertificationBatch, CERT_RUN_ID } from "../services/email-certification.ts";
 
 // ───────────── Signed automation ─────────────
 
@@ -261,6 +262,19 @@ export function register(r: Router): void {
     if (typeof email !== "string") return jsonResponse(ctx, 422, { error: "Body must be a JSON object with the Founder's email." });
     try { return jsonResponse(ctx, 200, await issueFounderOwnerInvitation(ctx, email)); }
     catch (e) { if (e instanceof OwnerBootstrapError) return jsonResponse(ctx, e.status, { error: e.message }); throw e; }
+  });
+  // Email delivery certification (src/services/email-certification.ts): signed automation only (email-certification.yml).
+  r.post("/api/ops/email-certification", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    await verifySigned(ctx, raw);
+    let body: unknown;
+    try { body = JSON.parse(raw); } catch { return jsonResponse(ctx, 400, { error: "Malformed JSON" }); }
+    const runId = body && typeof body === "object" && !Array.isArray(body) ? (body as { runId?: unknown }).runId : undefined;
+    if (typeof runId !== "string" || !CERT_RUN_ID.test(runId)) return jsonResponse(ctx, 422, { error: "runId must be 4-40 lowercase letters, digits or hyphens" });
+    if (ctx.email.kind !== "resend") return jsonResponse(ctx, 409, { error: "This environment has no Resend adapter (RESEND_API_KEY not set): nothing can be delivered." });
+    const sent = await sendCertificationBatch(ctx, runId);
+    await audit(ctx.db, { actorKind: "system", action: "email.certification_sent", subjectType: "email", details: { runId, count: sent.length } });
+    return jsonResponse(ctx, 200, { runId, sent });
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.
