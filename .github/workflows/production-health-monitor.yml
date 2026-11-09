@@ -79,17 +79,7 @@ jobs:
             app=$(curl -s -o /tmp/app.json -w '%{http_code}' --max-time 20 "$BASE/api/health" || echo 000)
             feeds=$(curl -s -o /tmp/feeds.json -w '%{http_code}' --max-time 20 "$BASE/api/readiness/health" || echo 000)
             [ "$app" = "200" ] || fail="$fail /api/health=$app"
-            # The required "ci" feed is recorded by the readiness system named by READINESS_URL (staging): CI and the deploy
-            # workflows post their evidence there, never to production, so on production it is always "unavailable" and
-            # would make every run an alert on a healthy service (found after the first production deploy, 2026-11-09).
-            # Every other feed still alerts: a required feed that is not healthy (the scheduler: cron jobs that stopped) or
-            # any failing feed (the MFA key, malware scanning, recovery drills).
-            if [ "$feeds" != "200" ]; then
-              bad=$(node -e 'let j;try{j=JSON.parse(require("fs").readFileSync("/tmp/feeds.json","utf8"))}catch{console.log("unreadable");process.exit(0)}
-                const b=(j.feeds||[]).filter(f=>f.source!=="ci"&&((f.required&&f.status!=="healthy")||f.status==="failing")).map(f=>f.source+"="+f.status);
-                console.log(Array.isArray(j.feeds)?b.join(","):"unreadable")' 2>/dev/null || echo unreadable)
-              [ -z "$bad" ] || fail="$fail /api/readiness/health=$feeds ($bad)"
-            fi
+            [ "$feeds" = "200" ] || fail="$fail /api/readiness/health=$feeds"
             [ -z "$fail" ] && break
             sleep 60
           done
