@@ -24,7 +24,13 @@ test("[INFRA-006] the destination is configured only by the four BACKUP_S3_* val
   const base = { BACKUP_S3_ENDPOINT: "https://s3.us-west-004.backblazeb2.com/", BACKUP_S3_BUCKET: "crestmont-backups", BACKUP_S3_ACCESS_KEY_ID: "id", BACKUP_S3_SECRET_ACCESS_KEY: "secret" };
   const ok = s3Config(base).config!;
   assert.equal(ok.endpoint, "https://s3.us-west-004.backblazeb2.com");
-  assert.equal(ok.region, "us-east-1");
+  // B2 scopes Signature V4 to the endpoint's region: a B2 endpoint signs for its own region (us-west-004), not
+  // us-east-1, which B2 would refuse. An explicit BACKUP_S3_REGION always wins; unknown stores keep us-east-1.
+  assert.equal(ok.region, "us-west-004");
+  assert.equal(s3Config({ ...base, BACKUP_S3_ENDPOINT: "https://s3.eu-central-003.backblazeb2.com" }).config!.region, "eu-central-003");
+  assert.equal(s3Config({ ...base, BACKUP_S3_ENDPOINT: "https://s3.us-east-2.amazonaws.com" }).config!.region, "us-east-2");
+  assert.equal(s3Config({ ...base, BACKUP_S3_ENDPOINT: "https://s3.eu-west-1.wasabisys.com" }).config!.region, "eu-west-1");
+  assert.equal(s3Config({ ...base, BACKUP_S3_ENDPOINT: "https://minio.example.com" }).config!.region, "us-east-1");
   assert.equal(s3Config({ ...base, BACKUP_S3_REGION: "auto" }).config!.region, "auto");
   assert.match(s3Config({ ...base, BACKUP_S3_ENDPOINT: "http://insecure.example" }).problem!, /https/);
   assert.match(s3Config({ ...base, BACKUP_S3_ENDPOINT: "https://host/path" }).problem!, /bare https origin/);

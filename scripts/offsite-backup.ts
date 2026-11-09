@@ -11,7 +11,7 @@
 //
 // Destination, one of:
 //   · off-Cloudflare (preferred; GitHub environment secrets): BACKUP_S3_ENDPOINT (https://…), BACKUP_S3_BUCKET,
-//     BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY; optional BACKUP_S3_REGION (default us-east-1).
+//     BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY; optional BACKUP_S3_REGION (default: the region in a B2/AWS/Wasabi endpoint, else us-east-1).
 //   · an R2 bucket in the SAME Cloudflare account (BACKUP_R2_BUCKET, written with wrangler and the Cloudflare token the
 //     job already holds — no new credential). It protects against losing or corrupting the database, NOT against losing
 //     the Cloudflare account, so it is never described as off-Cloudflare (storeKind()).
@@ -146,6 +146,16 @@ function objectKey(key: string) {
   if (!/^[A-Za-z0-9._\/-]{1,512}$/.test(key) || key.includes("..")) throw new Error("object key may contain only letters, digits, . _ - /");
 }
 
+/**
+ * The signing region when BACKUP_S3_REGION is not set. Backblaze B2, AWS S3 and Wasabi put the region in the endpoint
+ * (https://s3.us-west-004.backblazeb2.com), and B2 refuses a Signature V4 scoped to any other region; the old default,
+ * us-east-1, would have failed every upload to a B2 bucket outside that region. Other stores keep us-east-1.
+ */
+export function regionFromEndpoint(endpoint: string): string {
+  const m = /^https:\/\/s3[.-]([a-z0-9-]+)\.(backblazeb2\.com|amazonaws\.com|wasabisys\.com)(:\d+)?$/i.exec(endpoint.trim().replace(/\/+$/, ""));
+  return m ? m[1].toLowerCase() : "us-east-1";
+}
+
 export interface S3Config { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string; region: string }
 export const S3_VARS = ["BACKUP_S3_ENDPOINT", "BACKUP_S3_BUCKET", "BACKUP_S3_ACCESS_KEY_ID", "BACKUP_S3_SECRET_ACCESS_KEY"] as const;
 
@@ -156,7 +166,7 @@ export function s3Config(env: Record<string, string | undefined>): { config: S3C
   if (!/^https:\/\/[A-Za-z0-9.-]+(:\d+)?$/.test(endpoint)) return { config: null, missing: [], problem: "BACKUP_S3_ENDPOINT must be a bare https origin, e.g. https://s3.us-west-004.backblazeb2.com" };
   const bucket = env.BACKUP_S3_BUCKET!.trim();
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) return { config: null, missing: [], problem: "BACKUP_S3_BUCKET is not a valid bucket name" };
-  return { config: { endpoint, bucket, accessKeyId: env.BACKUP_S3_ACCESS_KEY_ID!.trim(), secretAccessKey: env.BACKUP_S3_SECRET_ACCESS_KEY!.trim(), region: env.BACKUP_S3_REGION?.trim() || "us-east-1" }, missing: [], problem: null };
+  return { config: { endpoint, bucket, accessKeyId: env.BACKUP_S3_ACCESS_KEY_ID!.trim(), secretAccessKey: env.BACKUP_S3_SECRET_ACCESS_KEY!.trim(), region: env.BACKUP_S3_REGION?.trim() || regionFromEndpoint(endpoint) }, missing: [], problem: null };
 }
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
