@@ -56,9 +56,6 @@ type Content = Awaited<ReturnType<typeof cms.loadContent>>;
 async function page(ctx: AppContext, seoKey: string, keys: string[], render: (c: Content) => SafeHtml | Promise<SafeHtml>, status = 200, meta?: (c: Content) => { title: string; description: string }): Promise<Response> {
   const c = await cms.loadContent(ctx, [`seo.${seoKey}`, ...keys]);
   effective = await effectivePrices(ctx.db, ctx.now());
-  // CREST-GAP-010: in production, while online checkout is closed (draft policies, unnamed entity or live payments not
-  // authorised — the same condition that disables the payments adapter), package CTAs lead to a quote request instead.
-  checkoutClosed = ctx.env.ENVIRONMENT === "production" && !ctx.payments.configured;
   const seo = meta ? meta(c) : c.get(`seo.${seoKey}`);
   const body = await render(c);
   const banner = c.previewing
@@ -87,9 +84,10 @@ const itemCards = (text: string) => html`<div class="experience" data-reveal-gro
 /** Capability cards (three columns). */
 const ledger = (text: string) => html`<ul class="ledger" data-reveal-group>${parseItems(text).map((i) => html`<li data-reveal><h3>${i.title}</h3><p>${i.body}</p></li>`)}</ul>`;
 
-let checkoutClosed = false;
-/** Where a package's "Choose" call to action leads (CREST-GAP-010). */
-const packageCta = (id: string) => (checkoutClosed ? `/quote?package=${id}` : `/checkout/${id}`);
+/** Where a package's "Choose" call to action leads: always the standard-package purchase flow (intake → scope, price and
+ *  agreement → Stripe Checkout), never the custom quote form (Founder, 2026-11-09). While online payment is closed in
+ *  production (CREST-GAP-010), the review step says so; the customer's intake and package choice are kept. */
+const packageCta = (id: string) => `/checkout/${id}`;
 
 function packageCards(c: Content, opts: { compact?: boolean } = {}): SafeHtml {
   const pr = c.get("pricing.presentation");
@@ -713,6 +711,9 @@ ${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li
   // ── lead forms ──
   r.get("/quote", (ctx) => {
     const pkg = ctx.url.searchParams.get("package") ?? "";
+    // Standard packages are bought through intake and checkout, not quoted. Older links that sent a package choice here
+    // continue to the package's purchase flow. (?package=premium stays: "Discuss a larger scope" is a custom request.)
+    if (pkg === "starter" || pkg === "business") return redirect(ctx, `/checkout/${pkg}`);
     const svc = ctx.url.searchParams.get("service") ?? "";
     return renderQuote(ctx, { interest: INTERESTS.some((i) => i.value === pkg) ? pkg : "custom", service: serviceBySlug(svc) && !(svc === "ai-receptionist" && !rcOpen()) ? svc : "" }, svc === "ai-receptionist" && !rcOpen() ? { service: AI_RECEPTIONIST_COMING_SOON } : {}, 200);
   });

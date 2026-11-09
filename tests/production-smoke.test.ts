@@ -15,7 +15,7 @@ test("[LAUNCH-003] production smoke: every anonymous check passes on pre-launch 
   const failed = results.filter((r) => r.outcome === "failed");
   assert.deepEqual(failed, [], JSON.stringify(failed, null, 2));
   assert.ok(results.length >= 30, `${results.length} checks`);
-  for (const area of ["health", "public", "prelaunch", "access", "integrations", "payments", "ai", "security"]) assert.ok(results.some((r) => r.area === area), area);
+  for (const area of ["health", "public", "purchase", "prelaunch", "access", "integrations", "payments", "ai", "security"]) assert.ok(results.some((r) => r.area === area), area);
   for (const table of ["leads", "users", "stripe_events"]) {
     const n = (await t.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>())!.n;
     assert.equal(n, 0, `${table} untouched`);

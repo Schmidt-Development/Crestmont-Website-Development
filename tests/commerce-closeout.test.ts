@@ -107,7 +107,7 @@ test("[PAY-010] adapters compare every key and object with the expected mode (FI
   assert.throws(() => r.assertMode({ livemode: true }), LivePaymentsNotAuthorized);
 });
 
-test("[PAY-010] production with a test key shows payments as not configured; production checkout CTAs route to /quote and POST /checkout is refused (CREST-GAP-010)", async () => {
+test("[PAY-010] production with a test key shows payments as not configured; package CTAs still lead to intake and checkout (never the custom quote form) and POST /checkout is refused (CREST-GAP-010)", async () => {
   const t = await createTestApp({ ENVIRONMENT: "production", PUBLIC_LAUNCH: "open", STRIPE_SECRET_KEY: "sk_test_fixture", STRIPE_WEBHOOK_SECRET: WHSEC });
   const ctx = await buildContext(new Request("http://crestmont.test/pricing"), t.env);
   assert.equal(ctx.payments.configured, false, "production + test key → checkout not configured");
@@ -118,9 +118,18 @@ test("[PAY-010] production with a test key shows payments as not configured; pro
   assert.match((actx.payments as unknown as { reason: string }).reason, /drafts pending attorney review/);
   for (const path of ["/", "/pricing", "/pricing/compare"]) {
     const page = await (await t.client().get(path)).text();
-    assert.doesNotMatch(page, /href="\/checkout\//, `${path}: no checkout links in production while closed`);
-    assert.match(page, /href="\/quote\?package=(starter|business|premium)"/, `${path}: package CTAs request a quote`);
+    // Founder, 2026-11-09: standard packages are bought through intake → scope, price and agreement → Stripe Checkout,
+    // even while online payment is closed (the review step says so); they are never sent to the custom quote form.
+    assert.doesNotMatch(page, /href="\/quote\?package=(starter|business)"/, `${path}: no standard package CTA requests a quote`);
+    for (const id of path === "/pricing/compare" ? [] : ["starter", "business", "premium"]) assert.match(page, new RegExp(`href="/checkout/${id}"`), `${path}: ${id} CTA leads to its purchase flow`);
   }
+  // Older links that carried a standard package to the quote form continue to that package's purchase flow.
+  for (const id of ["starter", "business"]) {
+    const r = await t.client().get(`/quote?package=${id}`);
+    assert.equal(r.status, 303);
+    assert.equal(r.headers.get("location"), `/checkout/${id}`);
+  }
+  assert.equal((await t.client().get("/quote?package=custom")).status, 200, "custom projects keep the quote form");
   // Staging/test mode unchanged.
   const dev = await createTestApp({ STRIPE_SECRET_KEY: "sk_test_fixture" });
   assert.match(await (await dev.client().get("/pricing")).text(), /href="\/checkout\/starter"/);
@@ -129,6 +138,12 @@ test("[PAY-010] production with a test key shows payments as not configured; pro
   const c = t.client();
   await c.login(cu.email);
   await completeIntake(c, "starter"); // intake before payment (Founder requirement)
+  const review = await (await c.get("/checkout/starter/review")).text();
+  assert.match(review, /data-testid="checkout-price">\$999/, "the review shows the exact package price");
+  assert.match(review, /data-testid="checkout-payment-closed"/);
+  assert.match(review, /Starter package choice are saved/);
+  const closedCard = review.slice(review.indexOf('data-testid="checkout-payment-closed"'), review.indexOf("</section>", review.indexOf('data-testid="checkout-payment-closed"')));
+  assert.doesNotMatch(closedCard, /\/quote/, "a standard-package customer is not sent to the custom quote form");
   const res = await c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
   assert.equal(res.status, 409);
   assert.match(await res.text(), /not configured/);
