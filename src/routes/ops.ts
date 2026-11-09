@@ -26,6 +26,7 @@ import { audit } from "../services/security.ts";
 import * as ra from "../services/readiness-admin.ts";
 import * as dep from "../services/deployments.ts";
 import * as ret from "../services/retention.ts";
+import { issueFounderOwnerInvitation, deliveryStatus, OwnerBootstrapError } from "../services/owner-bootstrap.ts";
 
 // ───────────── Signed automation ─────────────
 
@@ -247,6 +248,26 @@ export function register(r: Router): void {
     const raw = await readBody(ctx.req);
     await verifySigned(ctx, raw);
     try { return jsonResponse(ctx, 200, await dep.recordDeployment(ctx, raw)); } catch (e) { return apiError(ctx, e); }
+  });
+
+  // First production Owner (src/services/owner-bootstrap.ts): signed automation only (production-owner-invitation.yml,
+  // after the Founder approves the production environment). The invitation link travels only in the email.
+  r.post("/api/ops/owner-invitation", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    await verifySigned(ctx, raw);
+    let body: unknown;
+    try { body = JSON.parse(raw); } catch { return jsonResponse(ctx, 400, { error: "Malformed JSON" }); }
+    const email = body && typeof body === "object" && !Array.isArray(body) ? (body as { email?: unknown }).email : undefined;
+    if (typeof email !== "string") return jsonResponse(ctx, 422, { error: "Body must be a JSON object with the Founder's email." });
+    try { return jsonResponse(ctx, 200, await issueFounderOwnerInvitation(ctx, email)); }
+    catch (e) { if (e instanceof OwnerBootstrapError) return jsonResponse(ctx, e.status, { error: e.message }); throw e; }
+  });
+  // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
+  // address, subject or body.
+  r.get("/api/ops/email-deliveries/:id", async (ctx, p) => {
+    await verifySigned(ctx, signedGetCanonical(ctx.url));
+    const d = await deliveryStatus(ctx, p.id);
+    return d ? jsonResponse(ctx, 200, d) : jsonResponse(ctx, 404, { error: "No such delivery" });
   });
 
   r.post("/api/readiness/release-candidates", async (ctx) => {

@@ -109,6 +109,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/webhooks/resend": hook("svix-signature"),
   "POST /api/readiness/deployments": signed("x-crestmont-signature"),
   "POST /api/readiness/release-candidates": signed("x-crestmont-signature"),
+  "POST /api/ops/owner-invitation": signed("x-crestmont-signature"),
+  "GET /api/ops/email-deliveries/:id": { ...signed("x-crestmont-signature"), params: { id: "emailDelivery" } },
   "GET /api/readiness/release-authorization": signed("x-crestmont-signature", { staffRead: true }),
   // AI Builds runner API (HMAC-signed with BUILD_RUNNER_SECRET; src/routes/builds.ts)
   "POST /api/builds/runner/claim": signed("x-crestmont-runner-signature"),
@@ -514,6 +516,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/employees/:id/offboarding": staff(rolesWith("employee.manage"), P("staffUser"), act("offboarding.resolved")),
   "GET /staff/email": staff(ops),
   "GET /staff/email/export.csv": staff(ops, undefined, act("email.log_exported")),
+  "GET /staff/checkout-preview": staff(OWNER),
+  "GET /staff/checkout-preview/:packageId/intake": staff(OWNER, { packageId: "package" }),
+  "GET /staff/checkout-preview/:packageId/review": staff(OWNER, { packageId: "package" }),
   "GET /staff/email/templates": staff(OWNER),
   "GET /staff/email/templates/:name/html": staff(OWNER, { name: "emailTemplate" }),
   "GET /staff/email/templates/:name/view": staff(OWNER, { name: "emailTemplate" }),

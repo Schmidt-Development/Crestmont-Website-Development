@@ -169,3 +169,26 @@ jobs:
               echo "::warning title=Zone not readable::the Cloudflare token could not list zones ($(echo "$verdict" | cut -d'|' -f2-)); the DNS answers above are the only evidence."
               dig +short NS "$host" @1.1.1.1 | grep -qi cloudflare || { echo "::error title=DNS::$host does not use Cloudflare nameservers"; exit 1; } ;;
           esac
+
+      - name: Accounts and email delivery on production (counts only, read-only)
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # Founder report (2026-11-09): /password/forgot said "Check your email" and nothing arrived. The page answers the same
+          # whether or not an account exists (no account enumeration), so the question is answered here, from the database:
+          # how many accounts and Owners production has, and what the mailer recorded. SELECTs only; no address, name, token
+          # or message body is printed (error texts are shown with any address redacted).
+          q() { $WRANGLER d1 execute crestmont-production --remote --env production --json --command "$1" 2>/dev/null; }
+          {
+            echo "### Accounts and email on production (counts only)"
+            echo '```'
+            q "SELECT (SELECT COUNT(*) FROM users) AS users, (SELECT COUNT(*) FROM users WHERE disabled_at IS NULL) AS active_users, (SELECT COUNT(DISTINCT user_id) FROM memberships WHERE role_id = 'owner') AS owners, (SELECT COUNT(DISTINCT user_id) FROM memberships WHERE role_id NOT LIKE 'customer_%') AS staff, (SELECT COUNT(*) FROM invitations WHERE accepted_at IS NULL AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')) AS open_invitations, (SELECT COUNT(*) FROM auth_tokens WHERE purpose = 'password_reset') AS reset_tokens, (SELECT COUNT(*) FROM security_events WHERE kind = 'password_reset_requested') AS reset_requests_for_existing_accounts, (SELECT COUNT(*) FROM email_suppressions WHERE removed_at IS NULL) AS suppressions" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s)[0].results[0];for(const[k,v]of Object.entries(r))console.log(k.padEnd(38)+v)}catch{console.log("could not read the account counts")}})'
+            echo
+            echo "email deliveries by template and status:"
+            q "SELECT template, status, COUNT(*) AS n, MAX(created_at) AS latest, MAX(substr(COALESCE(last_error,''),1,160)) AS last_error FROM email_deliveries GROUP BY template, status ORDER BY latest DESC LIMIT 40" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s)[0].results;if(!r.length)console.log("  (none: the mailer has not recorded any email on production)");for(const x of r)console.log(`  ${x.template.padEnd(28)} ${String(x.status).padEnd(10)} ${String(x.n).padStart(4)}  latest ${x.latest}${x.last_error?"  error: "+x.last_error.replace(/[^\s@<>]+@[^\s@<>]+/g,"<address>"):""}`)}catch{console.log("could not read email_deliveries")}})'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
