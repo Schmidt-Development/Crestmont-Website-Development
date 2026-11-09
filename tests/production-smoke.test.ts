@@ -7,7 +7,7 @@ import { createTestApp } from "./support/app.ts";
 import { handle } from "../src/app/app.ts";
 import { httpSmoke } from "../scripts/production-smoke.ts";
 
-const PROD = { ENVIRONMENT: "production", APP_URL: "https://crestmont.test" };
+const PROD = { ENVIRONMENT: "production" as const, APP_URL: "https://crestmont.test" };
 
 test("[LAUNCH-003] production smoke: every anonymous check passes on pre-launch production and nothing is recorded", async () => {
   const t = await createTestApp(PROD);
