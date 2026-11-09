@@ -663,3 +663,15 @@ test("[CRM-005] the CRM staging harness never reuses a fictional number staging 
   assert.match(src, /every fictional 555-01xx number \(\$\{PHONE_POOL\}\) is already used/,
     "and the failure must say exactly what to clear");
 });
+
+test("[INFRA-006] no script runs a whole-database foreign_key_check against live staging (only the restore drill, on a scratch copy)", () => {
+  // Deploy 42557412273: the CRM E2E's bare `PRAGMA foreign_key_check` on the live staging D1 read ~10.5 M rows and its
+  // own imports were refused one second later ("D1 DB is overloaded"). Table-scoped checks are cheap; the whole-database
+  // check belongs to staging-restore-drill.yml, which runs it on a throw-away restore.
+  const bare = /PRAGMA foreign_key_check(?!\s*\()/;
+  for (const f of readdirSync("scripts").filter((x) => x.endsWith(".ts"))) {
+    if (f === "restore-drill.ts" || f === "restore-verify.ts") continue;
+    assert.doesNotMatch(readFileSync(`scripts/${f}`, "utf8").replace(/^\s*\/\/.*$/gm, ""), bare, `scripts/${f}`);
+  }
+  assert.match(readFileSync("scripts/crm-staging-e2e.ts", "utf8"), /PRAGMA foreign_key_check\(\$\{t\}\)/);
+});
