@@ -20,7 +20,7 @@ afterEach(() => { configureAiBuildGateFromEnv({ ENVIRONMENT: "development" }); }
 const WHSEC = "whsec_phase1";
 const MFA_KEY = Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 37 + 11) % 256)).toString("base64");
 /** Production as committed: AI generation off, live payments authorised (fixture key; FakePayments, no network). */
-const PRODUCTION: Partial<Env> = { ENVIRONMENT: "production", AI_BUILD_AUTOMATION: "off", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_SECRET_KEY: "sk_live_fixture", PAYMENTS_LIVE_AUTHORIZED: "yes", MFA_ENCRYPTION_KEY: MFA_KEY };
+const PRODUCTION: Partial<Env> = { ENVIRONMENT: "production", PUBLIC_LAUNCH: "open", AI_BUILD_AUTOMATION: "off", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_SECRET_KEY: "sk_live_fixture", PAYMENTS_LIVE_AUTHORIZED: "yes", MFA_ENCRYPTION_KEY: MFA_KEY };
 type App = Awaited<ReturnType<typeof createTestApp>>;
 const prodApp = (extra: Partial<Env> = {}) => createTestApp({ ...PRODUCTION, overrides: { storage: new MemoryStorage(), payments: new FakePayments() }, ...extra });
 

@@ -18,6 +18,7 @@ import { can, customerAdminNeedsMfa, STAFF_ROLES, type Permission } from "../dom
 import { recordAppError } from "../services/monitoring.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { previewGate } from "./preview-gate.ts";
+import { prelaunchGate } from "./prelaunch.ts";
 import { metricWeight, recordRequestMetric } from "../services/env-metrics.ts";
 import { STEP_UP_MAX_AGE_MINUTES, stepUpAction, stepUpReturnPath } from "./step-up.ts";
 
@@ -182,6 +183,9 @@ export async function handle(req: Request, env: Env, exec?: ExecLike): Promise<R
   if (url.pathname.startsWith("/assets/") && env.ASSETS) return env.ASSETS.fetch(req);
   const gated = await previewGate(req, env);
   if (gated) return gated;
+  // Production before the public launch: customer sign-up, enquiries and checkout are closed (src/app/prelaunch.ts).
+  const notOpen = prelaunchGate(req, env);
+  if (notOpen) return withHeaders(notOpen, { "strict-transport-security": hstsValue(env) });
   // READY-006: per-environment hourly error-rate / duration buckets (src/services/env-metrics.ts).
   // One UPSERT per request, after the response on Cloudflare (waitUntil); no path, id or user is stored.
   const started = Date.now();

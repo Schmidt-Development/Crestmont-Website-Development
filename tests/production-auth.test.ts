@@ -19,7 +19,8 @@ const TEST_MFA_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toS
 
 async function productionApp() {
   // PREVIEW_GATE and STAGING_ACCESS_PASSWORD are set on purpose: production must ignore them.
-  return createTestApp({ ENVIRONMENT: "production", APP_URL: "http://crestmont.test", PREVIEW_GATE: "required", STAGING_ACCESS_PASSWORD: "staging-preview-pw",
+  // Production after the public launch (PUBLIC_LAUNCH open); the closed state is tests/prelaunch.test.ts.
+  return createTestApp({ ENVIRONMENT: "production", PUBLIC_LAUNCH: "open", APP_URL: "http://crestmont.test", PREVIEW_GATE: "required", STAGING_ACCESS_PASSWORD: "staging-preview-pw",
     TURNSTILE_SECRET: "test-turnstile-secret", MFA_ENCRYPTION_KEY: TEST_MFA_KEY, overrides: { fetch: noBreach } });
 }
 

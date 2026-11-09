@@ -23,6 +23,8 @@ export interface Env {
   TURNSTILE_SITE_KEY?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
+  /** Production only: "open" once the Founder authorizes the public launch; anything else keeps customer sign-up, enquiries and checkout closed (src/app/prelaunch.ts). */
+  PUBLIC_LAUNCH?: string;
   /** Staging only: comma-separated addresses and/or "@domain" entries that may receive real mail (default "@crestmontwebsitedevelopment.com"). */
   EMAIL_RECIPIENT_ALLOWLIST?: string;
   ANTHROPIC_API_KEY?: string;
