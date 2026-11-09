@@ -51,7 +51,7 @@ test("[AUTH-001] [EMAIL-001] the first production Owner is invited by email (sig
   assert.equal(st.status, 200);
   const sj = await st.text();
   assert.match(sj, /"template":"staff_invitation"/);
-  assert.doesNotMatch(sj, new RegExp(FOUNDER.replace(/[.]/g, "\\.")), "no address in the status");
+  assert.ok(!sj.includes(FOUNDER), "no address in the status");
   assert.equal((await t.client().request("GET", url.pathname)).status, 401);
 
   // The Founder accepts: the account is created with the Owner role.
