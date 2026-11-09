@@ -1,0 +1,56 @@
+name: Production smoke test (read-only)
+
+# F6 (2026-11-09): anonymous, read-only smoke test of the deployed production Worker (scripts/production-smoke.ts).
+# It checks:
+#   - DNS, the TLS certificate and HTTP → HTTPS;
+#   - the public website renders;
+#   - customer entry points stay closed before the public launch;
+#   - the portal, staff area, Owner pages and support require sign-in;
+#   - the Stripe, Resend and Retell webhooks refuse unsigned calls;
+#   - payments and AI website generation are closed.
+# It signs in nowhere and records nothing in production.
+#
+# It uses NO secret and does not use the `production` environment (no approval pause), like the health monitor. The URL
+# comes from the repository variable PRODUCTION_URL.
+on:
+  workflow_dispatch:
+    inputs:
+      expect_prelaunch:
+        description: "yes: customer access must still be closed (before the public launch). no: skip those checks (after it)."
+        type: choice
+        options: ["yes", "no"]
+        default: "yes"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASE: ${{ vars.PRODUCTION_URL }}
+      EXPECT_PRELAUNCH: ${{ inputs.expect_prelaunch }}
+    steps:
+      - name: Production URL
+        run: |
+          printf '%s' "$BASE" | grep -Eq '^https://[A-Za-z0-9.-]+$' || { echo "::error::The repository variable PRODUCTION_URL must be a bare https origin."; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Smoke test
+        run: node --no-warnings scripts/production-smoke.ts --base "$BASE" --expect-prelaunch "$EXPECT_PRELAUNCH" --out evidence/production-smoke.json
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: production-smoke
+          path: evidence/production-smoke.json
+          retention-days: 30
+          if-no-files-found: ignore

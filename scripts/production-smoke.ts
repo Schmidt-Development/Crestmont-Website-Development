@@ -1,0 +1,175 @@
+// Production smoke test (F6, 2026-11-09): anonymous and read-only. It proves that the deployed production Worker
+// serves the public website, keeps every customer entry point closed before the public launch (src/app/prelaunch.ts),
+// protects the portal, staff area and Owner pages, refuses unsigned Stripe / Resend / Retell webhooks, keeps payments
+// and AI website generation closed, and answers over HTTPS with the expected headers.
+//
+// Nothing here signs in, submits a form that is accepted, or writes anything: every POST is one the Worker refuses
+// before any handler runs (the pre-launch gate) or before any record is touched (webhook signature checks).
+// Authenticated checks (Owner dashboard, employee access) need the Founder's own production account and MFA, so they
+// are a Founder step, not part of this script.
+//
+//   node --no-warnings scripts/production-smoke.ts --base https://crestmontwebsitedevelopment.com [--out evidence/production-smoke.json]
+// Exit 1 when a critical check failed. Run from a GitHub runner (production-smoke.yml).
+import { writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { resolve4, resolve6 } from "node:dns/promises";
+import { connect } from "node:tls";
+
+export type Fetcher = (req: Request) => Promise<Response>;
+export interface SmokeResult { name: string; area: string; critical: boolean; outcome: "passed" | "failed"; message?: string }
+
+const UA = { "user-agent": "crestmont-production-smoke" };
+
+/** The HTTP checks, runnable against any fetcher (the deployed Worker, or the in-memory app in tests). */
+export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch = true): Promise<SmokeResult[]> {
+  const results: SmokeResult[] = [];
+  const check = async (area: string, name: string, critical: boolean, run: () => Promise<string | null>) => {
+    let failure: string | null;
+    try { failure = await run(); } catch (e) { failure = `request failed: ${(e as Error).message}`; }
+    results.push({ name, area, critical, outcome: failure ? "failed" : "passed", ...(failure ? { message: failure.slice(0, 500) } : {}) });
+  };
+  const req = (method: string, path: string, init: { body?: string; headers?: Record<string, string> } = {}) =>
+    fetcher(new Request(base + path, { method, redirect: "manual", headers: { ...UA, ...(init.headers ?? {}) }, body: init.body }));
+  const text = async (r: Response) => { try { return await r.text(); } catch { return ""; } };
+
+  // ── Health and configuration stated by the running Worker ──
+  let health: Record<string, unknown> = {};
+  await check("health", "/api/health answers ok for production", true, async () => {
+    const r = await req("GET", "/api/health");
+    const b = await text(r);
+    try { health = JSON.parse(b); } catch { return `HTTP ${r.status}: not JSON`; }
+    return r.status === 200 && health.status === "ok" && health.environment === "production" ? null : `HTTP ${r.status} ${b.slice(0, 200)}`;
+  });
+  await check("health", "database answers (health runs SELECT 1 on D1)", true, async () => (health.status === "ok" ? null : "health not ok"));
+  await check("health", "file storage (R2) bound", true, async () => (health.fileStorage === "bound" ? null : `fileStorage: ${String(health.fileStorage)}`));
+  await check("ai", "AI website generation is off", true, async () => (health.aiBuildAutomation === "off" ? null : `aiBuildAutomation: ${String(health.aiBuildAutomation)}`));
+  await check("payments", "checkout is closed (no live charges before the payments authorization)", true, async () => {
+    const p = health.payments as { checkout?: string; mode?: string; reason?: string } | undefined;
+    return p?.checkout === "closed" ? null : `payments: ${JSON.stringify(p)}`;
+  });
+
+  // ── Public website ──
+  for (const [path, must] of [["/", /Crestmont/i], ["/pricing", /\$/], ["/services", /Crestmont/i], ["/about", /Crestmont/i], ["/portfolio", /Crestmont/i],
+    ["/contact", /<form/i], ["/quote", /<form/i], ["/login", /name="password"/], ["/password/forgot", /<form/i]] as const) {
+    await check("public", `${path} renders`, true, async () => {
+      const r = await req("GET", path);
+      const b = await text(r);
+      if (r.status !== 200) return `HTTP ${r.status}`;
+      if (!/text\/html/.test(r.headers.get("content-type") ?? "")) return "not HTML";
+      return must.test(b) ? null : "expected content missing";
+    });
+  }
+  await check("security", "security headers: CSP frame-ancestors 'none', nosniff, HSTS", true, async () => {
+    const r = await req("GET", "/");
+    await text(r);
+    const csp = r.headers.get("content-security-policy") ?? "";
+    const missing = [!/frame-ancestors 'none'/.test(csp) && "CSP frame-ancestors", r.headers.get("x-content-type-options") !== "nosniff" && "nosniff",
+      !/max-age=\d+/.test(r.headers.get("strict-transport-security") ?? "") && "HSTS"].filter(Boolean);
+    return missing.length ? `missing: ${missing.join(", ")}` : null;
+  });
+
+  // ── Customer access stays closed before the public launch ──
+  if (expectPrelaunch) {
+    for (const path of ["/register", "/checkout/starter"]) {
+      await check("prelaunch", `GET ${path} is closed ("opening soon", 503)`, true, async () => {
+        const r = await req("GET", path);
+        const b = await text(r);
+        return r.status === 503 && /We are opening soon/.test(b) ? null : `HTTP ${r.status}`;
+      });
+    }
+    const form = { "content-type": "application/x-www-form-urlencoded" };
+    for (const path of ["/register", "/quote", "/contact"]) {
+      await check("prelaunch", `POST ${path} is refused (503) and records nothing`, true, async () => {
+        const r = await req("POST", path, { body: "name=Smoke&email=smoke%40example.invalid", headers: form });
+        await text(r);
+        return r.status === 503 ? null : `HTTP ${r.status}`;
+      });
+    }
+    for (const path of ["/api/leads", "/api/assistant"]) {
+      await check("prelaunch", `POST ${path} is refused (503 not_open_yet)`, true, async () => {
+        const r = await req("POST", path, { body: "{}", headers: { "content-type": "application/json", origin: base } });
+        const b = await text(r);
+        return r.status === 503 && /not_open_yet/.test(b) ? null : `HTTP ${r.status} ${b.slice(0, 120)}`;
+      });
+    }
+  }
+
+  // ── Portal, staff area, Owner pages and support require sign-in ──
+  for (const path of ["/portal", "/staff", "/staff/email/templates", "/staff/readiness", "/staff/crm", "/staff/support", "/portal/support"]) {
+    await check("access", `${path} requires sign-in`, true, async () => {
+      const r = await req("GET", path);
+      await text(r);
+      const loc = r.headers.get("location") ?? "";
+      return r.status === 303 && /^(https?:\/\/[^/]+)?\/login/.test(loc) ? null : `expected 303 to /login, got ${r.status} ${loc}`;
+    });
+  }
+  await check("access", "staff-sent proposal links are not blocked by the pre-launch gate (unknown token: 404)", true, async () => {
+    const r = await req("GET", "/q/smoke-unknown-token");
+    await text(r);
+    return r.status === 404 ? null : `HTTP ${r.status}`;
+  });
+
+  // ── Integrations refuse unsigned calls (nothing is processed) ──
+  for (const [path, label] of [["/api/webhooks/stripe", "Stripe"], ["/api/webhooks/resend", "Resend"], ["/api/webhooks/retell", "Retell"],
+    ["/api/webhooks/retell/functions", "Retell functions"], ["/api/webhooks/retell/inbound", "Retell inbound"]] as const) {
+    await check("integrations", `${label} webhook refuses an unsigned request`, true, async () => {
+      const r = await req("POST", path, { body: "{}", headers: { "content-type": "application/json" } });
+      await text(r);
+      return r.status === 401 || r.status === 403 ? null : `HTTP ${r.status} (expected 401/403)`;
+    });
+  }
+  return results;
+}
+
+/** Network-level checks only a real deployment can answer: DNS, the TLS certificate, HTTP → HTTPS, www. */
+async function networkSmoke(base: string): Promise<SmokeResult[]> {
+  const host = new URL(base).hostname;
+  const results: SmokeResult[] = [];
+  const push = (area: string, name: string, critical: boolean, failure: string | null) =>
+    results.push({ name, area, critical, outcome: failure ? "failed" : "passed", ...(failure ? { message: failure } : {}) });
+  const v4 = await resolve4(host).catch(() => [] as string[]);
+  const v6 = await resolve6(host).catch(() => [] as string[]);
+  push("dns", `${host} resolves (A ${v4.length}, AAAA ${v6.length})`, true, v4.length + v6.length ? null : "no A/AAAA records");
+  const cert = await new Promise<string | null>((done) => {
+    const s = connect({ host, port: 443, servername: host, timeout: 15_000 }, () => {
+      const c = s.getPeerCertificate();
+      const days = Math.floor((new Date(c.valid_to).getTime() - Date.now()) / 86_400_000);
+      s.end();
+      done(s.authorized ? (days < 14 ? `certificate expires in ${days} days` : null) : `TLS not authorized: ${String(s.authorizationError)}`);
+      console.log(`  certificate: ${c.subject?.CN ?? "?"} issued by ${c.issuer?.O ?? c.issuer?.CN ?? "?"}, valid to ${c.valid_to} (${days} days)`);
+    });
+    s.on("error", (e) => done(`TLS failed: ${e.message}`));
+    s.on("timeout", () => { s.destroy(); done("TLS timed out"); });
+  });
+  push("tls", "HTTPS certificate valid for the domain", true, cert);
+  try {
+    const r = await fetch(`http://${host}/`, { redirect: "manual", headers: UA, signal: AbortSignal.timeout(15_000) });
+    const loc = r.headers.get("location") ?? "";
+    push("tls", "plain HTTP redirects to HTTPS", false, [301, 302, 307, 308].includes(r.status) && loc.startsWith("https://") ? null : `HTTP ${r.status} ${loc}`);
+  } catch (e) { push("tls", "plain HTTP redirects to HTTPS", false, `request failed: ${(e as Error).message}`); }
+  try {
+    const r = await fetch(`https://www.${host}/`, { redirect: "manual", headers: UA, signal: AbortSignal.timeout(15_000) });
+    const loc = r.headers.get("location") ?? "";
+    push("dns", `www.${host} redirects to the apex`, false, [301, 302, 307, 308].includes(r.status) && loc.startsWith(`https://${host}`) ? null : `HTTP ${r.status} ${loc}`);
+  } catch (e) { push("dns", `www.${host} redirects to the apex`, false, `not answering: ${(e as Error).message}`); }
+  return results;
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const args = process.argv.slice(2);
+  const get = (k: string) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
+  const base = get("--base")?.replace(/\/+$/, "");
+  const out = get("--out") ?? "evidence/production-smoke.json";
+  if (!base || !/^https:\/\//.test(base)) { console.error("--base https://<host> is required"); process.exit(2); }
+  const fetcher: Fetcher = (r) => fetch(r, { signal: AbortSignal.timeout(20_000) });
+  const results = [...(await networkSmoke(base)), ...(await httpSmoke(base, fetcher, get("--expect-prelaunch") !== "no"))];
+  for (const r of results) console.log(`${r.outcome === "passed" ? "✔" : r.critical ? "✖" : "!"} [${r.area}] ${r.name}${r.message ? ` — ${r.message}` : ""}`);
+  const failedCritical = results.filter((r) => r.outcome === "failed" && r.critical);
+  const passed = results.filter((r) => r.outcome === "passed").length;
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, JSON.stringify({ base, checkedAt: new Date().toISOString(), commit: process.env.GITHUB_SHA, results }, null, 2));
+  const summary = `${passed}/${results.length} production smoke checks passed; ${failedCritical.length} critical failure(s)`;
+  console.log(`\n${summary}`);
+  console.log(`::notice title=Production smoke::${summary}`);
+  process.exit(failedCritical.length ? 1 : 0);
+}
