@@ -109,6 +109,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/webhooks/resend": hook("svix-signature"),
   "POST /api/readiness/deployments": signed("x-crestmont-signature"),
   "POST /api/readiness/release-candidates": signed("x-crestmont-signature"),
+  "POST /api/ops/owner-invitation": signed("x-crestmont-signature"),
+  "GET /api/ops/email-deliveries/:id": { ...signed("x-crestmont-signature"), params: { id: "emailDelivery" } },
   "GET /api/readiness/release-authorization": signed("x-crestmont-signature", { staffRead: true }),
   // AI Builds runner API (HMAC-signed with BUILD_RUNNER_SECRET; src/routes/builds.ts)
   "POST /api/builds/runner/claim": signed("x-crestmont-runner-signature"),

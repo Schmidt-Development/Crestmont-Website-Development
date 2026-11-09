@@ -1,0 +1,38 @@
+name: Production first Owner invitation (one-time)
+
+# Founder report (2026-11-09): /password/forgot on production said "Check your email" and nothing arrived, because the
+# production database has no account at all: the first Owner has never been invited. This sends that one-time invitation
+# by email (src/services/owner-bootstrap.ts) to the address in the production environment secret FOUNDER_EMAIL and follows
+# its delivery through Resend. No address, token or link is printed: the link exists only in the email.
+#
+# The Worker refuses once an Owner exists, so this cannot create a second Owner; re-running before acceptance replaces
+# the pending invitation (only the newest link works). Manual only, main only, production environment (Founder approval).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-owner-invitation
+  cancel-in-progress: false
+
+jobs:
+  invite:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Send the first Owner invitation and follow its delivery
+        env:
+          BASE: ${{ vars.PRODUCTION_URL }}
+          EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
+          FOUNDER_EMAIL: ${{ secrets.FOUNDER_EMAIL }}
+        run: node --no-warnings scripts/owner-invitation.ts
