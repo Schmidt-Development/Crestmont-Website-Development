@@ -870,8 +870,8 @@ ${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Ref
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p>
 <p class="faint">You will be taken to Stripe's secure checkout. Your payment is confirmed only when Stripe notifies us.</p>
 <div class="form-actions">${button(`Pay ${formatCents(dueCents)}`)}</div></form>`
-    : html`<div class="card stack">${alert("warn", `${NOT_CONFIGURED} You cannot pay online right now.`)}<p>Your intake is saved. We can still start your project: request a quote or contact us and we will follow up with payment options.</p>
-<div class="row">${linkButton("Request a quote", "/quote", "primary")}${linkButton("Contact us", "/contact", "secondary")}</div></div>`}
+    : html`<div class="card stack" data-testid="checkout-payment-closed">${alert("warn", `${NOT_CONFIGURED} You cannot pay online right now.`)}<p>Your intake and your ${pkg.name} package choice are saved. Come back to this page to pay once online payment opens, or contact us and we will follow up.</p>
+<div class="row">${linkButton("Contact us", "/contact", "secondary")}</div></div>`}
 </div></section>`), status);
 }
 

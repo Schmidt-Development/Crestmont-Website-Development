@@ -1163,6 +1163,47 @@ test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Dis
   assertClean();
 });
 
+test("[PAY-001] [PAY-003] standard packages from the real /pricing buttons: intake → exact price, scope and agreement → Stripe test checkout → paid order and project; Custom goes to the quote form", { skip: unset || false }, async (t) => {
+  if (outcome.get(6) !== "passed") { t.skip(`needs journey 6 (${outcome.get(6) ?? "not run"})`); return; }
+  // Founder, 2026-11-09: a standard package is never sent to the custom quote form. Each package is bought from the button
+  // a visitor actually clicks on /pricing, with Stripe's published TEST card (staging is test mode only: never a charge).
+  const c = people.newCustomer.page;
+  const PKGS = [["starter", "Starter", 99_900, "essential"], ["business", "Business", 249_900, "professional"], ["premium", "Premium", 499_900, "executive"]] as const;
+  for (const [id, name, cents, plan] of PKGS) {
+    // The customer may already hold paid orders for this package (journeys above): count them, and wait for one more.
+    const paidRe = new RegExp(`${name} package — 100% upfront[^\\n]{0,80}Paid\\s+${esc(usd(cents))}`, "g");
+    const paidCount = async () => { await c.goto(`${BASE}/portal/billing`); return ((await text(c)).match(paidRe) ?? []).length; };
+    const paidBefore = await paidCount();
+    await c.goto(`${BASE}/pricing`);
+    const cta = c.locator(`main a[href="/checkout/${id}"]`).first();
+    assert.ok(await cta.count(), `${name}: the /pricing button leads to the package's purchase flow`);
+    assert.match((await cta.innerText()) as string, re(`Choose ${name}`));
+    await nav(c, cta);
+    if (new URL(c.url()).pathname === `/checkout/${id}/intake`) await fillConditionalIntake(c, "Continue to review");
+    assert.equal(new URL(c.url()).pathname, `/checkout/${id}/review`, `${name}: intake first, then review. ${await alerts(c)}`);
+    assert.match(await text(c, '[data-testid="checkout-price"]'), re(usd(cents)), `${name}: the exact package price`);
+    assert.ok(await c.locator('[data-testid="checkout-scope"] li').count(), `${name}: the scope is listed`);
+    assert.match(await text(c, '[data-testid="checkout-intake-summary"]'), re(contact.company), `${name}: the order summary carries the intake`);
+    await c.locator(`input[name=maintenance_plan][value=${plan}]`).check();
+    await c.locator("input[name=terms]").check(); // the development agreement, terms, refund policy and DPA
+    await nav(c, c.getByRole("button", { name: new RegExp(`^Pay ${esc(usd(cents))}`) }).first());
+    await payOnStripeCheckout(c);
+    // Paid only once Stripe's signed webhook arrives: the package invoice turns Paid and the project exists.
+    const end = Date.now() + 120_000;
+    while ((await paidCount()) <= paidBefore) {
+      if (Date.now() > end) assert.fail(`${name}: the signed checkout webhook did not mark the new package order paid within 120s`);
+      await c.waitForTimeout(5_000);
+    }
+    await until(c, `${BASE}/portal/projects`, new RegExp(`${esc(contact.company)} — ${name} website`), `${name}: the project created for the paid order`);
+  }
+  // Custom stays a quote: the button on /pricing opens the quote form with Custom selected.
+  await c.goto(`${BASE}/pricing`);
+  await nav(c, c.locator('main a[href="/quote?package=custom"]').first());
+  assert.equal(new URL(c.url()).pathname, "/quote");
+  assert.match(await text(c), /Request my quote/i);
+  assertClean();
+});
+
 // ───────────── 27–28. AI receptionist ─────────────
 
 // 27–28 verify a REAL call: a person rings the staging receptionist number (…2055), the live Retell agent answers and the

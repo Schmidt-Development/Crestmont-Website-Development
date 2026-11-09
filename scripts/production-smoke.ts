@@ -59,6 +59,18 @@ export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch 
       return must.test(b) ? null : "expected content missing";
     });
   }
+  await check("purchase", "/pricing package buttons lead to the standard purchase flow (intake and checkout), never the custom quote form", true, async () => {
+    const r = await req("GET", "/pricing");
+    const b = await text(r);
+    const missing = ["starter", "business", "premium"].filter((id) => !b.includes(`href="/checkout/${id}"`));
+    if (missing.length) return `no /checkout link for: ${missing.join(", ")}`;
+    return /href="\/quote\?package=(starter|business)"/.test(b) ? "a standard package still links to the quote form" : null;
+  });
+  await check("purchase", "custom projects keep the quote form (/quote?package=custom)", true, async () => {
+    const r = await req("GET", "/quote?package=custom");
+    await text(r);
+    return r.status === 200 ? null : `HTTP ${r.status}`;
+  });
   await check("security", "security headers: CSP frame-ancestors 'none', nosniff, HSTS", true, async () => {
     const r = await req("GET", "/");
     await text(r);
