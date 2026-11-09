@@ -292,6 +292,26 @@ test("[CRM-004] AI-02 Conversations: AI draft reply uses the customer's conversa
   record.conversationDraftChars = draft.length; save();
 });
 
+// ───────────── ER: email template review (Founder action F2) ─────────────
+
+test("[EMAIL-002] ER-01 the Owner's email template review shows every template and variant, each preview locked down, nothing sent", { skip: unset }, async () => {
+  const o = await signIn(staff("owner"));
+  const res = await o.goto(`${BASE}/staff/email/templates`);
+  assert.equal(res?.status(), 200);
+  const page = (await o.content()) as string;
+  assert.match(page, /Review only — nothing on this page sends email/);
+  assert.equal(await o.locator("[data-review-checklist] tbody tr").count(), 12, "the twelve notification types");
+  const srcs = [...new Set([...page.matchAll(/src="(\/staff\/email\/templates\/[a-z_]+\/view\?sample=\d+)"/g)].map((m) => m[1]))];
+  assert.ok(srcs.length >= 90, `${srcs.length} variants framed`);
+  for (const src of srcs) {
+    const r = await o.request.get(BASE + src);
+    assert.equal(r.status(), 200, src);
+    assert.match(r.headers()["content-security-policy"] ?? "", /default-src 'none'.*frame-ancestors 'self'.*sandbox/, src);
+    assert.match(await r.text(), /data-footer[^>]*>Crestmont Website Development/, `${src}: business identification`);
+  }
+  record.templateReview = { variants: srcs.length }; save();
+});
+
 // ───────────── ST: what staging's status pages say ─────────────
 
 test("[VOICE-005] ST-01 the AI receptionist page reports status from its real sources", { skip: unset }, async () => {
