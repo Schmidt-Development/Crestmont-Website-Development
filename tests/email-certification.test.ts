@@ -4,14 +4,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp } from "./support/app.ts";
 import { signEvidence } from "../src/readiness/ingest.ts";
-import { sendCertificationBatch } from "../src/services/email-certification.ts";
+import { sendCertificationBatch, certParts, CERT_PART_SIZE } from "../src/services/email-certification.ts";
 import { EMAIL_TEMPLATES } from "../src/services/mailer.ts";
 import { recipientPolicy, RESEND_TEST_INBOX, type EmailMessage } from "../src/adapters/email.ts";
 
 test("[EMAIL-001] delivery certification sends every template once to a Resend test inbox, plus one bounce probe, with a marked subject", async () => {
   const sent: EmailMessage[] = [];
   const ctx = { settings: {}, baseUrl: "https://crestmont.test", email: { kind: "resend", send: async (m: EmailMessage) => { sent.push(m); return { deliveryId: `em_${sent.length}`, status: "sent", provider: "resend" }; } } };
-  const out = await sendCertificationBatch(ctx as never, "cert-abc123", async () => {});
+  const first = await sendCertificationBatch(ctx as never, "cert-abc123", 0, async () => {});
+  assert.equal(first.parts, certParts());
+  assert.ok(first.sent.length <= CERT_PART_SIZE, "at most CERT_PART_SIZE messages per request (Workers subrequest limit)");
+  const out = [...first.sent];
+  for (let p = 1; p < first.parts; p++) out.push(...(await sendCertificationBatch(ctx as never, "cert-abc123", p, async () => {})).sent);
   assert.equal(out.length, EMAIL_TEMPLATES.length + 1);
   assert.deepEqual(new Set(out.filter((o) => o.probe === "delivered").map((o) => o.template)), new Set(EMAIL_TEMPLATES), "every template exactly once");
   assert.equal(out.filter((o) => o.probe === "bounced").length, 1);
@@ -21,7 +25,12 @@ test("[EMAIL-001] delivery certification sends every template once to a Resend t
     assert.ok(m.html.length > 200 && m.text.length > 20, `${m.template}: rendered`);
   }
   assert.equal(new Set(sent.map((m) => m.idempotencyKey)).size, sent.length, "unique idempotency keys");
-  await assert.rejects(sendCertificationBatch(ctx as never, "BAD id!", async () => {}));
+  await assert.rejects(sendCertificationBatch(ctx as never, "BAD id!", 0, async () => {}));
+  await assert.rejects(sendCertificationBatch(ctx as never, "cert-abc123", certParts(), async () => {}));
+  // A message that cannot be sent is reported with its error instead of failing the whole request.
+  const failing = { ...ctx, email: { kind: "resend", send: async () => { throw new Error("Too many subrequests."); } } };
+  const f = await sendCertificationBatch(failing as never, "cert-fail", 0, async () => {});
+  assert.ok(f.sent.every((x) => x.status === "error" && x.error === "Too many subrequests."));
 });
 
 test("[EMAIL-001] Resend's test inboxes may be mailed in every environment; other addresses keep the staging allowlist and the reserved-name rule", () => {

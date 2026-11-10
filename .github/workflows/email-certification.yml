@@ -45,7 +45,8 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           mkdir -p "$RUNNER_TEMP/ops"
-          node --no-warnings scripts/ops-challenge.ts --purpose email_certification --run-id "$RUN_ID" --out-sql "$RUNNER_TEMP/ops/challenge.sql" --out-nonce "$RUNNER_TEMP/ops/nonce"
+          parts=$(node --no-warnings -e 'import("./src/services/email-certification.ts").then((m) => console.log(m.certParts()))')
+          node --no-warnings scripts/ops-challenge.ts --purpose email_certification --run-id "$RUN_ID" --uses "$parts" --out-sql "$RUNNER_TEMP/ops/challenge.sql" --out-nonce "$RUNNER_TEMP/ops/nonce"
           echo "::add-mask::$(cat "$RUNNER_TEMP/ops/nonce")"
           $WRANGLER d1 execute crestmont-production --remote --env production --file "$RUNNER_TEMP/ops/challenge.sql" --yes > /dev/null
           rm -f "$RUNNER_TEMP/ops/challenge.sql"
@@ -67,6 +68,16 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ENVIRONMENT_LABEL: production
         run: node --no-warnings scripts/email-certification.ts
+      - name: Recent Worker errors on the certification endpoint (on failure; messages only)
+        if: failure()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          db=$([ "$TARGET" = production ] && echo crestmont-production || echo crestmont-staging)
+          $WRANGLER d1 execute "$db" --remote --env "$TARGET" --json --command "SELECT created_at, path, status, substr(message,1,300) AS message FROM app_errors WHERE path LIKE '/api/ops/%' ORDER BY created_at DESC LIMIT 5" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const r of JSON.parse(s)[0].results)console.log(`${r.created_at} ${r.path} ${r.status}: ${r.message.replace(/[^\s@<>]+@[^\s@<>]+/g,"<address>")}`)}catch{console.log("could not read app_errors")}})' | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Remove the challenge files
         if: always()
         run: rm -rf "$RUNNER_TEMP/ops"

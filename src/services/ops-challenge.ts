@@ -20,7 +20,7 @@ export async function consumeOpsChallenge(ctx: Pick<AppContext, "db" | "now">, p
   const key = challengeKey(purpose);
   const row = await ctx.db.prepare(`SELECT value FROM business_settings WHERE key = ?`).bind(key).first<{ value: string }>().catch(() => null);
   if (!row) return null;
-  let c: { hash?: string; expiresAt?: string; payload?: Record<string, unknown> };
+  let c: { hash?: string; expiresAt?: string; uses?: number; payload?: Record<string, unknown> };
   try { c = JSON.parse(row.value); } catch { return null; }
   const expires = Date.parse(c.expiresAt ?? "");
   const now = ctx.now().getTime();
@@ -29,9 +29,13 @@ export async function consumeOpsChallenge(ctx: Pick<AppContext, "db" | "now">, p
     return null;
   }
   if (!timingSafeEqual(await hashToken(nonce), c.hash)) return null;
-  // Single use: only the request that deletes this exact row proceeds.
-  const del = await ctx.db.prepare(`DELETE FROM business_settings WHERE key = ? AND value = ?`).bind(key, row.value).run();
-  if (del.meta.changes !== 1) return null;
+  // Each use consumes one of the challenge's uses (default 1; an email certification run needs one per part). Compare-
+  // and-swap on the exact stored value: of two concurrent requests only one proceeds.
+  const uses = Number.isInteger(c.uses) && (c.uses as number) > 0 ? (c.uses as number) : 1;
+  const done = uses <= 1
+    ? await ctx.db.prepare(`DELETE FROM business_settings WHERE key = ? AND value = ?`).bind(key, row.value).run()
+    : await ctx.db.prepare(`UPDATE business_settings SET value = ? WHERE key = ? AND value = ?`).bind(JSON.stringify({ ...c, uses: uses - 1 }), key, row.value).run();
+  if (done.meta.changes !== 1) return null;
   return c.payload ?? {};
 }
 

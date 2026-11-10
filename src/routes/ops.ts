@@ -27,7 +27,7 @@ import * as ra from "../services/readiness-admin.ts";
 import * as dep from "../services/deployments.ts";
 import * as ret from "../services/retention.ts";
 import { issueFounderOwnerInvitation, deliveryStatus, OwnerBootstrapError } from "../services/owner-bootstrap.ts";
-import { sendCertificationBatch, CERT_RUN_ID } from "../services/email-certification.ts";
+import { sendCertificationBatch, certParts, CERT_RUN_ID } from "../services/email-certification.ts";
 import { consumeOpsChallenge, type OpsChallengePurpose } from "../services/ops-challenge.ts";
 
 // ───────────── Signed automation ─────────────
@@ -288,10 +288,12 @@ export function register(r: Router): void {
     if (auth instanceof Response) return auth;
     const runId = auth.payload ? auth.payload.runId : auth.body.runId;
     if (typeof runId !== "string" || !CERT_RUN_ID.test(runId)) return jsonResponse(ctx, 422, { error: "runId must be 4-40 lowercase letters, digits or hyphens" });
+    const part = auth.body.part ?? 0;
+    if (typeof part !== "number" || !Number.isInteger(part) || part < 0 || part >= certParts()) return jsonResponse(ctx, 422, { error: `part must be an integer 0-${certParts() - 1}` });
     if (ctx.email.kind !== "resend") return jsonResponse(ctx, 409, { error: "This environment has no Resend adapter (RESEND_API_KEY not set): nothing can be delivered." });
-    const sent = await sendCertificationBatch(ctx, runId);
-    await audit(ctx.db, { actorKind: "system", action: "email.certification_sent", subjectType: "email", details: { runId, count: sent.length } });
-    return jsonResponse(ctx, 200, { runId, sent });
+    const out = await sendCertificationBatch(ctx, runId, part);
+    await audit(ctx.db, { actorKind: "system", action: "email.certification_sent", subjectType: "email", details: { runId, part, count: out.sent.length } });
+    return jsonResponse(ctx, 200, { runId, ...out });
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.

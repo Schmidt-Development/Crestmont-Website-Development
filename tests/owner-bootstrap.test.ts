@@ -137,7 +137,10 @@ test("[AUTH-001] [SEC-007] production path: the workflow's one-time database cha
   assert.equal((await post("/api/ops/email-certification", { challenge: e.nonce })).status, 401);
   assert.equal(await n(t, `SELECT COUNT(*) AS n FROM business_settings WHERE key LIKE 'ops.challenge.%'`), 0);
   // A valid certification challenge passes authentication (this test app has no Resend adapter, hence 409).
-  const cert = write("email_certification", ["--run-id", "cert-ok-1"]);
+  // An email certification run has one use per part; each use is consumed, then the challenge is gone.
+  const cert = write("email_certification", ["--run-id", "cert-ok-1", "--uses", "2"]);
   await t.db.prepare(cert.sql).run();
-  assert.equal((await post("/api/ops/email-certification", { challenge: cert.nonce })).status, 409);
+  assert.equal((await post("/api/ops/email-certification", { challenge: cert.nonce, part: 0 })).status, 409);
+  assert.equal((await post("/api/ops/email-certification", { challenge: cert.nonce, part: 1 })).status, 409);
+  assert.equal((await post("/api/ops/email-certification", { challenge: cert.nonce, part: 2 })).status, 401, "uses exhausted");
 });
