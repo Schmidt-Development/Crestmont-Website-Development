@@ -25,7 +25,12 @@ const post = (c: ReturnType<Awaited<ReturnType<typeof createTestApp>>["client"]>
 test("[AIOPS-001] assistant grounding: published prices, cumulative packages, services incl. AI Receptionist; never unpublished maintenance entitlements", () => {
   const sp = assistantSystemPrompt(facts);
   assert.match(sp, /Starter: \$999\./); assert.match(sp, /Premium: \$4,999\+/);
-  assert.match(sp, /each package includes everything in the one before it/);
+  // Cumulative upward only, stated per package (an 8B model inverted the old relative wording on staging, 2026-11-10).
+  assert.match(sp, /Starter is the smallest package\. Includes:/);
+  assert.match(sp, /- Business: \$2,499\.[^\n]*Includes everything in Starter, plus:/);
+  assert.match(sp, /- Premium: \$4,999\+[^\n]*Includes everything in Business, plus:/);
+  assert.match(sp, /A smaller package NEVER includes a larger package's features/);
+  assert.match(sp, /Never say Starter includes Business or Premium features/);
   assert.match(sp, /AI Receptionist \(\/services\/ai-receptionist\)/);
   assert.match(sp, /Never claim to be a person/);
   for (const m of Object.values(MAINTENANCE_PLANS)) for (const e of Object.values(m.proposedEntitlements)) assert.ok(!sp.includes(e), `unpublished entitlement leaked: ${e}`);
