@@ -1,0 +1,33 @@
+name: Website assistant accuracy check
+
+# Founder (2026-11-10): verify that the live website assistant answers customer questions correctly from Crestmont's
+# published facts (prices, package comparison, discounts, guarantees, refunds, custom quotes, maintenance, purchase links,
+# multi-turn). Public endpoint, no secret. About 11 assistant calls per run (well inside the assistant's daily cap).
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment to check"
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Ask the live assistant and check every answer
+        env:
+          BASE: ${{ inputs.target == 'production' && vars.PRODUCTION_URL || (vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev') }}
+        run: node --no-warnings scripts/assistant-eval.ts --base "$BASE"
