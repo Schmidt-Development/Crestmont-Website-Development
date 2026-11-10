@@ -47,6 +47,24 @@ export function paymentsMode(env: PaymentsEnv): PaymentsModeDecision {
   return { mode: "test", key, reason: null };
 }
 
+/** Kind of the configured Stripe key from its prefix only ("live", "test", "unrecognized", "missing"); never the key. */
+export function stripeKeyKind(env: Pick<PaymentsEnv, "STRIPE_SECRET_KEY">): "live" | "test" | "unrecognized" | "missing" {
+  return env.STRIPE_SECRET_KEY ? (keyMode(env.STRIPE_SECRET_KEY) ?? "unrecognized") : "missing";
+}
+
+/** Everything that keeps production checkout closed, in plain words (empty = open). commerceBlock() reports the first. */
+export function commerceBlockers(env: PaymentsEnv & { STRIPE_WEBHOOK_SECRET?: string }, settings: Record<string, string>): string[] {
+  if (env.ENVIRONMENT !== "production") return paymentsMode(env).reason ? [paymentsMode(env).reason!] : [];
+  const out: string[] = [];
+  if (env.PAYMENTS_LIVE_AUTHORIZED !== LIVE_FLAG_VALUE) out.push("PAYMENTS_LIVE_AUTHORIZED is not \"yes\" (Founder authorization of live payments).");
+  const kind = stripeKeyKind(env);
+  if (kind !== "live") out.push(kind === "missing" ? "STRIPE_SECRET_KEY is not set." : `STRIPE_SECRET_KEY is a ${kind} key; production needs a live key (sk_live_/rk_live_).`);
+  if (!env.STRIPE_WEBHOOK_SECRET) out.push("STRIPE_WEBHOOK_SECRET is not set (the live webhook endpoint's signing secret).");
+  if (DRAFT_BANNER.trim()) out.push("The policies still carry the \"pending attorney review\" draft banner (src/content/legal.ts DRAFT_BANNER).");
+  if (!settings["business.legal_name"]?.trim()) out.push("The operating business entity (legal name) is not recorded in Owner → Business settings.");
+  return out;
+}
+
 /** The livemode value Stripe events must carry here, or null when every event must be refused. */
 export function expectedLivemode(env: PaymentsEnv): boolean | null {
   const d = paymentsMode(env);
