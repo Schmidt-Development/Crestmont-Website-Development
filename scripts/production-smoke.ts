@@ -49,6 +49,15 @@ export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch 
     console.log(`  payments: mode ${p?.mode ?? "?"}, checkout ${p?.checkout ?? "?"}${p?.reason ? ` (${p.reason})` : ""}, webhook secret ${p?.webhookSecret ? "present" : "missing"}`);
     console.log(`  website assistant: ${a.available ? "available" : `unavailable (${a.reason ?? "?"})`}`);
   } catch { /* informational only */ }
+  // Business settings as published (Founder, 2026-11-10): the legal name in full (it is public); the address and staffed
+  // hours only as recorded / not recorded; whether the site shows a phone link.
+  try {
+    const d = (await (await req("GET", "/legal/disclosures")).text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    const legal = /Legal name: ([^.]+(?:\.[A-Z][^.]*)*)\./.exec(d)?.[1] ?? null;
+    console.log(`  business settings: legal name ${legal ? `"${legal.trim()}"` : "NOT shown"}; address ${/Registered business address:/.test(d) ? "recorded" : "not recorded"}; staffed hours ${/Staffed support hours:/.test((await (await req("GET", "/legal/support")).text())) ? "recorded" : "not recorded"}`);
+    const home = await (await req("GET", "/")).text();
+    console.log(`  phone on the site: ${/href="tel:\+\d+"/.test(home) ? `shown (${/href="tel:(\+\d+)"/.exec(home)![1].replace(/\d(?=\d{4})/g, "•")})` : "not shown"}`);
+  } catch { /* informational only */ }
   await check("ai", "AI website generation is off", true, async () => (health.aiBuildAutomation === "off" ? null : `aiBuildAutomation: ${String(health.aiBuildAutomation)}`));
   await check("payments", "checkout is closed (no live charges before the payments authorization)", true, async () => {
     const p = health.payments as { checkout?: string; mode?: string; reason?: string } | undefined;
