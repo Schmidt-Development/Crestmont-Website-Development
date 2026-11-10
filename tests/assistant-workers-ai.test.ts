@@ -69,3 +69,26 @@ test("[AIOPS-001] Workers AI is selected only when configured with a binding and
   const prod = await createTestApp({ ENVIRONMENT: "production", ASSISTANT_PROVIDER: "workers-ai", AI: fakeAi("x") } as never);
   assert.equal((await ask(prod.client(), [{ role: "user", content: "hi" }])).status, 503, "the pre-launch gate still closes the assistant in production");
 });
+
+test("[AIOPS-001] [INFRA-006] the Workers AI daily-cap count is an index search, never a table scan (staging D1 overload, run 42793493743)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync("src/services/assistant.ts", "utf8");
+  const sql = /SELECT COUNT\(\*\) AS n FROM ai_jobs WHERE status IN \([^)]*\) AND provider = 'workers-ai' AND created_at >= \? AND created_at < \?/.exec(src)?.[0];
+  assert.ok(sql, "the cap query is the indexed form");
+  assert.doesNotMatch(src, /substr\(created_at, 1, 10\) = \?`\)\.bind\(day\)/, "no substr() scan");
+  const t = await createTestApp();
+  const raw = (t.db as unknown as { raw: { prepare(s: string): { all(...a: unknown[]): { detail: string }[] } } }).raw;
+  const plan = raw.prepare(`EXPLAIN QUERY PLAN ${sql!.replace("COUNT(*) AS n", "COUNT(*)")}`).all("2026-11-10T00:00:00.000Z", "2026-11-11T00:00:00.000Z").map((r) => r.detail).join(" | ");
+  assert.match(plan, /USING (COVERING )?INDEX idx_ai_jobs_queue/, plan);
+  assert.doesNotMatch(plan, /SCAN ai_jobs/, plan);
+});
+
+test("[AIOPS-001] a database fault during an assistant request answers 503 with the friendly message, never a bare 500", async () => {
+  const t = await createTestApp({ ASSISTANT_PROVIDER: "workers-ai", AI: fakeAi("hello") } as never);
+  const env = t.env as unknown as { DB: { prepare: (s: string) => unknown } };
+  const real = env.DB.prepare.bind(env.DB);
+  env.DB.prepare = (s: string) => { if (/FROM ai_jobs/.test(s)) throw new Error("D1_ERROR: D1 DB is overloaded. Too many resources consumed within a 10 second window"); return real(s); };
+  const r = await ask(t.client(), [{ role: "user", content: "hi" }]);
+  assert.equal(r.status, 503);
+  assert.match(((await r.json()) as { message: string }).message, /couldn't answer just now/);
+});
