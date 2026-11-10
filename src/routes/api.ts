@@ -1,6 +1,7 @@
 // JSON API: health, CI evidence ingestion, Stripe webhooks, readiness report. Moved from the
 // foundation worker.ts unchanged in behaviour. /api routes never accept cookie-authenticated writes.
-import { paymentsMode, commerceBlock } from "../domain/payments-mode.ts";
+import { paymentsMode, commerceBlock, commerceBlockers, stripeKeyKind } from "../domain/payments-mode.ts";
+import { customerAccessOpen } from "../app/prelaunch.ts";
 import { aiBuildGate } from "../domain/ai-build-gate.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
@@ -111,7 +112,9 @@ export function register(r: Router) {
     const block = commerceBlock(ctx.env, ctx.settings);
     return jsonResponse(ctx, 200, { status: "ok", environment: ctx.env.ENVIRONMENT, fileStorage: ctx.storage ? "bound" : "not_configured",
       aiBuildAutomation: aiBuildGate(ctx.env).open ? "on" : "off",
-      payments: { mode: pm.mode, checkout: block ? "closed" : "open", reason: block ?? pm.reason, webhookSecret: !!ctx.env.STRIPE_WEBHOOK_SECRET } });
+      payments: { mode: pm.mode, checkout: block ? "closed" : "open", reason: block ?? pm.reason, webhookSecret: !!ctx.env.STRIPE_WEBHOOK_SECRET,
+        keyKind: stripeKeyKind(ctx.env), blockers: commerceBlockers(ctx.env, ctx.settings) },
+      customerAccess: customerAccessOpen(ctx.env) ? "open" : "closed" });
   });
 
   r.post("/api/leads", async (ctx) => {

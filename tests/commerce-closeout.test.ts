@@ -686,3 +686,20 @@ test("[EMAIL-003] queued Resend deliveries are retried by the scheduled job with
   await new OutboxEmail(dev.db).send({ to: "o@fixture.example", subject: "S", html: "x", text: "x", template: "receipt", idempotencyKey: "o:1" });
   assert.match((await runJobs(dev.env, ["email_retry"])).email_retry.detail, /retry skipped/);
 });
+
+test("[PAY-010] [LAUNCH-003] /api/health lists every production payment blocker and the Stripe key's kind (prefix only), so launch prerequisites can be checked without enabling payments", async () => {
+  const t = await createTestApp({ ENVIRONMENT: "production", STRIPE_SECRET_KEY: "sk_test_fixture", STRIPE_WEBHOOK_SECRET: WHSEC });
+  const h = await (await t.client().get("/api/health")).json() as { customerAccess: string; payments: { checkout: string; keyKind: string; blockers: string[] } };
+  assert.equal(h.customerAccess, "closed");
+  assert.equal(h.payments.checkout, "closed");
+  assert.equal(h.payments.keyKind, "test");
+  const b = h.payments.blockers.join(" | ");
+  for (const re of [/PAYMENTS_LIVE_AUTHORIZED/, /test key; production needs a live key/, /attorney review/, /legal name/]) assert.match(b, re);
+  assert.doesNotMatch(JSON.stringify(h), /sk_test_fixture|whsec/i, "never a key or secret");
+  const live = await createTestApp({ ENVIRONMENT: "production", PUBLIC_LAUNCH: "open", PAYMENTS_LIVE_AUTHORIZED: "yes", STRIPE_SECRET_KEY: "sk_live_fixture", STRIPE_WEBHOOK_SECRET: WHSEC });
+  await live.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('business.legal_name','Crestmont Test Entity LLC (TEST DATA)',?)`).bind(nowIso()).run();
+  const lh = await (await live.client().get("/api/health")).json() as { customerAccess: string; payments: { keyKind: string; blockers: string[] } };
+  assert.equal(lh.customerAccess, "open");
+  assert.equal(lh.payments.keyKind, "live");
+  assert.deepEqual(lh.payments.blockers.map((x) => /attorney review/.test(x)), [true], "with everything else in place, only the draft banner remains");
+});
