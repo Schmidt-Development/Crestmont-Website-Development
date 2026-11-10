@@ -147,14 +147,22 @@ export function register(r: Router) {
     let body: unknown;
     try { body = JSON.parse(await readBody(ctx.req)); } catch (e) { if (e instanceof HttpError) throw e; return jsonResponse(ctx, 400, { code: "invalid", message: "Invalid JSON" }); }
     const session = String(ctx.req.headers.get("x-assistant-session") ?? "").slice(0, 64);
-    const c = await loadContent(ctx, ["faq.items", "process.page"]);
-    const facts: assistant.AssistantFacts = {
-      pricesCents: await effectivePrices(ctx.db, ctx.now()),
-      process: parseItems(c.get("process.page").steps ?? ""), faqs: parseItems(c.get("faq.items").items ?? ""),
-      email: ctx.settings["contact.email"]?.trim() || "support@crestmontwebsitedevelopment.com",
-    };
-    const res = await assistant.answer(ctx.db, assistantProviderFromEnv(ctx.env), { body, ip: ctx.ip ?? null, session: /^[a-z0-9-]{8,64}$/i.test(session) ? session : "", facts });
-    return res.ok ? jsonResponse(ctx, 200, { reply: res.reply, links: res.links, ai: true }) : jsonResponse(ctx, res.status, { code: res.code, message: res.message });
+    // A transient database fault (D1 "overloaded", 2026-11-10 on staging) answers the visitor honestly instead of a bare
+    // 500; it is still logged. Nothing is made up in its place.
+    try {
+      const c = await loadContent(ctx, ["faq.items", "process.page"]);
+      const facts: assistant.AssistantFacts = {
+        pricesCents: await effectivePrices(ctx.db, ctx.now()),
+        process: parseItems(c.get("process.page").steps ?? ""), faqs: parseItems(c.get("faq.items").items ?? ""),
+        email: ctx.settings["contact.email"]?.trim() || "support@crestmontwebsitedevelopment.com",
+      };
+      const res = await assistant.answer(ctx.db, assistantProviderFromEnv(ctx.env), { body, ip: ctx.ip ?? null, session: /^[a-z0-9-]{8,64}$/i.test(session) ? session : "", facts });
+      return res.ok ? jsonResponse(ctx, 200, { reply: res.reply, links: res.links, ai: true }) : jsonResponse(ctx, res.status, { code: res.code, message: res.message });
+    } catch (e) {
+      if (e instanceof HttpError) throw e;
+      console.error(JSON.stringify({ level: "error", msg: "website assistant failed", error: (e as Error).message.slice(0, 300) }));
+      return jsonResponse(ctx, 503, { code: "error", message: "The assistant couldn't answer just now. Please try again in a moment, or use the contact page." });
+    }
   });
 
   r.post("/api/readiness/evidence", async (ctx) => {

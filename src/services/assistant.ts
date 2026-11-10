@@ -152,8 +152,13 @@ export const WORKERS_AI_DAILY_CALLS = 200;
 export async function assistantAvailability(db: Db, provider: AiBackend, now = new Date()): Promise<{ available: boolean; reason: string }> {
   if (!provider || provider === "local-runner") return { available: false, reason: "not_configured" };
   if (provider.name === "workers-ai") {
+    // Indexed (idx_ai_jobs_queue: status, provider, created_at) — a substr() on created_at scanned the whole table and,
+    // on staging's large database, contributed to "D1 DB is overloaded" 500s (assistant accuracy run 42793493743).
+    // Only the website assistant uses the workers-ai provider, so no workflow filter is needed.
     const day = now.toISOString().slice(0, 10);
-    const used = await db.prepare(`SELECT COUNT(*) AS n FROM ai_jobs WHERE workflow = 'website_assistant' AND provider = 'workers-ai' AND substr(created_at, 1, 10) = ?`).bind(day).first<{ n: number }>().catch(() => null);
+    const next = new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString();
+    const used = await db.prepare(`SELECT COUNT(*) AS n FROM ai_jobs WHERE status IN ('queued','running','succeeded','failed','awaiting_approval','approved','rejected') AND provider = 'workers-ai' AND created_at >= ? AND created_at < ?`)
+      .bind(`${day}T00:00:00.000Z`, next).first<{ n: number }>().catch(() => null);
     if ((used?.n ?? 0) >= WORKERS_AI_DAILY_CALLS) return { available: false, reason: "daily_limit" };
   }
   if (provider.name === "anthropic") {
