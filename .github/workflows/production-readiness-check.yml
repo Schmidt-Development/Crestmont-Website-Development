@@ -190,5 +190,13 @@ jobs:
             echo "email deliveries by template and status:"
             q "SELECT template, status, COUNT(*) AS n, MAX(created_at) AS latest, MAX(substr(COALESCE(last_error,''),1,160)) AS last_error FROM email_deliveries GROUP BY template, status ORDER BY latest DESC LIMIT 40" \
               | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s)[0].results;if(!r.length)console.log("  (none: the mailer has not recorded any email on production)");for(const x of r)console.log(`  ${x.template.padEnd(28)} ${String(x.status).padEnd(10)} ${String(x.n).padStart(4)}  latest ${x.latest}${x.last_error?"  error: "+x.last_error.replace(/[^\s@<>]+@[^\s@<>]+/g,"<address>"):""}`)}catch{console.log("could not read email_deliveries")}})'
+            echo
+            echo "Resend webhook events received (by type and outcome):"
+            q "SELECT type, outcome, COUNT(*) AS n, MAX(received_at) AS latest FROM email_webhook_events GROUP BY type, outcome ORDER BY latest DESC LIMIT 20" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s)[0].results;if(!r.length)console.log("  (none: no signed Resend webhook has ever been accepted by production)");for(const x of r)console.log(`  ${x.type.padEnd(24)} ${x.outcome.padEnd(10)} ${String(x.n).padStart(4)}  latest ${x.latest}`)}catch{console.log("could not read email_webhook_events")}})'
+            echo
+            echo "latest emails (id, template, status, accepted by Resend, last update):"
+            q "SELECT id, template, status, provider_message_id IS NOT NULL AS accepted, updated_at FROM email_deliveries ORDER BY created_at DESC LIMIT 5" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const x of JSON.parse(s)[0].results)console.log(`  ${x.id} ${x.template.padEnd(20)} ${String(x.status).padEnd(10)} accepted=${x.accepted?"yes":"no"} updated ${x.updated_at}`)}catch{console.log("could not read email_deliveries")}})'
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
