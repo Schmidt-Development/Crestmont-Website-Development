@@ -26,6 +26,7 @@ import { audit } from "../services/security.ts";
 import * as ra from "../services/readiness-admin.ts";
 import * as dep from "../services/deployments.ts";
 import * as ret from "../services/retention.ts";
+import * as integ from "../services/integrations.ts";
 import { issueFounderOwnerInvitation, deliveryStatus, OwnerBootstrapError } from "../services/owner-bootstrap.ts";
 import { sendCertificationBatch, certParts, CERT_RUN_ID } from "../services/email-certification.ts";
 import { consumeOpsChallenge, type OpsChallengePurpose } from "../services/ops-challenge.ts";
@@ -294,6 +295,19 @@ export function register(r: Router): void {
     const out = await sendCertificationBatch(ctx, runId, part);
     await audit(ctx.db, { actorKind: "system", action: "email.certification_sent", subjectType: "email", details: { runId, part, count: out.sent.length } });
     return jsonResponse(ctx, 200, { runId, ...out });
+  });
+  // Read-only provider probes (Stripe, Resend) for the readiness workflow: the same checks as Owner → Integrations →
+  // Run check, recorded the same way. Signed (staging) or a one-time database challenge (production).
+  r.post("/api/ops/integration-probe", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    const auth = await opsAuth(ctx, raw, "integration_probe");
+    if (auth instanceof Response) return auth;
+    const out: Record<string, { status: string; detail: string }> = {};
+    for (const id of ["stripe", "resend"] as const) {
+      try { out[id] = await integ.verifyIntegration({ db: ctx.db, env: ctx.env, storage: ctx.storage }, id, null); }
+      catch (e) { out[id] = { status: "not_probed", detail: (e as Error).message.slice(0, 400) }; }
+    }
+    return jsonResponse(ctx, 200, out);
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.

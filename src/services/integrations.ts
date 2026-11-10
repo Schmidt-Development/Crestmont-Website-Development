@@ -60,7 +60,11 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
       if (!k) return { status: "not_configured", detail: "STRIPE_SECRET_KEY is not set. Online payment is not available.", fingerprint: null, probe: false };
       // CREST-GAP-007/008: the key must match this environment's expected mode (production: live behind the Founder flag).
       const pm = paymentsMode(e);
-      if (pm.mode === "none") return { status: "blocked", detail: `${keyMode(k) === "test" ? "A test-mode" : "A non-test"} Stripe key is set and refused here: ${pm.reason} Live payments are not authorised (PAY-010) unless this is production with the Founder flag.`, fingerprint: await fp(k), probe: false };
+      // Production before live payments are authorised: a LIVE key may still be probed read-only (GET only: account,
+      // balance, webhook endpoints), so the live setup is verified before the Founder switches charges on (2026-11-10).
+      const prodLiveUnauthorised = e.ENVIRONMENT === "production" && pm.mode === "none" && keyMode(k) === "live";
+      if (pm.mode === "none" && !prodLiveUnauthorised) return { status: "blocked", detail: `${keyMode(k) === "test" ? "A test-mode" : "A non-test"} Stripe key is set and refused here: ${pm.reason} Live payments are not authorised (PAY-010) unless this is production with the Founder flag.`, fingerprint: await fp(k), probe: false };
+      if (prodLiveUnauthorised) return { status: "configured_unverified", detail: `Live-mode key set; live charges are not authorised yet (PAYMENTS_LIVE_AUTHORIZED is not "yes"). ${e.STRIPE_WEBHOOK_SECRET ? "Webhook secret set." : "STRIPE_WEBHOOK_SECRET is not set — webhooks will be rejected."} Run the read-only probe to verify the account and webhook endpoint.`, fingerprint: await fp(k + "|" + (e.STRIPE_WEBHOOK_SECRET ?? "")), probe: true };
       const wh = e.STRIPE_WEBHOOK_SECRET ? "Webhook secret set." : "STRIPE_WEBHOOK_SECRET is not set — webhooks will be rejected.";
       return { status: "configured_unverified", detail: `${pm.mode === "live" ? "Live-mode key set (Founder-authorised)." : "Test-mode key set."} ${wh} Run the probe to verify.`, fingerprint: await fp(k + "|" + (e.STRIPE_WEBHOOK_SECRET ?? "")), probe: true };
     }
@@ -274,9 +278,18 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
         const r = await f("https://api.stripe.com/v1/balance", { headers: { authorization: `Bearer ${d.env.STRIPE_SECRET_KEY}`, "stripe-version": STRIPE_API_VERSION } });
         const b = await jsonOrNull(r);
         if (!r.ok) { detail = providerError("Stripe", r, b); break; }
-        const live = paymentsMode(d.env).mode === "live";
+        // Production always expects live mode (its key may be probed before charges are authorised); elsewhere the mode
+        // the payments decision allows.
+        const live = env === "production" ? true : paymentsMode(d.env).mode === "live";
         if (typeof b?.livemode === "boolean" && b.livemode !== live) { status = "blocked"; detail = b.livemode ? "Stripe reports livemode=true for this key; live payments are not authorised." : "Stripe reports livemode=false where live mode is expected."; break; }
         const modeLabel = live ? "live" : "test";
+        const authNote = env === "production" && paymentsMode(d.env).mode !== "live" ? " Live charges are not authorised yet (PAYMENTS_LIVE_AUTHORIZED is not \"yes\"); this check made read-only calls only." : "";
+        let account = "";
+        if (env === "production") {
+          const ar = await f("https://api.stripe.com/v1/account", { headers: { authorization: `Bearer ${d.env.STRIPE_SECRET_KEY}`, "stripe-version": STRIPE_API_VERSION } }).catch(() => null);
+          const ab = ar?.ok ? await jsonOrNull(ar) : null;
+          if (ab) account = ` Account ${String(ab.id ?? "?")} (${String((ab.business_profile as Record<string, unknown> | undefined)?.name ?? (ab.settings as { dashboard?: { display_name?: string } } | undefined)?.dashboard?.display_name ?? "no display name")}): charges ${ab.charges_enabled ? "enabled" : "NOT enabled"}, payouts ${ab.payouts_enabled ? "enabled" : "NOT enabled"}, details ${ab.details_submitted ? "submitted" : "NOT submitted"}.`;
+        }
         // CREST-GAP-017: the webhook endpoint is registered by hand in the Stripe Dashboard; check it (read-only).
         const w = await f("https://api.stripe.com/v1/webhook_endpoints?limit=100", { headers: { authorization: `Bearer ${d.env.STRIPE_SECRET_KEY}`, "stripe-version": STRIPE_API_VERSION } });
         const wb = await jsonOrNull(w);
@@ -294,15 +307,15 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
           const destBody = dest ? await jsonOrNull(dest) : null;
           const destinations = dest?.ok && Array.isArray(destBody?.data) ? destBody!.data as StripeEventDestination[] : null;
           if (destinations && !eventDestinationProblem(destinations, d.env.APP_URL)) {
-            status = "verified"; detail = `GET /v1/balance succeeded in ${modeLabel} mode; the event destination for ${webhookTarget(d.env.APP_URL)} is enabled with snapshot payloads at a supported API version and every handled event (requests pinned to ${STRIPE_API_VERSION}).`;
+            status = "verified"; detail = `GET /v1/balance succeeded in ${modeLabel} mode; the event destination for ${webhookTarget(d.env.APP_URL)} is enabled with snapshot payloads at a supported API version and every handled event (requests pinned to ${STRIPE_API_VERSION}).${account}${authNote}`;
             break;
           }
           status = "degraded";
-          detail = `GET /v1/balance succeeded in ${modeLabel} mode${typeof acct?.id === "string" ? ` for Stripe account ${acct.id}` : ""}, but ${problem} ${endpointInventory(v1, destinations, dest ? dest.status : null)}`;
+          detail = `GET /v1/balance succeeded in ${modeLabel} mode${typeof acct?.id === "string" ? ` for Stripe account ${acct.id}` : ""}, but ${problem} ${endpointInventory(v1, destinations, dest ? dest.status : null)}${authNote}`;
           break;
         }
         const epVersion = webhookEndpointFor((Array.isArray(wb?.data) ? wb!.data : []) as StripeWebhookEndpoint[], d.env.APP_URL)?.api_version;
-        status = "verified"; detail = `GET /v1/balance succeeded in ${modeLabel} mode; the webhook endpoint is enabled at API version ${epVersion} with every handled event (requests pinned to ${STRIPE_API_VERSION}).`;
+        status = "verified"; detail = `GET /v1/balance succeeded in ${modeLabel} mode; the webhook endpoint is enabled at API version ${epVersion} with every handled event (requests pinned to ${STRIPE_API_VERSION}).${account}${authNote}`;
         break;
       }
       case "resend": {

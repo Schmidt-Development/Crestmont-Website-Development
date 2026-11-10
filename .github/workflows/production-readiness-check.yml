@@ -209,3 +209,27 @@ jobs:
               | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const x of JSON.parse(s)[0].results)console.log(`  ${x.id} ${x.template.padEnd(20)} ${String(x.status).padEnd(10)} accepted=${x.accepted?"yes":"no"} updated ${x.updated_at}`)}catch{console.log("could not read email_deliveries")}})'
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Stripe and Resend read-only probes on production (via a one-time database challenge)
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BASE: ${{ vars.PRODUCTION_URL }}
+        run: |
+          # The same read-only checks as Owner → Integrations → Run check (src/services/integrations.ts): Stripe GET
+          # /v1/balance, /v1/account, /v1/webhook_endpoints (and event destinations) with the live key — no charge, nothing
+          # created — and Resend GET /domains. Production's ops secret is unknown to workflows, so a one-time challenge is
+          # written with the production Cloudflare token (src/services/ops-challenge.ts). Keys and secrets are never printed.
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          node --no-warnings scripts/ops-challenge.ts --purpose integration_probe --out-sql "$work/c.sql" --out-nonce "$work/nonce"
+          echo "::add-mask::$(cat "$work/nonce")"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
+          code=$(curl -s -o "$work/out.json" -w '%{http_code}' --max-time 60 -X POST -H 'content-type: application/json' --data "{\"challenge\":\"$(cat "$work/nonce")\"}" "$BASE/api/ops/integration-probe" || echo 000)
+          {
+            echo "### Provider probes on production (read-only)"
+            if [ "$code" = "200" ]; then
+              node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));for(const [k,v] of Object.entries(j))console.log(`- ${k}: ${v.status} — ${v.detail}`)' "$work/out.json"
+            elif [ "$code" = "404" ]; then echo "- not available on the deployed Worker yet (needs the release with POST /api/ops/integration-probe)"
+            else echo "- probe request answered HTTP $code"; fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"

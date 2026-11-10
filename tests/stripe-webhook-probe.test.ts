@@ -60,3 +60,28 @@ test("[PAY-003] the Stripe probe names the key's account and what it has when no
   assert.equal(snap.status, "verified", snap.detail);
   assert.match(snap.detail, /event destination for http:\/\/crestmont\.test\/api\/webhooks\/stripe is enabled with snapshot payloads/);
 });
+
+test("[PAY-003] [PAY-010] production before live charges are authorised: the LIVE key is probed read-only (account, balance, webhook endpoint); a test key is refused", async () => {
+  const APEX = "https://crestmontwebsitedevelopment.com";
+  const calls: { url: string; method: string }[] = [];
+  const fetchImpl = (async (url: string, init: RequestInit = {}) => {
+    calls.push({ url, method: init.method ?? "GET" });
+    if (url.includes("/v1/balance")) return Response.json({ object: "balance", livemode: true });
+    if (url.includes("/v1/account")) return Response.json({ id: "acct_live_fixture", charges_enabled: true, payouts_enabled: true, details_submitted: true, business_profile: { name: "Crestmont (TEST DATA)" } });
+    if (url.includes("/v1/webhook_endpoints")) return Response.json({ data: [{ url: `${APEX}/api/webhooks/stripe`, status: "enabled", api_version: "2025-02-24.acacia", enabled_events: [...STRIPE_WEBHOOK_EVENTS] }] });
+    return new Response("{}", { status: 404 });
+  }) as unknown as typeof fetch;
+  const t = await createTestApp({ ENVIRONMENT: "production", APP_URL: APEX, STRIPE_SECRET_KEY: "sk_live_fixture", STRIPE_WEBHOOK_SECRET: "whsec_fixture" } as never);
+  const r = await verifyIntegration({ db: t.db, env: t.env, storage: null, fetchImpl }, "stripe", null);
+  assert.equal(r.status, "verified", r.detail);
+  assert.match(r.detail, /live mode; the webhook endpoint is enabled/);
+  assert.match(r.detail, /Account acct_live_fixture \(Crestmont \(TEST DATA\)\): charges enabled, payouts enabled, details submitted/);
+  assert.match(r.detail, /Live charges are not authorised yet/);
+  assert.ok(calls.every((c) => c.method === "GET"), "read-only: GET requests only, nothing created or charged");
+  assert.doesNotMatch(r.detail, /sk_live_fixture|whsec_fixture/);
+  // A test key on production is refused without any call.
+  const tt = await createTestApp({ ENVIRONMENT: "production", APP_URL: APEX, STRIPE_SECRET_KEY: "sk_test_fixture" } as never);
+  const before = calls.length;
+  await assert.rejects(verifyIntegration({ db: tt.db, env: tt.env, storage: null, fetchImpl }, "stripe", null), /no verification probe/);
+  assert.equal(calls.length, before);
+});
