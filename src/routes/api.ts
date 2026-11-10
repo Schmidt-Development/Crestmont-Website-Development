@@ -15,7 +15,7 @@ import { can } from "../domain/authz.ts";
 import { audit, rateLimit } from "../services/security.ts";
 import { scheduled, SCHEDULE } from "../app/scheduled.ts";
 import * as assistant from "../services/assistant.ts";
-import { aiProviderFromEnv } from "../services/ai.ts";
+import { assistantProviderFromEnv } from "../services/ai.ts";
 import { loadContent } from "../services/cms.ts";
 import { parseItems } from "../content/registry.ts";
 import { effectivePrices } from "../services/pricing-approvals.ts";
@@ -134,7 +134,7 @@ export function register(r: Router) {
   // POST answers from approved facts only. Same-origin JSON only (a cross-site form cannot send application/json, and
   // the Origin must match), rate-limited, size-capped and budget-capped; no visitor text is stored.
   r.get("/api/assistant", async (ctx) => {
-    const a = await assistant.assistantAvailability(ctx.db, aiProviderFromEnv(ctx.env));
+    const a = await assistant.assistantAvailability(ctx.db, assistantProviderFromEnv(ctx.env));
     return jsonResponse(ctx, 200, { available: a.available, reason: a.reason, maxMessageChars: assistant.ASSISTANT_LIMITS.maxMessageChars });
   });
   r.post("/api/assistant", async (ctx) => {
@@ -150,7 +150,7 @@ export function register(r: Router) {
       process: parseItems(c.get("process.page").steps ?? ""), faqs: parseItems(c.get("faq.items").items ?? ""),
       email: ctx.settings["contact.email"]?.trim() || "support@crestmontwebsitedevelopment.com",
     };
-    const res = await assistant.answer(ctx.db, aiProviderFromEnv(ctx.env), { body, ip: ctx.ip ?? null, session: /^[a-z0-9-]{8,64}$/i.test(session) ? session : "", facts });
+    const res = await assistant.answer(ctx.db, assistantProviderFromEnv(ctx.env), { body, ip: ctx.ip ?? null, session: /^[a-z0-9-]{8,64}$/i.test(session) ? session : "", facts });
     return res.ok ? jsonResponse(ctx, 200, { reply: res.reply, links: res.links, ai: true }) : jsonResponse(ctx, res.status, { code: res.code, message: res.message });
   });
 

@@ -52,13 +52,19 @@ ${input({ name: "email", label: "Email", type: "email", value: email, autocomple
 ${input({ name: "password", label: "Password", type: "password", autocomplete: "current-password", required: true })}
 ${turnstileWidget(ctx)}
 <div class="form-actions">${button("Sign in")}<a class="btn btn--ghost" href="/password/forgot">Forgot password?</a></div></form>
-<hr><p class="muted">New to Crestmont? <a href="/register">Create an account</a></p>`), status ?? (errors.length ? 400 : 200));
+<hr><p class="muted">New to Crestmont? <a href="/register${next ? `?next=${encodeURIComponent(next)}` : ""}">Create an account</a></p>`), status ?? (errors.length ? 400 : 200));
 }
 
+/** Where a visitor was going when they were asked to sign in (a same-site path), kept through sign-up and email
+ *  confirmation so a customer who chose a package arrives back at that package's checkout. */
+const nextParam = (ctx: AppContext) => safeNext(ctx.url.searchParams.get("next"), "");
+const withNext = (path: string, next: string) => (next ? `${path}${path.includes("?") ? "&" : "?"}next=${encodeURIComponent(next)}` : path);
+
 function registerPage(ctx: AppContext, errors: string[] = [], v: Record<string, string> = {}, status?: number) {
+  const next = nextParam(ctx);
   return htmlResponse(ctx, authLayout(ctx, { title: "Create account", description: "Create a Crestmont customer account to buy a website package and follow your project in the customer portal." }, html`<h1 style="font-size:2rem">Create your account</h1>
 <p class="muted">Use your account to purchase a package, accept a quote, and manage your project.</p>${formErrors(errors)}
-<form method="post" action="/register">${csrf(ctx)}
+<form method="post" action="${withNext("/register", next)}">${csrf(ctx)}
 ${input({ name: "name", label: "Your name", value: v.name, autocomplete: "name", required: true })}
 ${input({ name: "organization", label: "Business name", value: v.organization, autocomplete: "organization", required: true })}
 ${input({ name: "email", label: "Email", type: "email", value: v.email, autocomplete: "email", required: true })}
@@ -67,7 +73,7 @@ ${checkbox("terms", "I agree to the Terms of Service and Privacy Policy.", { req
 <p class="faint" style="font-size:.8rem"><a href="/legal/terms">Terms</a> · <a href="/legal/privacy">Privacy</a></p>
 ${turnstileWidget(ctx)}
 <div class="form-actions">${button("Create account")}</div></form>
-<hr><p class="muted">Already have an account? <a href="/login">Sign in</a></p>`), status ?? (errors.length ? 400 : 200));
+<hr><p class="muted">Already have an account? <a href="${withNext("/login", next)}">Sign in</a></p>`), status ?? (errors.length ? 400 : 200));
 }
 
 export function register(r: Router) {
@@ -124,11 +130,11 @@ export function register(r: Router) {
       const res = await auth.registerCustomer(ctx.db, { email: v.email, name: v.name, password: String(f.get("password") ?? ""), organizationName: v.organization }, ctx.ip);
       if (res.verifyToken) {
         await sendMail(ctx, { template: "verification", to: v.email.toLowerCase(), idempotencyKey: `verify:${res.userId}:${res.verifyToken.slice(0, 8)}`,
-          data: { name: v.name, confirmUrl: `${ctx.baseUrl}/verify-email?token=${res.verifyToken}` } });
+          data: { name: v.name, confirmUrl: `${ctx.baseUrl}${withNext(`/verify-email?token=${res.verifyToken}`, nextParam(ctx))}` } });
         await recordTermsAcceptance(ctx, res.userId, res.organizationId!);
       }
       return htmlResponse(ctx, authLayout(ctx, { title: "Check your email" }, html`<h1 style="font-size:2rem">Check your email</h1>
-<p>If this address can be used, we have sent a confirmation link to <strong>${v.email}</strong>. Follow it to activate your account, then sign in.</p><p><a href="/login">Go to sign in</a></p>`));
+<p>If this address can be used, we have sent a confirmation link to <strong>${v.email}</strong>. Follow it to activate your account, then sign in${nextParam(ctx).startsWith("/checkout/") ? " — you will continue with your package after signing in" : ""}.</p><p><a href="${withNext("/login", nextParam(ctx))}">Go to sign in</a></p>`));
     } catch (e) {
       if (e instanceof auth.AuthError) return registerPage(ctx, [e.message], v);
       throw e;
@@ -139,7 +145,7 @@ export function register(r: Router) {
     const token = ctx.url.searchParams.get("token") ?? "";
     try {
       await auth.verifyEmail(ctx.db, token);
-      return redirect(ctx, "/login", { kind: "success", text: "Email confirmed. You can sign in now." });
+      return redirect(ctx, withNext("/login", nextParam(ctx)), { kind: "success", text: "Email confirmed. You can sign in now." });
     } catch (e) {
       if (e instanceof auth.AuthError) return htmlResponse(ctx, authLayout(ctx, { title: "Link expired" }, html`<h1 style="font-size:2rem">Link not valid</h1><p>${e.message}</p><p><a href="/login">Sign in</a> to request a new confirmation email.</p>`), 400);
       throw e;

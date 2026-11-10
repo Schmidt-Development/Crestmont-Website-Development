@@ -85,6 +85,23 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
   const status = await p.locator("[data-cb-status]").textContent();
   const live = /^AI ·/.test(status);
   ok(live || (/off/.test(status) && await p.locator("[data-cb-input]").isDisabled()), `${name} assistant state: ${live ? "live answers on" : "live answers off (honest offline state)"}`);
+  // ASSISTANT_EXPECT_LIVE (staging, Workers AI): the assistant must be live and hold a real, grounded conversation.
+  if (process.env.ASSISTANT_EXPECT_LIVE === "1") ok(live, `${name} assistant is live (ASSISTANT_EXPECT_LIVE)`);
+  if (live) {
+    const aiReplies = p.locator("[data-cb-log] .cb__msg--ai");
+    const askAssistant = async (q) => {
+      const n = await aiReplies.count();
+      await p.locator("[data-cb-input]").fill(q);
+      await p.locator("[data-cb-send]").click();
+      await p.waitForFunction((k) => document.querySelectorAll("[data-cb-log] .cb__msg--ai").length > k, n, { timeout: 45_000 });
+      return { text: (await aiReplies.nth(n).innerText()).trim(), links: await aiReplies.nth(n).locator("a").evaluateAll((as) => as.map((a) => a.getAttribute("href"))) };
+    };
+    const a1 = await askAssistant("How much is the Business website package, and how do I buy it?");
+    ok(/\$2,499/.test(a1.text), `${name} assistant answers the Business price from published facts ($2,499): "${a1.text.slice(0, 160).replace(/\s+/g, " ")}"`);
+    ok(a1.links.some((h) => /^\/(checkout\/business|pricing)/.test(h)), `${name} assistant links into the purchase journey (${a1.links.join(", ") || "no link"})`);
+    const a2 = await askAssistant("And what does the cheaper package cost?");
+    ok(/\$999/.test(a2.text), `${name} assistant follows the conversation (multi-turn): Starter $999: "${a2.text.slice(0, 160).replace(/\s+/g, " ")}"`);
+  }
   await p.locator("[data-cb-close]").click();
   });
   await step(`${name} about`, async () => {
