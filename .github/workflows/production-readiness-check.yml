@@ -195,6 +195,12 @@ jobs:
             q "SELECT type, outcome, COUNT(*) AS n, MAX(received_at) AS latest FROM email_webhook_events GROUP BY type, outcome ORDER BY latest DESC LIMIT 20" \
               | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s)[0].results;if(!r.length)console.log("  (none: no signed Resend webhook has ever been accepted by production)");for(const x of r)console.log(`  ${x.type.padEnd(24)} ${x.outcome.padEnd(10)} ${String(x.n).padStart(4)}  latest ${x.latest}`)}catch{console.log("could not read email_webhook_events")}})'
             echo
+            echo "unmatched webhook events (event time, Resend message id prefix, recipient domain, does any Crestmont email carry that id?):"
+            q "SELECT e.type, e.event_created_at, e.received_at, substr(COALESCE(e.provider_message_id,''),1,8) AS mid, substr(COALESCE(e.recipient,''), instr(COALESCE(e.recipient,''),'@')+1) AS domain, EXISTS (SELECT 1 FROM email_deliveries d WHERE lower(d.provider_message_id) = lower(e.provider_message_id)) AS known FROM email_webhook_events e WHERE e.outcome = 'unmatched' ORDER BY e.received_at DESC LIMIT 15" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s)[0].results;if(!r.length)console.log("  (none)");for(const x of r)console.log(`  ${x.type.padEnd(24)} event ${x.event_created_at} received ${x.received_at} id ${x.mid||"(none)"}… to @${x.domain||"?"} known=${x.known?"yes":"no"}`)}catch{console.log("could not read unmatched events")}})'
+            q "SELECT substr(COALESCE(provider_message_id,''),1,8) AS mid FROM email_deliveries WHERE template = 'staff_invitation' ORDER BY created_at DESC LIMIT 1" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s)[0].results[0];console.log(`  the Owner invitation was accepted by Resend as id ${r?r.mid:"?"}…`)}catch{}})'
+            echo
             echo "latest emails (id, template, status, accepted by Resend, last update):"
             q "SELECT id, template, status, provider_message_id IS NOT NULL AS accepted, updated_at FROM email_deliveries ORDER BY created_at DESC LIMIT 5" \
               | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const x of JSON.parse(s)[0].results)console.log(`  ${x.id} ${x.template.padEnd(20)} ${String(x.status).padEnd(10)} accepted=${x.accepted?"yes":"no"} updated ${x.updated_at}`)}catch{console.log("could not read email_deliveries")}})'
