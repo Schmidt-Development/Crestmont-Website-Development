@@ -1,0 +1,42 @@
+name: Email delivery certification
+
+# Founder directive (2026-11-09): verify actual delivery of every automated email. Sends each template once, rendered from
+# its reviewed sample, through the chosen environment's real Resend setup (API key, sending domain, signed delivery
+# webhook) to Resend's own test inboxes (delivered+…@resend.dev; one bounced+…@resend.dev probe), then follows each
+# message until the webhook answers. No person is emailed; subjects carry "[Delivery check]". About 35 messages per run.
+# Production runs in the `production` environment (Founder approval). Manual, main only.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment to certify"
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+
+concurrency:
+  group: email-certification-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Send every template to Resend's test inboxes and follow each delivery
+        env:
+          BASE: ${{ inputs.target == 'production' && vars.PRODUCTION_URL || (vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev') }}
+          EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
+          ENVIRONMENT_LABEL: ${{ inputs.target }}
+        run: node --no-warnings scripts/email-certification.ts

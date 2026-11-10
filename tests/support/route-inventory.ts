@@ -110,6 +110,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/readiness/deployments": signed("x-crestmont-signature"),
   "POST /api/readiness/release-candidates": signed("x-crestmont-signature"),
   "POST /api/ops/owner-invitation": signed("x-crestmont-signature"),
+  "POST /api/ops/email-certification": signed("x-crestmont-signature"),
   "GET /api/ops/email-deliveries/:id": { ...signed("x-crestmont-signature"), params: { id: "emailDelivery" } },
   "GET /api/readiness/release-authorization": signed("x-crestmont-signature", { staffRead: true }),
   // AI Builds runner API (HMAC-signed with BUILD_RUNNER_SECRET; src/routes/builds.ts)
