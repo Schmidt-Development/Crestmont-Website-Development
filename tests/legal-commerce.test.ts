@@ -103,7 +103,7 @@ test("[LEGAL-003] quote acceptance and package checkout record the development a
   assert.equal((await cust.c.post("/checkout/starter", { maintenance_plan: "essential", terms: "1" })).status, 303);
   const rows = await acceptances(t.db, cust.id);
   assert.deepEqual(rows.map((r) => r.kind), ["data_processing_addendum", "development_agreement", "refund_policy", "terms_of_service"]);
-  assert.ok(rows.every((r) => r.context_type === "package_checkout" && r.version === (r.kind === "data_processing_addendum" ? "2026-10-draft-2" : SEED_VERSION)));
+  assert.ok(rows.every((r) => r.context_type === "package_checkout" && r.version === (r.kind === "data_processing_addendum" ? "2026-11-published-1" : SEED_VERSION)));
 
   // Quote acceptance (proposal flow).
   const rep = await staffClient(t, "owner");
@@ -142,7 +142,9 @@ test("[LEGAL-003] quote acceptance and package checkout record the development a
   assert.equal(vp.status, 200);
   const vhtml = await vp.text();
   assert.match(vhtml, /Limitation of liability/);
-  assert.match(vhtml, /pending attorney review/);
+  assert.doesNotMatch(vhtml, /class="legal-draft"/, "published policies: no draft banner on version pages");
+  assert.match(vhtml, /Current version|Superseded/, "the public status is the version's currency, never a review claim");
+  assert.doesNotMatch(vhtml, /Attorney reviewed/);
   assert.equal((await t.client().get(`/legal/terms/versions/nope`)).status, 404);
   assert.equal((await t.client().get(`/legal/not-a-policy/versions/${SEED_VERSION}`)).status, 404);
 });

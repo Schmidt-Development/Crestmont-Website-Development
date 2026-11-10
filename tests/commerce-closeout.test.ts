@@ -78,8 +78,10 @@ test("[PAY-010] payments mode: production refuses test keys and needs the Founde
   assert.equal(expectedLivemode({ ENVIRONMENT: "production" }), null, "production without authorisation refuses every event");
   assert.equal(expectedLivemode({ ENVIRONMENT: "production", STRIPE_SECRET_KEY: "sk_live_fixture", PAYMENTS_LIVE_AUTHORIZED: "yes" }), true);
   assert.equal(expectedLivemode({ ENVIRONMENT: "staging", STRIPE_SECRET_KEY: "sk_test_fixture" }), false);
-  // CREST-GAP-010: even authorised, production checkout stays closed while the policies are drafts.
-  assert.match(commerceBlock({ ENVIRONMENT: "production", STRIPE_SECRET_KEY: "sk_live_fixture", PAYMENTS_LIVE_AUTHORIZED: "yes" }, { "business.legal_name": "Crestmont Test Entity LLC (TEST DATA)" }) ?? "", /drafts/);
+  // CREST-GAP-010: authorised, production checkout still stays closed until the operating entity is recorded. The policies
+  // are published (Founder, 2026-11-10), so with the legal name in place nothing else blocks it.
+  assert.match(commerceBlock({ ENVIRONMENT: "production", STRIPE_SECRET_KEY: "sk_live_fixture", PAYMENTS_LIVE_AUTHORIZED: "yes" }, {}) ?? "", /legal entity|operating business entity/i);
+  assert.equal(commerceBlock({ ENVIRONMENT: "production", STRIPE_SECRET_KEY: "sk_live_fixture", PAYMENTS_LIVE_AUTHORIZED: "yes" }, { "business.legal_name": "Crestmont Test Entity LLC (TEST DATA)" }), null);
   assert.equal(commerceBlock({ ENVIRONMENT: "staging", STRIPE_SECRET_KEY: "sk_test_fixture" }, {}), null, "staging unchanged");
 });
 
@@ -114,8 +116,7 @@ test("[PAY-010] production with a test key shows payments as not configured; pac
   const authorised = await createTestApp({ ENVIRONMENT: "production", PUBLIC_LAUNCH: "open", STRIPE_SECRET_KEY: "sk_live_fixture", PAYMENTS_LIVE_AUTHORIZED: "yes", STRIPE_WEBHOOK_SECRET: WHSEC });
   await authorised.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('business.legal_name','Crestmont Test Entity LLC (TEST DATA)',?)`).bind(nowIso()).run();
   const actx = await buildContext(new Request("http://crestmont.test/pricing"), authorised.env);
-  assert.equal(actx.payments.configured, false, "draft policies keep production checkout closed even when live is authorised");
-  assert.match((actx.payments as unknown as { reason: string }).reason, /drafts pending attorney review/);
+  assert.equal(actx.payments.configured, true, "authorised live key + recorded legal entity + published policies: production checkout opens");
   for (const path of ["/", "/pricing", "/pricing/compare"]) {
     const page = await (await t.client().get(path)).text();
     // Founder, 2026-11-09: standard packages are bought through intake → scope, price and agreement → Stripe Checkout,
@@ -569,7 +570,7 @@ test("[SALES-004] fault injection: a failure while accepting leaves nothing acce
   // CREST-GAP-039: confirmation lists the exact agreement versions.
   const mail = await lastEmail(t.db, q.cu.email);
   assert.equal(mail?.template, "proposal_accepted");
-  assert.match(mail!.text_body, /Custom development agreement \(draft\) — version \S+/);
+  assert.match(mail!.text_body, /Custom development agreement — version \S+/);
   // A second acceptance (double submit) is refused and creates nothing.
   assert.equal((await q.cu.c.post(`${q.qpath}/accept`, { agree: "1" })).status, 409);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM orders WHERE lead_id = ?`, q.leadId), 1);
@@ -694,14 +695,15 @@ test("[PAY-010] [LAUNCH-003] /api/health lists every production payment blocker 
   assert.equal(h.payments.checkout, "closed");
   assert.equal(h.payments.keyKind, "test");
   const b = h.payments.blockers.join(" | ");
-  for (const re of [/PAYMENTS_LIVE_AUTHORIZED/, /test key; production needs a live key/, /attorney review/, /legal name/]) assert.match(b, re);
+  for (const re of [/PAYMENTS_LIVE_AUTHORIZED/, /test key; production needs a live key/, /legal name/]) assert.match(b, re);
+  assert.doesNotMatch(b, /attorney review/, "the policies are published: the draft banner is not a blocker");
   assert.doesNotMatch(JSON.stringify(h), /sk_test_fixture|whsec/i, "never a key or secret");
   const live = await createTestApp({ ENVIRONMENT: "production", PUBLIC_LAUNCH: "open", PAYMENTS_LIVE_AUTHORIZED: "yes", STRIPE_SECRET_KEY: "sk_live_fixture", STRIPE_WEBHOOK_SECRET: WHSEC });
   await live.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('business.legal_name','Crestmont Test Entity LLC (TEST DATA)',?)`).bind(nowIso()).run();
   const lh = await (await live.client().get("/api/health")).json() as { customerAccess: string; payments: { keyKind: string; blockers: string[] } };
   assert.equal(lh.customerAccess, "open");
   assert.equal(lh.payments.keyKind, "live");
-  assert.deepEqual(lh.payments.blockers.map((x) => /attorney review/.test(x)), [true], "with everything else in place, only the draft banner remains");
+  assert.deepEqual(lh.payments.blockers, [], "with the authorization, a live key, the webhook secret, the published policies and the legal name, nothing blocks checkout");
 });
 
 test("[CAT-004] [WEB-005] public pages state that every website package requires a minimum maintenance plan; none calls the plans optional", async () => {

@@ -43,8 +43,8 @@ async function versionPage(ctx: AppContext, kindOrSlug: string, version: string)
   const blocks = ag.textBlocks(v.body_text);
   return htmlResponse(ctx, publicLayout(ctx, { title: `${docTitle(v)} — version ${v.version}`, noindex: true }, html`<section class="section"><div class="container">
 <div class="eyebrow">Policies · version history</div><h1>${docTitle(v)}</h1>
-${dl([["Version", v.version], ["Effective", formatDateTime(v.effective_at)], ["Status", reviewBadge(v.attorney_reviewed)], ["SHA-256 of text", html`<code style="word-break:break-all">${v.body_sha256}</code>`], ["Current version", latest?.id === v.id ? "Yes" : html`No — <a href="${versionHref(k.kind, latest?.version ?? "")}">see the current version</a>`]])}
-${v.attorney_reviewed ? "" : html`<div class="legal-draft" role="note" style="margin-top:1.5rem">${DRAFT_BANNER}</div>`}
+${dl([["Version", v.version], ["Effective", formatDateTime(v.effective_at)], ["Status", latest?.id === v.id ? badge("verified", "Current version") : badge("muted", "Superseded")], ["SHA-256 of text", html`<code style="word-break:break-all">${v.body_sha256}</code>`], ["Current version", latest?.id === v.id ? "Yes" : html`No — <a href="${versionHref(k.kind, latest?.version ?? "")}">see the current version</a>`]])}
+${v.attorney_reviewed || !DRAFT_BANNER ? "" : html`<div class="legal-draft" role="note" style="margin-top:1.5rem">${DRAFT_BANNER}</div>`}
 <p class="faint">This is the exact text stored for this version. Anyone who accepted this version accepted this text.</p>
 <article class="prose legal">${blocks.map((b) => b.t === "h2" ? html`<h2>${b.s}</h2>` : b.t === "p" ? html`<p>${b.s}</p>` : html`<ul>${b.items.map((i) => html`<li>${i}</li>`)}</ul>`)}</article>
 <hr><p><a href="/legal/${k.slug}/versions">All versions of this document</a> · <a href="/legal/${k.slug}">Current page</a></p></div></section>`));
@@ -66,7 +66,7 @@ async function portalAgreements(ctx: AppContext) {
   const rows = await ag.orgAcceptances(ctx.db, org.organizationId, pg);
   return portalPage(ctx, "Agreements", html`${pageHead("Agreements", undefined, org.organizationName)}
 <p class="muted">Every time someone in your organization accepted Crestmont's terms or policies, we recorded who accepted, when, from which IP address, and the exact version of the text. Select a version to read exactly what was accepted.</p>
-${alert("info", "All Crestmont policies are currently drafts pending attorney review.")}
+${DRAFT_BANNER ? alert("info", "All Crestmont policies are currently drafts pending attorney review.") : ""}
 ${table(rows.slice(0, pg.limit), [
     { header: "Accepted", cell: (r) => formatDateTime(r.accepted_at) }, { header: "By", cell: (r) => `${r.user_name} (${r.user_email})` },
     { header: "Document", cell: (r) => docTitle(r) }, { header: "Version", cell: (r) => html`<a href="${versionHref(r.kind, r.version)}">${r.version}</a>` },

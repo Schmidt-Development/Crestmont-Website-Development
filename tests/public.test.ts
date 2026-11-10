@@ -429,12 +429,15 @@ test("[WEB-010] robots disallows everything outside production; sitemap lists pu
   assert.match(home, /<link rel="canonical" href="http:\/\/crestmont\.test\/">/);
 });
 
-test("[LEGAL-001] [LEGAL-002] [WEB-008] policy pages are drafts pending attorney review and never claim approval", async () => {
+test("[LEGAL-001] [LEGAL-002] [WEB-008] policy pages are published without draft banners and never claim attorney review or approval", async () => {
+  // Founder, 2026-11-10: the draft / attorney-review warnings are removed from customer-facing documents. No document may
+  // claim it was reviewed or approved by an attorney (LEGAL-004 stays open until a real review is recorded).
   const { client } = await createTestApp();
   const c = client();
+  assert.doesNotMatch(await (await c.get("/legal")).text(), /pending attorney review|legal-draft/);
   for (const slug of LEGAL_SLUGS) {
     const h = await (await c.get(`/legal/${slug}`)).text();
-    assert.match(h, /Draft — pending attorney review/, slug);
+    assert.doesNotMatch(h, /Draft — pending attorney review|class="legal-draft"|\(draft\)|is a draft for attorney review|drafts pending attorney review/, slug);
     assert.doesNotMatch(text(h), /(?<!not (yet )?(been )?)\b(reviewed|approved) by (an |our )?attorney|attorney[- ]approved/i, slug);
   }
   const refunds = text(await (await c.get("/legal/refunds")).text());
