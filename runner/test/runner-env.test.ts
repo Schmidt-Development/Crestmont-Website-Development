@@ -166,8 +166,10 @@ test("[AIB-RUNNER] installer: configuration preserved across re-runs, inputs val
   assert.match(install, /key = "BUILD_WORKER_KEY_FILE"; value = \$\(if \(\$WorkerId\) \{ "\/run\/secrets\/worker_key" \} else \{ "" \}\)/);
   assert.match(install, /CrestmontRunner-GpuTelemetry/);
   const autoStart = install.slice(install.indexOf('if (-not $NoAutoStart) {'));
-  assert.doesNotMatch(autoStart.slice(0, autoStart.indexOf("Register-ScheduledTask")), /Collect-Evidence\.ps1/, "tools are not copied only with auto-start");
-  assert.match(install, /foreach \(\$tool in @\("Start-CrestmontRunner\.ps1", "Get-RunnerHealth\.ps1", "Collect-Evidence\.ps1", "Discover-Hardware\.ps1", "Write-GpuTelemetry\.ps1", "Test-Node1Dispatch\.ps1", "Uninstall-CrestmontRunner\.ps1"\)\)/);
+  assert.doesNotMatch(autoStart.slice(0, autoStart.indexOf("Register-CrestmontBackgroundTask")), /Collect-Evidence\.ps1/, "tools are not copied only with auto-start");
+  // BackgroundTask.ps1 is dot-sourced by the installed scripts and Repair-WindowsAutomation.ps1 is run on the
+  // machine when terminal windows need diagnosing, so both have to be copied next to the install.
+  assert.match(install, /foreach \(\$tool in @\("BackgroundTask\.ps1", "Start-CrestmontRunner\.ps1", "Get-RunnerHealth\.ps1", "Collect-Evidence\.ps1", "Discover-Hardware\.ps1", "Write-GpuTelemetry\.ps1", "Test-Node1Dispatch\.ps1", "Uninstall-CrestmontRunner\.ps1", "Repair-WindowsAutomation\.ps1"\)\)/);
   assert.match(install, /\$healthExit = \$LASTEXITCODE[\s\S]{0,200}if \(\$healthExit -ne 0\) \{[\s\S]{0,300}exit 1/, "no 'Done' when health fails");
   assert.match(install, /KernelVersion[\s\S]{0,200}WSL2/, "WSL 2 backend detected from Docker Desktop's kernel");
   assert.match(install, /docker\.exe compose version --short/, "Compose >= 2.24 for the optional env file");

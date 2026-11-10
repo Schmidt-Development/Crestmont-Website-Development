@@ -16,7 +16,12 @@ Architecture and vocabulary: `README.md`. Licences: `DATA-SOURCES.md`. Calling r
    - checks Node ≥ 22.18, the DuckDB CLI (`winget install DuckDB.cli`), and that Ollama answers on 127.0.0.1;
    - stores the secret encrypted with DPAPI;
    - runs a preflight;
-   - registers the `CrestmontResearch-Worker` scheduled task (starts at logon, restarts on failure, no time limit).
+   - registers the `CrestmontResearch-Worker` scheduled task (starts at logon, no time limit, one instance only, and
+     **no terminal window**: session 0 with `-RunWhenLoggedOff`, otherwise the hidden launcher - see
+     `docs/ai-builds/NODE1-INSTALL.md`, *No terminal windows*). Restarts are **bounded**: the task retries at most 4
+     times, and the supervisor allows at most 10 restarts per hour with exponential backoff (5 s doubling to a 300 s
+     cap) before it stops and waits for the next trigger. `logs\supervisor.jsonl` records every exit, backoff and
+     budget decision.
 
    Optional tools:
    - Playwright, for mobile rendering checks: `npm i -g playwright && npx playwright install chromium`, then set `PLAYWRIGHT=on` in `settings.env`. It is off by default because Chromium resolves names itself: a hostile site could rebind DNS to an address on your LAN. Turn it on only if nothing on the workstation's network answers without authentication (router admin, NAS, printers), or put the workstation on an isolated network/VLAN;

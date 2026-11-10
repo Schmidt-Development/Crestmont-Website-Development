@@ -97,6 +97,7 @@ $script:Problems = New-Object System.Collections.ArrayList
 . (Join-Path $PSScriptRoot "SquidConf.ps1")
 . (Join-Path $PSScriptRoot "RunnerEnv.ps1")
 . (Join-Path $PSScriptRoot "OllamaProbe.ps1")
+. (Join-Path $PSScriptRoot "BackgroundTask.ps1")
 
 function Step([string]$Text) { Write-Host ""; Write-Host "==> $Text" -ForegroundColor Cyan }
 function Ok([string]$Text) { Write-Host "    OK   $Text" -ForegroundColor Green }
@@ -451,7 +452,7 @@ $composeEnv | Set-Content -Encoding ascii (Join-Path $Compose ".env")
 Ok "Wrote docker-compose.yml, proxy\squid.conf, runner.env (managed, no secret values); runner.local.env kept"
 # Tool scripts next to the install, whether or not auto-start is registered (Get-RunnerHealth, Collect-Evidence, ...).
 New-Item -ItemType Directory -Force -Path (Join-Path $State "telemetry") | Out-Null
-foreach ($tool in @("Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "Discover-Hardware.ps1", "Write-GpuTelemetry.ps1", "Test-Node1Dispatch.ps1", "Uninstall-CrestmontRunner.ps1")) {
+foreach ($tool in @("BackgroundTask.ps1", "Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "Discover-Hardware.ps1", "Write-GpuTelemetry.ps1", "Test-Node1Dispatch.ps1", "Uninstall-CrestmontRunner.ps1", "Repair-WindowsAutomation.ps1")) {
   Copy-Item -Force (Join-Path $PSScriptRoot $tool) (Join-Path $InstallDir $tool)
 }
 
@@ -520,23 +521,55 @@ if (-not $NoStart) {
 }
 if (-not $NoAutoStart) {
   Step "Auto-start after reboot"
-  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"{2}" -f (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), $InstallDir, $(if ($OllamaInDocker) { " -OllamaInDocker" } elseif ($PreserveOllamaConfig) { " -NoOllamaStart" } else { "" }))
-  # Docker Desktop and the Ollama tray app run in a user session, so the task runs at this user's logon.
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-  # Watchdog: the same idempotent start script every 5 minutes while the user is signed in, so a stopped Docker Desktop
-  # or compose stack comes back on its own (crashed containers restart by themselves: restart unless-stopped). It does
-  # not help before logon after a reboot (Docker Desktop needs a session; NODE1-INSTALL.md section 7).
+  # Every task is registered through Register-CrestmontBackgroundTask, the ONLY place in this kit that calls
+  # Register-ScheduledTask. It launches each task through the hidden wscript.exe shim, which is the configuration
+  # verified working on the build machine. Registered the obvious way - powershell.exe with LogonType Interactive -
+  # a task pops a terminal window on every run however many times -WindowStyle Hidden is passed, and the GPU
+  # sampler below runs every minute.
+  #
+  # Triggers, arguments and settings below are exactly what these tasks have always carried. The helper also
+  # exports each existing task to state\task-backup before replacing it and puts it back if registration fails,
+  # so re-running this installer cannot leave a working machine with a broken task.
+  $startArgument = @("-InstallDir", $InstallDir)
+  if ($OllamaInDocker) { $startArgument += "-OllamaInDocker" } elseif ($PreserveOllamaConfig) { $startArgument += "-NoOllamaStart" }
+
+  # Docker Desktop and the Ollama tray app run in a user session, so the task runs at this user's logon, and the
+  # same idempotent start script repeats every 5 minutes as its own watchdog, so a stopped Docker Desktop or
+  # compose stack comes back on its own (crashed containers restart by themselves: restart unless-stopped). That
+  # does not help before logon after a reboot (Docker Desktop needs a session; NODE1-INSTALL.md section 7).
   # With -PreserveOllamaConfig it never starts Ollama either (-NoOllamaStart): a shared Ollama belongs to its owner.
-  $watchdog = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)
-  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
-  Register-ScheduledTask -TaskName "CrestmontRunner-Start" -Action $action -Trigger @($trigger, $watchdog) -Settings $settings -RunLevel Limited -Force | Out-Null
-  Ok "Scheduled task 'CrestmontRunner-Start' runs at logon of $env:USERNAME (see WINDOWS-SUPERCOMPUTER.md for unattended reboots)"
+  $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)
+  $startTask = Register-CrestmontBackgroundTask -TaskName "CrestmontRunner-Start" -InstallDir $InstallDir `
+    -ScriptPath (Join-Path $InstallDir "Start-CrestmontRunner.ps1") -ScriptArgument $startArgument `
+    -Trigger @($logonTrigger, $watchdogTrigger) `
+    -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 3 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 60)
+  Ok "Scheduled task 'CrestmontRunner-Start' runs at logon of $env:USERNAME and every 5 minutes, $($startTask.Strategy) (no terminal window; see WINDOWS-SUPERCOMPUTER.md for unattended reboots)"
+
   # V4: GPU telemetry every minute (nvidia-smi on the host -> state\telemetry\gpu.json, read-only in the runner).
-  $gAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"" -f (Join-Path $InstallDir "Write-GpuTelemetry.ps1"), $InstallDir)
   $gTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
-  $gSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-  Register-ScheduledTask -TaskName "CrestmontRunner-GpuTelemetry" -Action $gAction -Trigger $gTrigger -Settings $gSettings -RunLevel Limited -Force | Out-Null
-  Ok "Scheduled task 'CrestmontRunner-GpuTelemetry' samples nvidia-smi every minute"
+  $gpuTask = Register-CrestmontBackgroundTask -TaskName "CrestmontRunner-GpuTelemetry" -InstallDir $InstallDir `
+    -ScriptPath (Join-Path $InstallDir "Write-GpuTelemetry.ps1") -ScriptArgument @("-InstallDir", $InstallDir) `
+    -Trigger $gTrigger `
+    -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 0 -ExecutionTimeLimitMinutes 1)
+  Ok "Scheduled task 'CrestmontRunner-GpuTelemetry' samples nvidia-smi every minute, $($gpuTask.Strategy)"
+
+  # Verified, not assumed: each task is read back to confirm it cannot put a console on the desktop. That is the
+  # defect this section exists to prevent, so it stops the install rather than being noted in passing - a re-run
+  # must not be able to reintroduce the popups quietly.
+  foreach ($t in @("CrestmontRunner-Start", "CrestmontRunner-GpuTelemetry")) {
+    $check = Test-CrestmontTaskIsWindowless -TaskName $t
+    if ($check.Ok) { Ok "$t opens no terminal window ($($check.Reason))" }
+    else { Fail "$t could open a terminal window: $($check.Reason). Its previous definition is in state\task-backup; Repair-WindowsAutomation.ps1 -DiagnoseOnly reports the details." }
+  }
+  if ($script:Problems.Count) { Exit-WithProblem }
+  # An earlier revision of this installer split the 5-minute repetition into a separate CrestmontRunner-Watchdog
+  # task. The repetition is back on CrestmontRunner-Start, so that task would duplicate the work: remove it.
+  if (Get-ScheduledTask -TaskName "CrestmontRunner-Watchdog" -ErrorAction SilentlyContinue) {
+    [void](Export-CrestmontTaskBackup -TaskName "CrestmontRunner-Watchdog" -BackupDir (Join-Path $State "task-backup"))
+    Unregister-ScheduledTask -TaskName "CrestmontRunner-Watchdog" -Confirm:$false
+    Ok "Removed the superseded CrestmontRunner-Watchdog task (its 5-minute trigger is back on CrestmontRunner-Start; definition kept in state\task-backup)"
+  }
 }
 
 Step "Health"
