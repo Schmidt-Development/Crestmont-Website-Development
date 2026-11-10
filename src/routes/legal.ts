@@ -4,6 +4,7 @@
 //   Portal:   /portal/agreements, /portal/billing/receipts/:paymentId  (requireCustomerOrg; org-scoped queries)
 //   Staff:    /staff/legal (customers.read), /staff/finance/receipts/:paymentId (finance.read),
 //             /staff/pricing (propose: quote.write or settings.operational; decide: Owner + pricing.change)
+import { publicPhoneFrom } from "../domain/business-identity.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatCents, formatDate, formatDateTime, label, type SafeHtml } from "../lib/html.ts";
@@ -143,7 +144,7 @@ ${r.refunds.map((rf) => html`<tr><th scope="row">Refunded ${longDate(rf.at)}</th
 ${r.refundedCents ? html`<tr class="is-highlight"><th scope="row">Net amount after refunds</th><td>${usd(r.payment.amount_cents - r.refundedCents)}</td></tr>` : ""}</tbody></table>
 <section class="fin-doc__section"><h2 class="fin-doc__label">Payment details</h2><dl class="fin-doc__details">${details.map(([k, v]) => html`<dt>${k}</dt><dd>${v}</dd>`)}</dl></section>
 <footer class="fin-doc__foot"><p>This receipt confirms a payment received by Crestmont Website Development, as confirmed by our payment processor, Stripe.${r.tax ? html` ${taxStatement(r.tax)}` : ""}</p>
-<p>Questions about this payment? Contact ${id.billingEmail} and quote ${r.receiptLabel}.</p><p class="fin-doc__thanks">Thank you for your business.</p>
+<p>Questions about this payment? Contact ${id.billingEmail}${id.phone ? html` or call <a href="tel:${publicPhoneFrom(ctx.settings)?.tel ?? ""}">${id.phone}</a>` : ""} and quote ${r.receiptLabel}.</p><p class="fin-doc__thanks">Thank you for your business.</p>
 <p>${[id.tradingName, id.legalName].filter(Boolean).join(" · ")}</p></footer>
 </article>
 ${staff ? html`<details class="card fin-doc__tech no-print" data-testid="technical-details"><summary>Technical details (staff only)</summary>

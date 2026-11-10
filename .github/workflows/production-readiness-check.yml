@@ -159,7 +159,10 @@ jobs:
               echo "- apex DNS records: $recs (a CNAME here blocks the custom domain)" >> "$GITHUB_STEP_SUMMARY"
               doms=$(api "/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/domains?hostname=$host" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(!j.success)return console.log("unreadable");console.log((j.result||[]).map(d=>d.hostname+" → "+d.service+" ("+d.environment+")").join(", ")||"none yet (the first deploy attaches it)")}catch{console.log("unreadable")}})')
               echo "- Worker custom domain: $doms" >> "$GITHUB_STEP_SUMMARY"
+              wrecs=$(api "/zones/$zid/dns_records?name=www.$host" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(!j.success)return console.log("unreadable");console.log((j.result||[]).map(r=>r.type+(r.proxied?"(proxied)":"")+(r.meta&&r.meta.read_only?"(worker-managed)":"")).join(",")||"none")}catch{console.log("unreadable")}})')
+              echo "- www DNS records: $wrecs (the deploy attaches www as a Worker custom domain; any other record must be removed first)" >> "$GITHUB_STEP_SUMMARY"
               if echo "$recs" | grep -q CNAME; then echo "::error title=Apex CNAME::$host has a CNAME record; remove it before the first deploy (docs/DEPLOYMENT.md §7)"; exit 1; fi
+              if echo "$wrecs" | grep -Eq "CNAME|^A|,A|AAAA" && ! echo "$wrecs" | grep -q "worker-managed"; then echo "::warning title=www record exists::www.$host already has DNS records ($wrecs). Delete them in Cloudflare → DNS before deploying, so the deploy can attach www as a custom domain."; fi
               echo "::notice title=DNS::$host zone is active on this account; the first deploy can attach the custom domain" ;;
             pending)
               echo "::error title=DNS not active::the $host zone is on this Cloudflare account but PENDING: change the nameservers at the registrar to $(echo "$verdict" | cut -d'|' -f3) (currently $(echo "$verdict" | cut -d'|' -f4)). The production deploy cannot attach the domain until the zone is active."; exit 1 ;;

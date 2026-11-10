@@ -1,3 +1,4 @@
+import { publicPhoneFrom } from "../domain/business-identity.ts";
 // Page shells. Every surface shares the design system in /assets/app.css (BRAND-006) — see docs/frontend/DESIGN.md.
 import { html, raw, safeUrl, type SafeHtml } from "../lib/html.ts";
 import type { AppContext } from "../app/context.ts";
@@ -128,6 +129,14 @@ const PUBLIC_NAV = [
 const menuButton = (target: string, extraClass = "") =>
   html`<button class="nav-toggle${extraClass}" type="button" data-toggle="${target}" aria-controls="${target}" aria-expanded="false"><span class="nav-toggle__icon" aria-hidden="true"></span>Menu</button>`;
 
+/** Crestmont's phone as a tel: link (Business settings only; nothing when no number is recorded). */
+export function phoneLink(ctx: AppContext, cls: string, wrap?: "p"): SafeHtml {
+  const ph = publicPhoneFrom(ctx.settings);
+  if (!ph) return html``;
+  const a = html`<a class="${cls}" href="tel:${ph.tel}" data-testid="business-phone" aria-label="Call Crestmont at ${ph.display}">${ph.display}</a>`;
+  return wrap === "p" ? html`<p>${a}</p>` : a;
+}
+
 export function publicLayout(ctx: AppContext, meta: PageMeta, body: SafeHtml): SafeHtml {
   const here = ctx.url.pathname;
   // First-party campaign attribution (CRM-001): any public landing page records UTM parameters in cm_attr.
@@ -143,7 +152,7 @@ ${intro ? introOverlay() : ""}<a class="skip" href="#main">Skip to content</a>${
 <header class="site-header" data-site-header><div class="container">${brandMark()}
 ${menuButton("site-nav")}
 <nav class="nav" id="site-nav" aria-label="Primary">${PUBLIC_NAV.map(([h, l]) => html`<a href="${h}"${here === h || here.startsWith(h + "/") ? html` aria-current="page"` : ""}>${l}</a>`)}
-${account}${ctaLink("Request a quote", "/quote", "primary", "sm", "nav__cta")}</nav></div></header>
+${phoneLink(ctx, "nav__phone")}${account}${ctaLink("Request a quote", "/quote", "primary", "sm", "nav__cta")}</nav></div></header>
 <main id="main">${body}</main>
 ${siteFooter(ctx)}${flashToast(ctx)}${assistantWidget(ctx)}</body></html>`;
 }
@@ -183,7 +192,7 @@ function siteFooter(ctx: AppContext): SafeHtml {
   return html`<footer class="site-footer"><div class="container"><div class="footer-grid" data-reveal-group>
 <div data-reveal>${brandMark()}<p class="faint" style="margin-top:1.25rem;max-width:26rem">Website design, development and digital systems for businesses across the United States.</p>
 <p class="footer-cta">${ctaLink("Request a custom quote", "/quote", "primary", "sm")}</p>
-<p><a href="mailto:${email}">${email}</a></p>${hours ? html`<p class="faint">Staffed support: ${hours}</p>` : ""}</div>
+<p><a href="mailto:${email}">${email}</a></p>${phoneLink(ctx, "footer-phone", "p")}${hours ? html`<p class="faint">Staffed support: ${hours}</p>` : ""}</div>
 <div data-reveal><h4>Services</h4>${links([["/services", "All services"], ["/services/website-design-development", "Design & development"], ["/services/website-redesign", "Redesign"], ["/services/ai-receptionist", "AI Receptionist"], ["/services/custom-development", "Custom development"], ["/services/technical-seo", "Technical SEO"], ["/hosting-maintenance", "Hosting & maintenance"]])}</div>
 <div data-reveal><h4>Company</h4>${links([["/about", "About"], ["/process", "Process"], ["/portfolio", "Portfolio"], ["/faq", "FAQs"], ["/contact", "Contact"], ["/pricing/compare", "Compare packages"]])}</div>
 <div data-reveal><h4>Policies</h4>${links([["/legal/privacy", "Privacy"], ["/legal/terms", "Terms"], ["/legal/development-agreement", "Development agreement"], ["/legal/refunds", "Refunds"], ["/legal/cancellation", "Cancellation"], ["/legal/support", "Support policy"], ["/legal/accessibility", "Accessibility"], ["/legal/disclosures", "Business disclosures"]])}</div>

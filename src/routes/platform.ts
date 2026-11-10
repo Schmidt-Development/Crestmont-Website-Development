@@ -193,7 +193,7 @@ ${textarea({ name: "business.address", id: "f-address", label: "Registered busin
 ${checkbox("address_confirm", "I confirm this is a registered business address and not a residence.", { checked: !!v?.address_confirm })}
 <h2 class="card__title">Contact</h2>
 <div class="grid grid-2">${input({ name: "contact.email", id: "f-cemail", label: "Public contact email", type: "email", value: val("contact.email"), maxlength: 254 })}
-${input({ name: "contact.phone", id: "f-cphone", label: "Public phone", value: val("contact.phone"), maxlength: 40, hint: "Business line only. No phone number has been purchased for the AI receptionist yet." })}</div>
+${input({ name: "contact.phone", id: "f-cphone", label: "Public phone", value: val("contact.phone"), maxlength: 40, hint: "Shown as a tap-to-call link in the site header, footer, contact page, customer portal, emails and receipts. Leave blank to show the receptionist number instead." })}</div>
 ${input({ name: "security.contact_email", id: "f-secemail", label: "Security reporting email (security.txt)", type: "email", value: val("security.contact_email"), maxlength: 254, hint: "Published at /.well-known/security.txt for vulnerability reports (FD-41). Leave empty until the mailbox exists and is monitored; the file is not served without it." })}
 <h2 class="card__title">Recovery targets</h2>
 <p class="hint">Used by the Backups page to judge restore drills. Leave blank until the Founder approves targets; nothing is assumed when blank.</p>
@@ -202,7 +202,7 @@ ${input({ name: "backup.rto_target_hours", id: "f-rto", label: "Recovery time ob
 <h2 class="card__title">Sales</h2>
 ${select({ name: "crm.default_lead_owner", label: "Default owner for new web leads", options: (await leadOwnerOptions(ctx)).map((u) => ({ value: u.id, label: `${u.display_name} (${u.email})` })), value: val("crm.default_lead_owner"), includeBlank: "Unassigned (Owners and sales are notified)" })}
 <h2 class="card__title">AI receptionist</h2>
-${input({ name: "voice.phone_number", id: "f-voice", label: "Receptionist phone number (only once purchased)", value: val("voice.phone_number"), maxlength: 40, hint: "Record the number only after the Founder-approved provider has provisioned it. The AI receptionist page shows this value; blank means no number." })}
+${input({ name: "voice.phone_number", id: "f-voice", label: "Receptionist phone number (only once purchased)", value: val("voice.phone_number"), maxlength: 40, hint: "The AI receptionist's own number (as provisioned in Retell). Shown on the AI Receptionist page, and everywhere the public phone appears when Public phone is blank." })}
 <h2 class="card__title">Support</h2>
 <div class="grid grid-2">${input({ name: "staffed_hours", label: "Staffed support hours", value: v?.staffed_hours ?? support?.staffed_hours ?? ctx.settings["support.staffed_hours"] ?? "", maxlength: 160, required: true, hint: "Shown publicly. Do not claim 24/7 human coverage unless it is actually staffed (SUP-005)." })}
 ${input({ name: "first_response_target_hours", label: "First-response target (staffed hours)", type: "number", min: 1, max: 168, value: v?.first_response_target_hours ?? support?.first_response_target_hours ?? "", required: true })}</div>

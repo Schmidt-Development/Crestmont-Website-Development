@@ -13,7 +13,7 @@
 // security), so no unsubscribe link is shown. A template marked "marketing" must be sent with an
 // unsubscribe URL and the layout then adds the link; sending marketing mail without one is refused.
 import { escapeHtml } from "../lib/html.ts";
-import { OPERATING_LEGAL_NAME } from "../domain/business-identity.ts";
+import { publicPhoneFrom, OPERATING_LEGAL_NAME } from "../domain/business-identity.ts";
 import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
 
@@ -735,8 +735,8 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
 };
 
 // ───────────── Layout ─────────────
-export interface MailIdentity { legalName: string | null; address: string | null; contactEmail: string | null }
-export const IDENTITY_KEYS = ["business.legal_name", "business.address", "contact.email"] as const;
+export interface MailIdentity { legalName: string | null; address: string | null; contactEmail: string | null; phone?: string | null }
+export const IDENTITY_KEYS = ["business.legal_name", "business.address", "contact.email", "contact.phone", "voice.phone_number"] as const;
 export const PENDING = {
   legalName: "Legal business name pending (entity not yet established)",
   address: "Registered business address pending",
@@ -745,7 +745,7 @@ export const PENDING = {
 
 export function identityFrom(settings: Record<string, string>): MailIdentity {
   const v = (k: string) => settings[k]?.trim() || null;
-  return { legalName: v("business.legal_name") ?? OPERATING_LEGAL_NAME, address: v("business.address"), contactEmail: v("contact.email") };
+  return { legalName: v("business.legal_name") ?? OPERATING_LEGAL_NAME, address: v("business.address"), contactEmail: v("contact.email"), phone: publicPhoneFrom(settings)?.display ?? null };
 }
 
 const oneLine = (s: string) => s.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 250);
@@ -763,7 +763,7 @@ export function renderLayout(c: MailContent, opts: { category: MailCategory; ide
   const cta = c.cta
     ? `<p style="margin:24px 0"><a href="${escapeHtml(httpUrl(c.cta.url))}" style="display:inline-block;background:#c9a54c;color:#0b0b0c;text-decoration:none;padding:12px 22px;border-radius:4px;font-weight:600">${escapeHtml(c.cta.label)}</a></p>`
     : "";
-  const identityLines = [id.legalName ?? PENDING.legalName, id.address ?? PENDING.address, id.contactEmail ?? PENDING.contactEmail];
+  const identityLines = [id.legalName ?? PENDING.legalName, id.address ?? PENDING.address, id.contactEmail ?? PENDING.contactEmail, ...(id.phone ? [`Phone: ${id.phone}`] : [])];
   const purpose = marketing ? "You are receiving this because you opted in to Crestmont updates." : "This is a transactional message about your account or project.";
   const unsub = marketing ? `<br><a href="${escapeHtml(httpUrl(opts.unsubscribeUrl!))}" style="color:#c9a54c">Unsubscribe</a>` : "";
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHtml(oneLine(c.subject))}</title></head><body style="margin:0;background:#0b0b0c;font-family:Georgia,serif">
@@ -796,7 +796,7 @@ async function loadIdentity(ctx: { db?: Db; settings?: Record<string, string> })
   if (ctx.settings && Object.keys(ctx.settings).length) return identityFrom(ctx.settings);
   if (!ctx.db) return identityFrom({});
   try {
-    const rows = (await ctx.db.prepare(`SELECT key, value FROM business_settings WHERE key IN (?,?,?)`).bind(...IDENTITY_KEYS).all<{ key: string; value: string }>()).results;
+    const rows = (await ctx.db.prepare(`SELECT key, value FROM business_settings WHERE key IN (${IDENTITY_KEYS.map(() => "?").join(",")})`).bind(...IDENTITY_KEYS).all<{ key: string; value: string }>()).results;
     return identityFrom(Object.fromEntries(rows.map((r) => [r.key, r.value])));
   } catch { return identityFrom({}); }
 }

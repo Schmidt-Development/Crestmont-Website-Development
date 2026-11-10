@@ -9,6 +9,8 @@ import type { Env } from "../src/app/context.ts";
 import type { Actor } from "../src/domain/authz.ts";
 import { MAINTENANCE_PLANS, PACKAGES, priceQuote, type MaintenanceDef } from "../src/domain/catalog.ts";
 import { agreementDrift, factsFromSettings, renderAll, AGREEMENT_KINDS, SEED_VERSION } from "../src/services/agreements.ts";
+/** Policies published 2026-11-10 (migrations/0102): new versions of the documents whose text changed. */
+const PUBLISHED = "2026-11-published-1";
 import { sha256Hex } from "../src/lib/crypto.ts";
 import { decidePriceChange, proposePriceChange, effectivePrice, withEffectivePackagePrice } from "../src/services/pricing-approvals.ts";
 import { startMaintenanceCheckout } from "../src/services/billing.ts";
@@ -88,7 +90,7 @@ test("[LEGAL-003] registration records Terms + Privacy acceptance tied to exact 
   assert.equal(res.status, 200);
   const u = await one<{ id: string }>(t.db, `SELECT id FROM users WHERE email = 'jordan@leebakery.example'`);
   const rows = await acceptances(t.db, u.id);
-  assert.deepEqual(rows.map((r) => [r.kind, r.version, r.context_type, r.ip]), [["privacy_policy", "2026-10-draft-2", "registration", "203.0.113.7"], ["terms_of_service", SEED_VERSION, "registration", "203.0.113.7"]]);
+  assert.deepEqual(rows.map((r) => [r.kind, r.version, r.context_type, r.ip]), [["privacy_policy", PUBLISHED, "registration", "203.0.113.7"], ["terms_of_service", PUBLISHED, "registration", "203.0.113.7"]]);
   const auditRow = await one<{ details_json: string }>(t.db, `SELECT details_json FROM audit_logs WHERE action = 'agreements.accepted' AND actor_user_id = ?`, u.id);
   assert.match(auditRow.details_json, /"context":"registration"/);
 });
@@ -103,7 +105,7 @@ test("[LEGAL-003] quote acceptance and package checkout record the development a
   assert.equal((await cust.c.post("/checkout/starter", { maintenance_plan: "essential", terms: "1" })).status, 303);
   const rows = await acceptances(t.db, cust.id);
   assert.deepEqual(rows.map((r) => r.kind), ["data_processing_addendum", "development_agreement", "refund_policy", "terms_of_service"]);
-  assert.ok(rows.every((r) => r.context_type === "package_checkout" && r.version === (r.kind === "data_processing_addendum" ? "2026-11-published-1" : SEED_VERSION)));
+  assert.ok(rows.every((r) => r.context_type === "package_checkout" && r.version === (["data_processing_addendum", "terms_of_service"].includes(r.kind) ? PUBLISHED : SEED_VERSION)));
 
   // Quote acceptance (proposal flow).
   const rep = await staffClient(t, "owner");

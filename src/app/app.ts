@@ -175,11 +175,24 @@ export const staticContentType = (path: string) => STATIC_TYPES[path.split(".").
 /** Cloudflare's ExecutionContext (only waitUntil is used). Absent in tests and the dev server. */
 export interface ExecLike { waitUntil(p: Promise<unknown>): void }
 
+/** The permanent www → apex redirect, or null when the request is not for www.<APP_URL host>. */
+export function wwwRedirect(req: Request, url: URL, env: Pick<Env, "APP_URL">): Response | null {
+  let apex: URL;
+  try { apex = new URL(env.APP_URL ?? ""); } catch { return null; }
+  if (url.hostname !== `www.${apex.hostname}`) return null;
+  const to = `${apex.origin}${url.pathname}${url.search}`;
+  return new Response(null, { status: req.method === "GET" || req.method === "HEAD" ? 301 : 308, headers: { location: to, "cache-control": "public, max-age=3600" } });
+}
+
 export async function handle(req: Request, env: Env, exec?: ExecLike): Promise<Response> {
   // Reads retry on a transient Cloudflare fault (src/lib/db.ts withTransientRetry). Applied here, at the
   // entry point, so every route and every test goes through it rather than each caller remembering to.
   env = { ...env, DB: withTransientRetry(env.DB) };
   const url = new URL(req.url);
+  // www → apex (Founder, 2026-11-10): www.<APP_URL host> is a second custom domain of this Worker; every request is
+  // sent permanently to the same path and query on APP_URL. 301 for GET/HEAD, 308 otherwise (keeps the method).
+  const www = wwwRedirect(req, url, env);
+  if (www) return www;
   if (url.pathname.startsWith("/assets/") && env.ASSETS) return env.ASSETS.fetch(req);
   const gated = await previewGate(req, env);
   if (gated) return gated;

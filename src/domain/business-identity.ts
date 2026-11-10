@@ -29,3 +29,21 @@ export const REGISTERED_ADDRESS: string | null = null;
 export function legalNameFrom(settings: Record<string, string | undefined>): string {
   return settings["business.legal_name"]?.trim() || OPERATING_LEGAL_NAME;
 }
+
+/** Crestmont's public phone line for display and tel: links. */
+export interface PublicPhone { display: string; tel: string }
+
+/**
+ * The public business phone, read only from Business settings (never invented): the "Public phone" (contact.phone) when
+ * set, otherwise the AI receptionist number (voice.phone_number). Null when neither is a valid number. `tel` is E.164
+ * (+1 assumed for 10-digit US numbers); `display` is (XXX) XXX-XXXX for US numbers, else the recorded text.
+ */
+export function publicPhoneFrom(settings: Record<string, string | undefined>): PublicPhone | null {
+  const raw = settings["contact.phone"]?.trim() || settings["voice.phone_number"]?.trim() || "";
+  if (!raw || !/^[+0-9 ().-]{7,40}$/.test(raw)) return null;
+  const digits = raw.replace(/\D/g, "");
+  const us = digits.length === 10 ? digits : digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : null;
+  if (us && (!raw.startsWith("+") || digits.startsWith("1"))) return { display: `(${us.slice(0, 3)}) ${us.slice(3, 6)}-${us.slice(6)}`, tel: `+1${us}` };
+  if (raw.startsWith("+") && digits.length >= 8 && digits.length <= 15) return { display: raw, tel: `+${digits}` };
+  return null;
+}

@@ -1,3 +1,4 @@
+import { publicPhoneFrom } from "../domain/business-identity.ts";
 // Support center (SUP-001..005): customer portal tickets and the staff support queue.
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
@@ -152,7 +153,8 @@ export function register(r: Router): void {
     const { page, limit, offset } = pageParam(ctx);
     const rows = await sup.listOrgTickets(ctx.db, org.organizationId, view, limit, offset);
     const settings = await sup.getSupportSettings(ctx);
-    return portalPage(ctx, "Support", html`${pageHead("Support", linkButton("New ticket", "/portal/support/new"), org.organizationName)}
+    const ph = publicPhoneFrom(ctx.settings);
+    return portalPage(ctx, "Support", html`${pageHead("Support", linkButton("New ticket", "/portal/support/new"), org.organizationName)}${ph ? html`<p class="faint" data-testid="portal-phone">Prefer to talk? Call <a href="tel:${ph.tel}">${ph.display}</a>.</p>` : ""}
 ${alert("info", sup.hoursDisclosure(settings))}
 <nav class="tabs" aria-label="Ticket views">${(["all", "active", "closed"] as const).map((v) => html`<a href="/portal/support?view=${v}"${v === view ? html` aria-current="page"` : ""}>${v === "all" ? "All" : v === "active" ? "Open" : "Resolved & closed"}</a>`)}</nav>
 ${table(rows.slice(0, limit), [

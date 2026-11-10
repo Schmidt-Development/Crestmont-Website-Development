@@ -167,10 +167,15 @@ async function networkSmoke(base: string): Promise<SmokeResult[]> {
     push("tls", "plain HTTP redirects to HTTPS", false, [301, 302, 307, 308].includes(r.status) && loc.startsWith("https://") ? null : `HTTP ${r.status} ${loc}`);
   } catch (e) { push("tls", "plain HTTP redirects to HTTPS", false, `request failed: ${(e as Error).message}`); }
   try {
-    const r = await fetch(`https://www.${host}/`, { redirect: "manual", headers: UA, signal: AbortSignal.timeout(15_000) });
+    const r = await fetch(`https://www.${host}/pricing?ref=smoke`, { redirect: "manual", headers: UA, signal: AbortSignal.timeout(15_000) });
     const loc = r.headers.get("location") ?? "";
-    push("dns", `www.${host} redirects to the apex`, false, [301, 302, 307, 308].includes(r.status) && loc.startsWith(`https://${host}`) ? null : `HTTP ${r.status} ${loc}`);
-  } catch (e) { push("dns", `www.${host} redirects to the apex`, false, `not answering: ${(e as Error).message}`); }
+    push("dns", `www.${host} redirects permanently to the apex, keeping path and query`, true, r.status === 301 && loc === `https://${host}/pricing?ref=smoke` ? null : `HTTP ${r.status} ${loc}`);
+  } catch (e) { push("dns", `www.${host} redirects permanently to the apex, keeping path and query`, true, `not answering: ${(e as Error).message}`); }
+  try {
+    const r = await fetch(`http://www.${host}/contact`, { redirect: "manual", headers: UA, signal: AbortSignal.timeout(15_000) });
+    const loc = r.headers.get("location") ?? "";
+    push("tls", `http://www.${host} redirects to HTTPS`, false, [301, 302, 307, 308].includes(r.status) && loc.startsWith("https://") ? null : `HTTP ${r.status} ${loc}`);
+  } catch (e) { push("tls", `http://www.${host} redirects to HTTPS`, false, `request failed: ${(e as Error).message}`); }
   return results;
 }
 
