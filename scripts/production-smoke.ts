@@ -42,6 +42,13 @@ export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch 
   });
   await check("health", "database answers (health runs SELECT 1 on D1)", true, async () => (health.status === "ok" ? null : "health not ok"));
   await check("health", "file storage (R2) bound", true, async () => (health.fileStorage === "bound" ? null : `fileStorage: ${String(health.fileStorage)}`));
+  // What the running Worker states about payments and the website assistant (no secret: modes, reasons, presence only).
+  try {
+    const p = health.payments as { mode?: string; checkout?: string; reason?: string; webhookSecret?: boolean } | undefined;
+    const a = await (await req("GET", "/api/assistant")).json().catch(() => ({})) as { available?: boolean; reason?: string };
+    console.log(`  payments: mode ${p?.mode ?? "?"}, checkout ${p?.checkout ?? "?"}${p?.reason ? ` (${p.reason})` : ""}, webhook secret ${p?.webhookSecret ? "present" : "missing"}`);
+    console.log(`  website assistant: ${a.available ? "available" : `unavailable (${a.reason ?? "?"})`}`);
+  } catch { /* informational only */ }
   await check("ai", "AI website generation is off", true, async () => (health.aiBuildAutomation === "off" ? null : `aiBuildAutomation: ${String(health.aiBuildAutomation)}`));
   await check("payments", "checkout is closed (no live charges before the payments authorization)", true, async () => {
     const p = health.payments as { checkout?: string; mode?: string; reason?: string } | undefined;
