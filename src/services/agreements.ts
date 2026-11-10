@@ -1,3 +1,4 @@
+import { legalNameFrom } from "../domain/business-identity.ts";
 // Agreement versioning and acceptance records (LEGAL-003, §67).
 //
 // Every policy in src/content/legal.ts is stored as an immutable version row in `agreements`
@@ -60,10 +61,9 @@ const LEGAL_EMAIL = "legal@crestmontwebsitedevelopment.com";
 /** Same facts the public /legal pages use (src/routes/public.ts legalFacts). */
 export function factsFromSettings(settings: Record<string, string>): LegalFacts {
   return {
-    // Deliberately NOT defaulted to the operating entity: agreement text is SHA-256 pinned and acceptances bind
-    // to an exact version, and these drafts still await attorney review (LEGAL-004). Inserting the legal name
-    // here would mint a new version of unreviewed legal text. It goes in with that review, not before.
-    legalName: settings["business.legal_name"]?.trim() || null,
+    // The operating entity (Business settings, else the confirmed Talent Revenue Systems LLC), exactly as the public
+    // /legal pages show it (src/routes/public.ts legalFacts): the text a customer accepts names the legal party.
+    legalName: legalNameFrom(settings),
     address: settings["business.address"]?.trim() || null,
     staffedHours: settings["support.staffed_hours"]?.trim() || null,
     supportEmail: settings["contact.email"]?.trim() || SUPPORT_EMAIL,

@@ -5,7 +5,7 @@
 // customer-facing renderers never print them.
 // Business identity comes only from business_settings and the confirmed operating entity; nothing is invented.
 import type { Db } from "../lib/db.ts";
-import { legalNameFrom } from "../domain/business-identity.ts";
+import { publicPhoneFrom, legalNameFrom } from "../domain/business-identity.ts";
 import { HttpError } from "../app/http.ts";
 import { parseTaxDetail } from "./tax.ts";
 import type { TaxResult } from "../domain/tax.ts";
@@ -115,7 +115,7 @@ export async function loadReceipt(db: Db, paymentId: string, organizationId: str
   };
 }
 
-export interface BusinessIdentity { tradingName: string; legalName: string | null; address: string | null; billingEmail: string }
+export interface BusinessIdentity { tradingName: string; legalName: string | null; address: string | null; billingEmail: string; phone: string | null }
 
 export function businessIdentity(settings: Record<string, string>): BusinessIdentity {
   return {
@@ -123,5 +123,6 @@ export function businessIdentity(settings: Record<string, string>): BusinessIden
     legalName: legalNameFrom(settings),
     address: settings["business.address"]?.trim() || null,
     billingEmail: "billing@crestmontwebsitedevelopment.com",
+    phone: publicPhoneFrom(settings)?.display ?? null,
   };
 }

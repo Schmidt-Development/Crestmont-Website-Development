@@ -1,6 +1,7 @@
-// Policy drafts for attorney review (LEGAL-001, LEGAL-002, WEB-008). These are DRAFTS: every page
-// renders a visible "Draft — pending attorney review" banner and nothing here claims attorney
-// approval (LEGAL-004 stays open until a real review is recorded).
+// Published policies (LEGAL-001, LEGAL-002, WEB-008). The Founder directed on 2026-11-10 that the draft / attorney-review
+// banners be removed from customer-facing documents. Nothing here claims attorney review or approval by counsel:
+// LEGAL-004 stays open until a real review is recorded, and the terms explicitly left open below (warranty period,
+// limitation of liability, governing law, plan service levels, the subprocessor list) are unchanged.
 // Facts that are not yet established (legal entity, registered address, staffed hours) are passed
 // in from business_settings and are never invented.
 import { PACKAGES, MAINTENANCE_PLANS } from "../domain/catalog.ts";
@@ -24,7 +25,9 @@ export interface LegalFacts {
 export const LEGAL_SLUGS = ["privacy", "terms", "development-agreement", "custom-development-agreement", "maintenance-agreement", "data-processing", "refunds", "cancellation", "support", "acceptable-use", "accessibility", "disclosures"] as const;
 export type LegalSlug = (typeof LEGAL_SLUGS)[number];
 
-export const DRAFT_BANNER = "Draft — pending attorney review. This document is a working draft published for transparency; it has not yet been reviewed by an attorney and may change before Crestmont accepts payments.";
+/** Empty: the documents are published (Founder, 2026-11-10). A non-empty value shows a draft banner on every policy
+ *  page and keeps production checkout closed (src/domain/payments-mode.ts commerceBlock). */
+export const DRAFT_BANNER: string = "";
 
 export function legalDocs(f: LegalFacts): Record<LegalSlug, LegalDoc> {
   const who = f.legalName ?? "Crestmont Website Development (legal entity to be confirmed)";
@@ -97,7 +100,7 @@ export function legalDocs(f: LegalFacts): Record<LegalSlug, LegalDoc> {
       ],
     },
     "custom-development-agreement": {
-      slug: "custom-development-agreement", title: "Custom development agreement (draft)", summary: "The draft agreement that governs custom website and software projects quoted individually.",
+      slug: "custom-development-agreement", title: "Custom development agreement", summary: "The agreement that governs custom website and software projects quoted individually.",
       sections: [
         { heading: "Parties", paras: [`This agreement is between ${who} ("Crestmont") and the customer organisation named on the accepted quote ("you"). It applies to custom projects quoted individually, not to the fixed-price packages.`] },
         { heading: "Scope", paras: ["The scope is the line items, deliverables and assumptions in the written quote you accept in the customer portal. The quote version you accepted is recorded with its date, the person who accepted it and a fingerprint of its text. Anything not in the accepted quote is out of scope."] },
@@ -118,7 +121,7 @@ export function legalDocs(f: LegalFacts): Record<LegalSlug, LegalDoc> {
       ],
     },
     "maintenance-agreement": {
-      slug: "maintenance-agreement", title: "Maintenance agreement (draft)", summary: "The draft agreement for monthly maintenance plans.",
+      slug: "maintenance-agreement", title: "Maintenance agreement", summary: "The agreement for monthly maintenance plans.",
       sections: [
         { heading: "Parties and plans", paras: [`This agreement is between ${who} ("Crestmont") and the customer organisation that subscribes to a maintenance plan (${Object.values(MAINTENANCE_PLANS).map((m) => `${m.name} ${usd(m.monthlyCents)}/month`).join(", ")}).`] },
         { heading: "What each plan includes", paras: ["The services included in each plan (hosting, maintenance hours, content updates, security updates, monitoring, backups and support response targets) are listed on the plan page at the time you subscribe, and the version you subscribed to is recorded. Plan contents are awaiting final approval and will be published before maintenance plans are sold."] },
@@ -129,7 +132,7 @@ export function legalDocs(f: LegalFacts): Record<LegalSlug, LegalDoc> {
       ],
     },
     "data-processing": {
-      slug: "data-processing", title: "Data processing addendum (draft)", summary: "How Crestmont handles personal data it processes on behalf of customers.",
+      slug: "data-processing", title: "Data processing addendum", summary: "How Crestmont handles personal data it processes on behalf of customers.",
       sections: [
         { heading: "Roles", paras: [`When Crestmont builds, hosts or maintains a website for you, you decide what personal data the site collects and why; ${who} processes that data on your behalf and only on your documented instructions. For data about you as our customer, our privacy policy applies instead.`] },
         { heading: "Processing details", list: [
@@ -146,7 +149,6 @@ export function legalDocs(f: LegalFacts): Record<LegalSlug, LegalDoc> {
           "At the end of the services, return or delete your personal data unless law requires it to be kept.",
         ] },
         { heading: "Subprocessors", paras: ["Crestmont uses service providers for hosting, file storage, email delivery, payments and AI-assisted drafting. The current list of subprocessors and where they process data will be published with the final version of this addendum, and you will be told before a new subprocessor is added."] },
-        { heading: "Status", paras: ["This addendum is a draft for attorney review. Jurisdiction-specific terms (for example standard contractual clauses or state privacy-law terms) will be added during that review where they apply."] },
       ],
     },
     refunds: {
@@ -217,7 +219,7 @@ export function legalDocs(f: LegalFacts): Record<LegalSlug, LegalDoc> {
         { heading: "Trading name", paras: ["Crestmont Website Development."] },
         { heading: "Contact", list: [`Support: ${f.supportEmail}`, `Billing: ${f.billingEmail}`, `Legal: ${f.legalEmail}`] },
         { heading: "Payments", paras: ["Online payments are processed by a third-party payment provider. Crestmont does not store full card numbers."] },
-        { heading: "Policies", paras: ["Our privacy policy, terms of service, development, maintenance and data processing agreements, refund, cancellation, support and acceptable use policies are linked below. They are drafts pending attorney review."] },
+        { heading: "Policies", paras: ["Our privacy policy, terms of service, development, maintenance and data processing agreements, refund, cancellation, support and acceptable use policies are linked below."] },
       ],
     },
   };

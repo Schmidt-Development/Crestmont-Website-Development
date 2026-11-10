@@ -335,7 +335,7 @@ export function invoicePdf(d: InvoiceDocData, settings: Record<string, string>, 
   heading(flow, "Notes");
   if (d.tax) note(flow, taxStatement(d.tax));
   else note(flow, "No tax has been applied to this invoice.");
-  note(flow, `Questions about this invoice? Contact ${businessIdentity(settings).billingEmail} and quote ${number}.`);
+  note(flow, `Questions about this invoice? Contact ${businessIdentity(settings).billingEmail}${businessIdentity(settings).phone ? ` or call ${businessIdentity(settings).phone}` : ""} and quote ${number}.`);
   if (d.invoice.status === "paid") flow.paragraph("Thank you for your business.", { size: 9.5, bold: true, color: INK });
   footer(doc, settings, number);
   return doc.toBytes();
@@ -395,7 +395,7 @@ export function receiptPdf(r: ReceiptData, settings: Record<string, string>, gen
   heading(flow, "Notes");
   note(flow, "This receipt confirms a payment received by Crestmont Website Development, as confirmed by our payment processor, Stripe.");
   if (r.tax) note(flow, taxStatement(r.tax));
-  note(flow, `Questions about this payment? Contact ${businessIdentity(settings).billingEmail} and quote ${number}.`);
+  note(flow, `Questions about this payment? Contact ${businessIdentity(settings).billingEmail}${businessIdentity(settings).phone ? ` or call ${businessIdentity(settings).phone}` : ""} and quote ${number}.`);
   flow.paragraph("Thank you for your business.", { size: 9.5, bold: true, color: INK });
   footer(doc, settings, number);
   return doc.toBytes();

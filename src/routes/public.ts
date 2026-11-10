@@ -1,3 +1,4 @@
+import { publicPhoneFrom, type PublicPhone } from "../domain/business-identity.ts";
 // Public website (WEB-001..010, CAT-001, PORT-004/006, LEGAL-001/002), Website CMS admin
 // (CMS-001..003) and Portfolio admin (PORT-007). Content: CMS-published revisions over the
 // repository defaults in src/content. Prices: only src/domain/catalog.ts.
@@ -288,12 +289,13 @@ const rcOpen = () => AI_RECEPTIONIST_OFFER.status === "available";
 const RC_ASK = "/contact?topic=other";
 const RC_FAQ_COMING_SOON: [string, string] = ["Can I buy it now?", "Not yet — it is coming soon. We only sell services that are fully implemented and certified, and the AI Receptionist has not completed its live call certification. Contact us if you would like to discuss it."];
 
-function aiReceptionistPage(s: ServiceDef, copy: Record<string, string>, email: string): SafeHtml {
+function aiReceptionistPage(s: ServiceDef, copy: Record<string, string>, email: string, phone: PublicPhone | null = null): SafeHtml {
   const quote = `/quote?service=${s.slug}`;
   const open = rcOpen();
   const ctaPrimary = open ? linkButton("Request a quote", quote) : linkButton("Ask about availability", RC_ASK);
   return html`${serviceHero(open ? "Custom AI voice agents" : "Coming soon · Custom AI voice agents", s.name, copy.summary ?? s.summary, html`${ctaPrimary}${linkButton("Contact us", "/contact", "secondary")}`, receptionistConsole({ id: "rc-page" }))}
 ${open ? "" : html`<section class="section section--flush" data-testid="rc-coming-soon"><div class="container">${alert("info", AI_RECEPTIONIST_COMING_SOON)}</div></section>`}
+${phone ? html`<section class="section section--flush" data-testid="rc-call"><div class="container"><p class="lede">Hear it for yourself: Crestmont's own line is answered by our AI receptionist. Call <a href="tel:${phone.tel}">${phone.display}</a>.</p></div></section>` : ""}
 <section class="section"><div class="container section__inner"><p class="section__label">What it can do</p><div class="section__head"><h2 class="reveal-words" data-reveal>Configured around your calls</h2><div class="prose" data-reveal style="--rd:140ms">${renderMarkdown(copy.intro ?? s.intro)}</div></div>
 <div class="versus rc-dir" data-reveal-group>
 <div class="versus__panel on-dark" data-reveal><p class="versus__title">Inbound — what we can configure</p><ul class="versus__list">${RC_INBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul></div>
@@ -580,7 +582,7 @@ ${section("Not offered", "What we do not offer", html`<p class="muted">We do not
     const serviceMeta = (c: Content) => ({ title: s.name, description: metaDescription(c.get(`service.${s.slug}`).summary || s.summary) });
     return page(ctx, "services", [`service.${s.slug}`, "pricing.presentation"], (c) => {
       const copy = c.get(`service.${s.slug}`);
-      if (s.slug === "ai-receptionist") return aiReceptionistPage(s, copy, ctx.settings["contact.email"] ?? SUPPORT_EMAIL);
+      if (s.slug === "ai-receptionist") return aiReceptionistPage(s, copy, ctx.settings["contact.email"] ?? SUPPORT_EMAIL, receptionistPhone(ctx.settings));
       const related = SERVICES.filter((x) => x.group === s.group && x.slug !== s.slug).slice(0, 3);
       return html`${serviceHero(s.group, s.name, copy.summary, html`${s.pricing === "custom" ? linkButton("Request a quote", `/quote?service=${s.slug}`) : linkButton("View packages", "/pricing")}${linkButton(s.pricing === "custom" ? "Contact us" : "Request a quote", s.pricing === "custom" ? "/contact" : `/quote?service=${s.slug}`, "secondary")}`, serviceVisual(s.slug))}
 <section class="section"><div class="container grid grid-2"><div class="prose">${renderMarkdown(copy.intro)}
@@ -731,14 +733,14 @@ ${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li
   r.get("/legal", (ctx) => {
     const docs = legalDocs(legalFacts(ctx));
     return htmlResponse(ctx, publicLayout(ctx, { title: "Policies", description: "Crestmont policies and business disclosures." }, html`${pageHero("Policies", "Policies & disclosures")}
-<section class="section section--flush"><div class="container">${alert("warn", DRAFT_BANNER)}<div class="grid grid-3">${LEGAL_SLUGS.map((s) => html`<a class="card card--link" href="/legal/${s}"><h3 class="card__title">${docs[s].title}</h3><p class="muted">${docs[s].summary}</p></a>`)}</div></div></section>`));
+<section class="section section--flush"><div class="container">${DRAFT_BANNER ? alert("warn", DRAFT_BANNER) : ""}<div class="grid grid-3">${LEGAL_SLUGS.map((s) => html`<a class="card card--link" href="/legal/${s}"><h3 class="card__title">${docs[s].title}</h3><p class="muted">${docs[s].summary}</p></a>`)}</div></div></section>`));
   });
   r.get("/legal/:slug", (ctx, p) => {
     if (!(LEGAL_SLUGS as readonly string[]).includes(p.slug)) throw new HttpError(404, "That policy does not exist.");
     const docs = legalDocs(legalFacts(ctx));
     const d = docs[p.slug as LegalSlug];
     return htmlResponse(ctx, publicLayout(ctx, { title: d.title, description: d.summary }, html`${pageHero("Policies", d.title, d.summary)}
-<section class="section section--flush"><div class="container"><div class="legal-draft" role="note"><strong>Draft — pending attorney review.</strong> ${DRAFT_BANNER.replace(/^Draft — pending attorney review\.\s*/, "")}</div>
+<section class="section section--flush"><div class="container">${DRAFT_BANNER ? html`<div class="legal-draft" role="note">${DRAFT_BANNER}</div>` : ""}
 <article class="prose legal">${d.sections.map((s) => html`<h2>${s.heading}</h2>${(s.paras ?? []).map((x) => html`<p>${x}</p>`)}${s.list ? html`<ul>${s.list.map((x) => html`<li>${x}</li>`)}</ul>` : ""}`)}</article>
 ${d.slug === "privacy" ? html`<p class="legal-account-link" data-privacy-self-service><strong>Signed in?</strong> Download or delete your data at <a href="/account/privacy">/account/privacy</a>.</p>` : ""}
 <hr><nav aria-label="Other policies" class="legal-nav"><span class="faint">Other policies:</span> <a href="/legal">All policies</a> ${LEGAL_SLUGS.filter((s) => s !== d.slug).map((s) => html`<a href="/legal/${s}">${docs[s].title}</a> `)}</nav></div></section>`));
@@ -801,6 +803,15 @@ ${turnstileWidget(ctx)}
 <p class="faint form-note">We reply by email. See our <a href="/legal/privacy">privacy policy</a>.</p></div></form>`;
 }
 
+/** The AI receptionist's own number (voice.phone_number) for the AI Receptionist page; never the general line. */
+const receptionistPhone = (settings: Record<string, string>) => publicPhoneFrom({ "voice.phone_number": settings["voice.phone_number"] });
+
+/** The phone channel on the contact page: a tel: link to the number recorded in Business settings. */
+function phoneChannel(ctx: AppContext): SafeHtml {
+  const ph = publicPhoneFrom(ctx.settings);
+  return ph ? html`<a class="cx-channel" href="tel:${ph.tel}" data-reveal data-testid="contact-phone"><span class="cx-channel__title">Call us</span><span class="cx-channel__addr">${ph.display}</span><span class="cx-channel__note">Answered by our AI receptionist${ctx.settings["support.staffed_hours"]?.trim() ? `; staff during ${ctx.settings["support.staffed_hours"].trim()}` : ""}</span><span class="cx-channel__go" aria-hidden="true">${ARROW_SVG}</span></a>` : html``;
+}
+
 function renderContact(ctx: AppContext, v: FormVals, e: FieldErrors, status: number) {
   return page(ctx, "contact", ["contact.page"], (c) => {
     const cp = c.get("contact.page");
@@ -821,7 +832,7 @@ function renderContact(ctx: AppContext, v: FormVals, e: FieldErrors, status: num
 <div class="cx-card on-dark">${contactFormPremium(ctx, v, e)}</div>
 </div>
 <div class="cx-channels" data-reveal-group>
-${channel("General & support", email, "Questions, existing projects and anything else")}
+${phoneChannel(ctx)}${channel("General & support", email, "Questions, existing projects and anything else")}
 ${channel("Sales", SALES_EMAIL, "Packages, quotes and new projects")}
 ${channel("Billing", BILLING_EMAIL, "Invoices and payments")}
 </div>

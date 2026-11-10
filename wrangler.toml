@@ -72,11 +72,13 @@ observability = { enabled = true }
 name = "crestmont-platform-production"
 workers_dev = false           # production is reachable only on the custom domain
 preview_urls = false          # no per-version preview URLs for production (explicit; Wrangler ≥ 4.44 would also infer it from workers_dev)
-# Apex only. The custom domain (DNS record + certificate) is created by `wrangler deploy --env production`, which
-# runs only in deploy-production.yml after Founder approval. The apex must have no existing CNAME record.
-# www is NOT a second Worker hostname: it is a proxied placeholder record plus a Cloudflare Redirect Rule
+# Apex and www. Each custom domain (DNS record + certificate) is created by `wrangler deploy --env production`, which
+# runs only in deploy-production.yml after Founder approval. Neither hostname may have an existing CNAME record.
+# www (Founder, 2026-11-10): a second custom domain of this Worker, which answers every www request with a permanent
+# redirect to the same path on the apex (src/app/app.ts wwwRedirect). The deploy creates its DNS record and certificate,
+# as for the apex; www must have no existing DNS record. Formerly planned as a placeholder record + Redirect Rule:
 # (301 → https://crestmontwebsitedevelopment.com, path and query kept). See docs/DEPLOYMENT.md §7.
-routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true }]
+routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true }, { pattern = "www.crestmontwebsitedevelopment.com", custom_domain = true }]
 # HSTS_MAX_AGE (CREST-GAP-029): the first production release sends a 5-minute HSTS without includeSubDomains, so a
 # certificate or subdomain mistake cannot pin browsers for two years. Raise it in steps (86400, then 31536000) once the
 # apex and www have served HTTPS cleanly; add HSTS_INCLUDE_SUBDOMAINS = "on" only when every subdomain serves HTTPS.

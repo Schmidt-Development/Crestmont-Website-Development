@@ -159,7 +159,10 @@ jobs:
               echo "- apex DNS records: $recs (a CNAME here blocks the custom domain)" >> "$GITHUB_STEP_SUMMARY"
               doms=$(api "/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/domains?hostname=$host" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(!j.success)return console.log("unreadable");console.log((j.result||[]).map(d=>d.hostname+" → "+d.service+" ("+d.environment+")").join(", ")||"none yet (the first deploy attaches it)")}catch{console.log("unreadable")}})')
               echo "- Worker custom domain: $doms" >> "$GITHUB_STEP_SUMMARY"
+              wrecs=$(api "/zones/$zid/dns_records?name=www.$host" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(!j.success)return console.log("unreadable");console.log((j.result||[]).map(r=>r.type+(r.proxied?"(proxied)":"")+(r.meta&&r.meta.read_only?"(worker-managed)":"")).join(",")||"none")}catch{console.log("unreadable")}})')
+              echo "- www DNS records: $wrecs (the deploy attaches www as a Worker custom domain; any other record must be removed first)" >> "$GITHUB_STEP_SUMMARY"
               if echo "$recs" | grep -q CNAME; then echo "::error title=Apex CNAME::$host has a CNAME record; remove it before the first deploy (docs/DEPLOYMENT.md §7)"; exit 1; fi
+              if echo "$wrecs" | grep -Eq "CNAME|^A|,A|AAAA" && ! echo "$wrecs" | grep -q "worker-managed"; then echo "::warning title=www record exists::www.$host already has DNS records ($wrecs). Delete them in Cloudflare → DNS before deploying, so the deploy can attach www as a custom domain."; fi
               echo "::notice title=DNS::$host zone is active on this account; the first deploy can attach the custom domain" ;;
             pending)
               echo "::error title=DNS not active::the $host zone is on this Cloudflare account but PENDING: change the nameservers at the registrar to $(echo "$verdict" | cut -d'|' -f3) (currently $(echo "$verdict" | cut -d'|' -f4)). The production deploy cannot attach the domain until the zone is active."; exit 1 ;;
@@ -205,4 +208,28 @@ jobs:
             q "SELECT id, template, status, provider_message_id IS NOT NULL AS accepted, updated_at FROM email_deliveries ORDER BY created_at DESC LIMIT 5" \
               | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const x of JSON.parse(s)[0].results)console.log(`  ${x.id} ${x.template.padEnd(20)} ${String(x.status).padEnd(10)} accepted=${x.accepted?"yes":"no"} updated ${x.updated_at}`)}catch{console.log("could not read email_deliveries")}})'
             echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Stripe and Resend read-only probes on production (via a one-time database challenge)
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BASE: ${{ vars.PRODUCTION_URL }}
+        run: |
+          # The same read-only checks as Owner → Integrations → Run check (src/services/integrations.ts): Stripe GET
+          # /v1/balance, /v1/account, /v1/webhook_endpoints (and event destinations) with the live key — no charge, nothing
+          # created — and Resend GET /domains. Production's ops secret is unknown to workflows, so a one-time challenge is
+          # written with the production Cloudflare token (src/services/ops-challenge.ts). Keys and secrets are never printed.
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          node --no-warnings scripts/ops-challenge.ts --purpose integration_probe --out-sql "$work/c.sql" --out-nonce "$work/nonce"
+          echo "::add-mask::$(cat "$work/nonce")"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
+          code=$(curl -s -o "$work/out.json" -w '%{http_code}' --max-time 60 -X POST -H 'content-type: application/json' --data "{\"challenge\":\"$(cat "$work/nonce")\"}" "$BASE/api/ops/integration-probe" || echo 000)
+          {
+            echo "### Provider probes on production (read-only)"
+            if [ "$code" = "200" ]; then
+              node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));for(const [k,v] of Object.entries(j))console.log(`- ${k}: ${v.status} — ${v.detail}`)' "$work/out.json"
+            elif [ "$code" = "404" ]; then echo "- not available on the deployed Worker yet (needs the release with POST /api/ops/integration-probe)"
+            else echo "- probe request answered HTTP $code"; fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
