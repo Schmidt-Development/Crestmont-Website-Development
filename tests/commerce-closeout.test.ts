@@ -703,3 +703,13 @@ test("[PAY-010] [LAUNCH-003] /api/health lists every production payment blocker 
   assert.equal(lh.payments.keyKind, "live");
   assert.deepEqual(lh.payments.blockers.map((x) => /attorney review/.test(x)), [true], "with everything else in place, only the draft banner remains");
 });
+
+test("[CAT-004] [WEB-005] public pages state that every website package requires a minimum maintenance plan; none calls the plans optional", async () => {
+  const t = await createTestApp();
+  for (const path of ["/pricing", "/hosting-maintenance", "/faq", "/"]) {
+    const h = await (await t.client().get(path)).text();
+    assert.doesNotMatch(h, /optional monthly plan/i, `${path} must not call the required plans optional`);
+  }
+  assert.match(await (await t.client().get("/pricing")).text(), /a minimum plan is required with every package/);
+  assert.match(await (await t.client().get("/hosting-maintenance")).text(), /requires a minimum (monthly )?plan/);
+});

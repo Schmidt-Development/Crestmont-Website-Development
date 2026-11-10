@@ -155,8 +155,8 @@ export const SERVICES: ServiceDef[] = [
   },
   {
     slug: "hosting-maintenance", name: "Hosting & maintenance", approved: ["Hosting and maintenance"], group: "Ongoing care", pricing: "maintenance", path: "/hosting-maintenance",
-    summary: "Optional monthly plans for hosting, updates, monitoring and backups after launch.",
-    intro: "After launch you can keep your site with us on an optional monthly plan, or take it elsewhere — your domain always remains yours.",
+    summary: "Monthly plans for hosting, updates, monitoring and backups after launch; every website package requires a minimum plan.",
+    intro: "Each website package requires a minimum monthly plan (Starter: Essential, Business: Professional, Premium: Executive); you may choose a higher plan. Billing starts when you approve and launch your website, and your domain always remains yours.",
     includes: [], boundaries: [],
   },
 ];
@@ -168,5 +168,5 @@ export const PRICING_NOTE: Record<ServiceDef["pricing"], string> = {
   packages: "Delivered through the Starter, Business or Premium package.",
   custom: "Quoted separately as custom development after a scope and feasibility review.",
   packages_or_custom: "Included at package level where it fits the package scope; larger work is quoted separately.",
-  maintenance: "Optional monthly plans.",
+  maintenance: "Monthly plans; each website package requires a minimum plan.",
 };

@@ -20,6 +20,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment: ${{ inputs.target }}
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -31,3 +34,15 @@ jobs:
         env:
           BASE: ${{ inputs.target == 'production' && vars.PRODUCTION_URL || (vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev') }}
         run: node --no-warnings scripts/assistant-eval.ts --base "$BASE"
+      - name: Recent Worker errors on the assistant (on failure; messages only)
+        if: failure()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          db=$([ "$TARGET" = production ] && echo crestmont-production || echo crestmont-staging)
+          $WRANGLER d1 execute "$db" --remote --env "$TARGET" --json --command "SELECT created_at, path, status, substr(message,1,300) AS message FROM app_errors WHERE path LIKE '/api/assistant%' ORDER BY created_at DESC LIMIT 5" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const r of JSON.parse(s)[0].results)console.log(`${r.created_at} ${r.path} ${r.status}: ${r.message}`)}catch{console.log("could not read app_errors")}})' | tee -a "$GITHUB_STEP_SUMMARY"
+          $WRANGLER d1 execute "$db" --remote --env "$TARGET" --json --command "SELECT status, COUNT(*) AS n, MAX(substr(COALESCE(error,''),1,200)) AS err FROM ai_jobs WHERE workflow = 'website_assistant' AND created_at > datetime('now','-1 day') GROUP BY status" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const r of JSON.parse(s)[0].results)console.log(`assistant jobs (24 h): ${r.status} ${r.n}${r.err?` last error: ${r.err}`:""}`)}catch{}})' | tee -a "$GITHUB_STEP_SUMMARY"

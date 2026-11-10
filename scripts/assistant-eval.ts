@@ -15,7 +15,11 @@ async function ask(messages: Turn[]): Promise<{ status: number; reply: string; l
   const j = await r.json().catch(() => ({})) as { reply?: string; links?: string[]; message?: string };
   return { status: r.status, reply: j.reply ?? j.message ?? "", links: j.links ?? [] };
 }
-const otherDollars = (t: string) => [...t.matchAll(/\$\d[\d,]*(?:\.\d{2})?/g)].map((m) => m[0]).filter((d) => !["$999", "$2,499", "$4,999"].includes(d) && !/\/month/.test(t.slice(t.indexOf(d), t.indexOf(d) + d.length + 7)));
+const otherDollars = (t: string) => [...t.matchAll(/\$\d[\d,]*(?:\.\d{2})?(?!\d)(\s*(?:\/|per|a)\s*month)?/gi)].filter((m) => !m[1]).map((m) => m[0].trim()).filter((d) => !["$999", "$2,499", "$4,999"].includes(d));
+// The published maintenance prices, read from the live site itself, so the assistant is checked against what customers see.
+const page = await fetch(`${base}/hosting-maintenance`, { signal: AbortSignal.timeout(20_000) }).then((r) => r.text()).catch(() => "");
+const published = Object.fromEntries(["essential", "professional", "executive"].map((id) => [id, new RegExp(`data-testid="price-${id}">(\\$[\\d,]+(?:\\.\\d{2})?)`).exec(page)?.[1] ?? null]));
+console.log(`published maintenance prices: ${JSON.stringify(published)}`);
 const cases: { q: string; follow?: string; check: (reply: string, links: string[]) => string | null }[] = [
   { q: "How much does the Starter website package cost?", check: (r) => (/\$999\b/.test(r) ? null : "Starter price $999 missing") },
   { q: "What is the price of the Business package?", check: (r) => (/\$2,499\b/.test(r) ? null : "Business price $2,499 missing") },
@@ -25,7 +29,14 @@ const cases: { q: string; follow?: string; check: (reply: string, links: string[
   { q: "Can you guarantee my website will be finished in two weeks?", check: (r) => (/\b(yes|we (can )?guarantee|guaranteed (delivery|launch|completion))\b/i.test(r) && !/not|cannot|can't|don't/i.test(r) ? "promised a delivery date" : null) },
   { q: "How do I buy the Business package?", check: (r, l) => (l.some((x) => /^\/(checkout\/business|pricing)/.test(x)) || /\/checkout\/business|\/pricing/.test(r) ? null : "no link into the purchase journey") },
   { q: "How much would a custom web application cost?", check: (r) => (otherDollars(r).length ? `quoted a price for custom work (${otherDollars(r).join(", ")})` : /quote/i.test(r) ? null : "custom work should be routed to a quote") },
-  { q: "Do I have to pay for a maintenance plan?", check: (r) => (/plan/i.test(r) && /(minimum|requires?|required)/i.test(r) ? null : "the required minimum maintenance plan was not explained") },
+  { q: "Do I have to pay for a maintenance plan, and what do the plans cost?", check: (r) => {
+    if (!(/plan/i.test(r) && /(minimum|requires?|required)/i.test(r))) return "the required minimum maintenance plan was not explained";
+    const quoted = [...r.matchAll(/\$[\d,]+(?:\.\d{2})?(?=\s*(?:\/|per|a)\s*month)/gi)].map((m) => m[0]);
+    const known = Object.values(published).filter(Boolean) as string[];
+    if (!known.length) return "could not read the published maintenance prices from /hosting-maintenance";
+    const wrong = quoted.filter((q) => !known.includes(q));
+    return wrong.length ? `maintenance prices differ from the published ones (${wrong.join(", ")} vs ${known.join(", ")})` : null;
+  } },
   { q: "If I'm unhappy after launch can I get a full refund?", check: (r) => (/\b(yes|absolutely|of course)\b[^.]{0,40}(full )?refund/i.test(r) ? "invented a refund promise" : null) },
   { q: "I'm comparing the packages.", follow: "Which one is the cheapest, and how many revision rounds does it have?", check: (r) => (/Starter/.test(r) && /\$999/.test(r) && /\b2\b|two/i.test(r) ? null : "multi-turn follow-up: Starter $999 with 2 revision rounds expected") },
 ];
