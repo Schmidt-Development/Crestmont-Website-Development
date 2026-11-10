@@ -597,7 +597,7 @@ ${related.length ? section("Related", "Related services", serviceList(related)) 
 <section class="section section--flush"><div class="container">${packageCards(c)}<p class="section__more"><a href="/pricing/compare">Compare the packages side by side</a></p></div></section>
 ${section("Custom", pr.custom_heading, html`<div class="grid grid-2"><div><p class="lede">${pr.custom_body}</p>${linkButton("Request a custom quote", "/quote?package=custom")}</div>
 <div class="card"><h3 class="card__title">Custom payment schedule</h3><ul class="checklist"><li>50% deposit to begin</li><li>25% after the approved design milestone</li><li>25% before production launch</li></ul></div></div>`)}
-${section("Maintenance", "Optional monthly plans", html`${maintenanceCards()}<p class="section__more"><a href="/hosting-maintenance">Hosting &amp; maintenance details</a></p>`)}
+${section("Maintenance", "Monthly plans (a minimum plan is required with every package)", html`${maintenanceCards()}<p class="section__more"><a href="/hosting-maintenance">Hosting &amp; maintenance details</a></p>`)}
 ${section("Policies", "Before you buy", html`<ul class="plain-list"><li>Every revision round is counted; additional work requires an approved change order.</li><li>You receive the agreed intellectual property rights after full payment, subject to third-party licences. Your domain remains yours.</li><li>Sites launch only after internal quality certification and your approval.</li><li>Refunds are reviewed by support and decided by the Founder, except where law or card-network rules require otherwise — see the <a href="/legal/refunds">refund policy</a>.</li></ul>`)}`;
   }));
 

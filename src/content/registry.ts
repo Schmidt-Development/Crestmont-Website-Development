@@ -50,7 +50,7 @@ export const FAQ_DEFAULT = block([
   ["Do you use AI?", "Yes, as an assistant. Package copy is AI-assisted draft copy that you review and approve, and our team uses AI to help draft and summarise. People make every decision about refunds, contracts, pricing and releases."],
   ["How do I get support?", "Customers can submit support tickets at any time from the customer portal. Our staffed support hours are published on the support policy page."],
   ["Do you offer refunds?", "Refund requests are reviewed by our support team and decided by the Founder, except where law or card-network rules require otherwise. See the refund policy for details."],
-  ["Do you offer ongoing maintenance?", `Yes. Optional monthly plans — ${Object.values(MAINTENANCE_PLANS).map((m) => m.name).join(", ")} — cover hosting and upkeep after launch. Full plan details are published on the hosting and maintenance page once finalised.`],
+  ["Do you offer ongoing maintenance?", `Yes. Monthly plans — ${Object.values(MAINTENANCE_PLANS).map((m) => m.name).join(", ")} — cover hosting and upkeep after launch. Each website package requires a minimum plan (Starter: Essential, Business: Professional, Premium: Executive); you may choose a higher plan, and billing starts when you approve and launch your website. Full plan details are published on the hosting and maintenance page once finalised.`],
 ]);
 
 const PROCESS_DEFAULT = block([
@@ -144,7 +144,7 @@ export const CMS_KEYS: CmsKeyDef[] = [
     defaults: { heading: "Portfolio", lede: "Real websites for real businesses, each linked to the live site. Screenshots are captured from an isolated demonstration build of each site that uses sample data." } },
   { key: "hosting.page", label: "Hosting & maintenance", group: "Pages", previewPath: "/hosting-maintenance",
     fields: [t("heading", "Heading"), ta("lede", "Lead paragraph", 800)],
-    defaults: { heading: "Hosting & maintenance", lede: "Optional monthly plans to keep your website hosted, updated, monitored and backed up after launch. There are no unlimited development or unlimited support promises — each plan will have explicit, published limits." } },
+    defaults: { heading: "Hosting & maintenance", lede: "Monthly plans to keep your website hosted, updated, monitored and backed up after launch. Each website package requires a minimum plan, billed from your approved launch. There are no unlimited development or unlimited support promises — each plan will have explicit, published limits." } },
   ...serviceKeys,
   ...pageSeo.map(([id, path, title, description]): CmsKeyDef => ({
     key: `seo.${id}`, label: `SEO: ${path}`, group: "SEO metadata", previewPath: path,
