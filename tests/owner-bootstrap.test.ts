@@ -91,3 +91,53 @@ test("[AUTH-001] the Owner invitation goes only to the Founder's address: FOUNDE
   assert.equal((await t.client().post("/invite", { token: first, name: "Old link", password: TEST_PASSWORD })).status, 400, "the earlier link stops working");
   assert.equal((await t.client().post("/invite", { token: second, name: "The Founder", password: TEST_PASSWORD })).status, 303);
 });
+
+test("[AUTH-001] [SEC-007] run 42738785099 reproduced: a body signed exactly as the workflow signs it, with a key other than the Worker's production-only secret, is refused 'Signature mismatch' and creates nothing", async () => {
+  // provision-production.yml generated production's EVIDENCE_INGEST_SECRET as a random production-only value (run
+  // 40614532868); the GitHub environment secret is a different value, so the HMAC differs while format and time agree.
+  const t = await createTestApp({ ...PROD, EVIDENCE_INGEST_SECRET: "production-only-random-value" } as never);
+  const body = JSON.stringify({ email: FOUNDER });
+  const r = await t.client().request("POST", "/api/ops/owner-invitation", { body, headers: { "content-type": "application/json", "x-crestmont-signature": await signEvidence("github-environment-value", body) } });
+  assert.equal(r.status, 401);
+  assert.match(((await r.json()) as { error: string }).error, /^Signature mismatch$/);
+  assert.equal(await n(t, `SELECT COUNT(*) AS n FROM invitations`), 0);
+});
+
+test("[AUTH-001] [SEC-007] production path: the workflow's one-time database challenge (scripts/ops-challenge.ts output, applied as wrangler would) authorizes exactly one Owner invitation to the stored address", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { mkdtempSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const t = await createTestApp({ ...PROD, EVIDENCE_INGEST_SECRET: "production-only-random-value" } as never);
+  const write = (purpose: string, extra: string[], env: Record<string, string> = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-challenge-"));
+    const r = spawnSync(process.execPath, ["--no-warnings", "scripts/ops-challenge.ts", "--purpose", purpose, ...extra, "--out-sql", join(dir, "c.sql"), "--out-nonce", join(dir, "nonce")], { env: { ...process.env, ...env }, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout + r.stderr, /[a-f0-9]{64}/, "the nonce is never printed");
+    const sql = readFileSync(join(dir, "c.sql"), "utf8");
+    assert.doesNotMatch(sql, new RegExp(readFileSync(join(dir, "nonce"), "utf8")), "only the hash is stored");
+    return { sql, nonce: readFileSync(join(dir, "nonce"), "utf8") };
+  };
+  const post = (path: string, body: unknown) => t.client().request("POST", path, { body: JSON.stringify(body), headers: { "content-type": "application/json" } });
+
+  const c = write("owner_invitation", ["--payload-email-env", "FOUNDER_EMAIL"], { FOUNDER_EMAIL: FOUNDER });
+  await t.db.prepare(c.sql).run(); // what `wrangler d1 execute --file` applies
+  assert.equal((await post("/api/ops/owner-invitation", { challenge: "0".repeat(64) })).status, 401, "a guessed nonce is refused");
+  assert.equal((await post("/api/ops/email-certification", { challenge: c.nonce })).status, 401, "a challenge is bound to its purpose");
+  const ok = await post("/api/ops/owner-invitation", { challenge: c.nonce, email: "attacker@crestmont-owner-fixture.com" });
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.equal((await lastEmail(t.db, FOUNDER))!.template, "staff_invitation", "sent to the address stored with the challenge, not one in the body");
+  assert.equal(await lastEmail(t.db, "attacker@crestmont-owner-fixture.com"), null);
+  assert.equal((await post("/api/ops/owner-invitation", { challenge: c.nonce })).status, 401, "single use");
+  assert.equal(await n(t, `SELECT COUNT(*) AS n FROM business_settings WHERE key LIKE 'ops.challenge.%'`), 0, "consumed");
+
+  // An expired challenge is refused and removed.
+  const e = write("email_certification", ["--run-id", "cert-expired"]);
+  await t.db.prepare(e.sql.replace(/"expiresAt":"[^"]+"/, `"expiresAt":"${new Date(Date.now() - 1000).toISOString()}"`)).run();
+  assert.equal((await post("/api/ops/email-certification", { challenge: e.nonce })).status, 401);
+  assert.equal(await n(t, `SELECT COUNT(*) AS n FROM business_settings WHERE key LIKE 'ops.challenge.%'`), 0);
+  // A valid certification challenge passes authentication (this test app has no Resend adapter, hence 409).
+  const cert = write("email_certification", ["--run-id", "cert-ok-1"]);
+  await t.db.prepare(cert.sql).run();
+  assert.equal((await post("/api/ops/email-certification", { challenge: cert.nonce })).status, 409);
+});
