@@ -5,8 +5,11 @@ name: Production first Owner invitation (one-time)
 # by email (src/services/owner-bootstrap.ts) to the address in the production environment secret FOUNDER_EMAIL and follows
 # its delivery through Resend. No address, token or link is printed: the link exists only in the email.
 #
-# The Worker refuses once an Owner exists, so this cannot create a second Owner; re-running before acceptance replaces
-# the pending invitation (only the newest link works). Manual only, main only, production environment (Founder approval).
+# Authorization: production's EVIDENCE_INGEST_SECRET is a production-only value no workflow knows, so this job writes a
+# one-time challenge (15 minutes, single use) to the production database with the production Cloudflare token — the
+# authority that deploys production — and the Worker accepts only that (src/services/ops-challenge.ts). The delivery is
+# then read from the database (read-only). The Worker refuses once an Owner exists, so this cannot create a second Owner;
+# re-running before acceptance replaces the pending invitation. Manual only, main only, production environment.
 on:
   workflow_dispatch:
 
@@ -21,8 +24,10 @@ jobs:
   invite:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment: production
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -30,9 +35,27 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
+      - name: Write a one-time challenge to the production database
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          FOUNDER_EMAIL: ${{ secrets.FOUNDER_EMAIL }}
+        run: |
+          [ -n "$FOUNDER_EMAIL" ] || { echo "::error title=FOUNDER_EMAIL not set::Add the Founder's sign-in address as the secret FOUNDER_EMAIL on the GitHub 'production' environment."; exit 1; }
+          mkdir -p "$RUNNER_TEMP/ops"
+          node --no-warnings scripts/ops-challenge.ts --purpose owner_invitation --payload-email-env FOUNDER_EMAIL --out-sql "$RUNNER_TEMP/ops/challenge.sql" --out-nonce "$RUNNER_TEMP/ops/nonce"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/ops/nonce")"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$RUNNER_TEMP/ops/challenge.sql" --yes > /dev/null
+          rm -f "$RUNNER_TEMP/ops/challenge.sql"
       - name: Send the first Owner invitation and follow its delivery
         env:
           BASE: ${{ vars.PRODUCTION_URL }}
-          EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
-          FOUNDER_EMAIL: ${{ secrets.FOUNDER_EMAIL }}
+          CHALLENGE_FILE: ${{ runner.temp }}/ops/nonce
+          D1_DATABASE: crestmont-production
+          D1_ENV: production
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node --no-warnings scripts/owner-invitation.ts
+      - name: Remove the challenge files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ops"

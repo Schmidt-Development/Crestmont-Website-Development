@@ -4,7 +4,8 @@ name: Email delivery certification
 # its reviewed sample, through the chosen environment's real Resend setup (API key, sending domain, signed delivery
 # webhook) to Resend's own test inboxes (delivered+…@resend.dev; one bounced+…@resend.dev probe), then follows each
 # message until the webhook answers. No person is emailed; subjects carry "[Delivery check]". About 35 messages per run.
-# Production runs in the `production` environment (Founder approval). Manual, main only.
+# Staging is signed with EVIDENCE_INGEST_SECRET. Production (environment approval) uses a one-time database challenge
+# written with the production Cloudflare token and reads delivery status from the database (src/services/ops-challenge.ts).
 on:
   workflow_dispatch:
     inputs:
@@ -25,8 +26,11 @@ jobs:
   certify:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     environment: ${{ inputs.target }}
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+      RUN_ID: cert-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -34,9 +38,46 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
-      - name: Send every template to Resend's test inboxes and follow each delivery
+      - name: Write a one-time challenge to the production database
+        if: inputs.target == 'production'
         env:
-          BASE: ${{ inputs.target == 'production' && vars.PRODUCTION_URL || (vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev') }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ops"
+          parts=$(node --no-warnings -e 'import("./src/services/email-certification.ts").then((m) => console.log(m.certParts()))')
+          node --no-warnings scripts/ops-challenge.ts --purpose email_certification --run-id "$RUN_ID" --uses "$parts" --out-sql "$RUNNER_TEMP/ops/challenge.sql" --out-nonce "$RUNNER_TEMP/ops/nonce"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/ops/nonce")"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$RUNNER_TEMP/ops/challenge.sql" --yes > /dev/null
+          rm -f "$RUNNER_TEMP/ops/challenge.sql"
+      - name: Send every template to Resend's test inboxes and follow each delivery (staging)
+        if: inputs.target == 'staging'
+        env:
+          BASE: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
           EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
-          ENVIRONMENT_LABEL: ${{ inputs.target }}
+          ENVIRONMENT_LABEL: staging
         run: node --no-warnings scripts/email-certification.ts
+      - name: Send every template to Resend's test inboxes and follow each delivery (production)
+        if: inputs.target == 'production'
+        env:
+          BASE: ${{ vars.PRODUCTION_URL }}
+          CHALLENGE_FILE: ${{ runner.temp }}/ops/nonce
+          D1_DATABASE: crestmont-production
+          D1_ENV: production
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ENVIRONMENT_LABEL: production
+        run: node --no-warnings scripts/email-certification.ts
+      - name: Recent Worker errors on the certification endpoint (on failure; messages only)
+        if: failure()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          db=$([ "$TARGET" = production ] && echo crestmont-production || echo crestmont-staging)
+          $WRANGLER d1 execute "$db" --remote --env "$TARGET" --json --command "SELECT created_at, path, status, substr(message,1,300) AS message FROM app_errors WHERE path LIKE '/api/ops/%' ORDER BY created_at DESC LIMIT 5" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const r of JSON.parse(s)[0].results)console.log(`${r.created_at} ${r.path} ${r.status}: ${r.message.replace(/[^\s@<>]+@[^\s@<>]+/g,"<address>")}`)}catch{console.log("could not read app_errors")}})' | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Remove the challenge files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ops"

@@ -27,9 +27,28 @@ import * as ra from "../services/readiness-admin.ts";
 import * as dep from "../services/deployments.ts";
 import * as ret from "../services/retention.ts";
 import { issueFounderOwnerInvitation, deliveryStatus, OwnerBootstrapError } from "../services/owner-bootstrap.ts";
-import { sendCertificationBatch, CERT_RUN_ID } from "../services/email-certification.ts";
+import { sendCertificationBatch, certParts, CERT_RUN_ID } from "../services/email-certification.ts";
+import { consumeOpsChallenge, type OpsChallengePurpose } from "../services/ops-challenge.ts";
 
 // ───────────── Signed automation ─────────────
+
+/** Ops automation: a body signed with EVIDENCE_INGEST_SECRET (staging, where workflows know it), or {"challenge": nonce}
+ *  answering a one-time challenge written to this environment's database by a workflow holding its Cloudflare token
+ *  (production, whose secret no workflow knows; src/services/ops-challenge.ts). The challenge's payload then decides. */
+async function opsAuth(ctx: AppContext, raw: string, purpose: OpsChallengePurpose): Promise<Response | { body: Record<string, unknown>; payload: Record<string, unknown> | null }> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
+  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  if (body && "challenge" in body) {
+    const payload = await consumeOpsChallenge(ctx, purpose, body.challenge);
+    if (!payload) return jsonResponse(ctx, 401, { error: "Unknown, used or expired challenge." });
+    return { body, payload };
+  }
+  await verifySigned(ctx, raw);
+  if (parsed === undefined) return jsonResponse(ctx, 400, { error: "Malformed JSON" });
+  if (!body) return jsonResponse(ctx, 422, { error: "Body must be a JSON object." });
+  return { body, payload: null };
+}
 
 async function verifySigned(ctx: AppContext, body: string): Promise<void> {
   try {
@@ -255,10 +274,9 @@ export function register(r: Router): void {
   // after the Founder approves the production environment). The invitation link travels only in the email.
   r.post("/api/ops/owner-invitation", async (ctx) => {
     const raw = await readBody(ctx.req);
-    await verifySigned(ctx, raw);
-    let body: unknown;
-    try { body = JSON.parse(raw); } catch { return jsonResponse(ctx, 400, { error: "Malformed JSON" }); }
-    const email = body && typeof body === "object" && !Array.isArray(body) ? (body as { email?: unknown }).email : undefined;
+    const auth = await opsAuth(ctx, raw, "owner_invitation");
+    if (auth instanceof Response) return auth;
+    const email = auth.payload ? auth.payload.email : auth.body.email;
     if (typeof email !== "string") return jsonResponse(ctx, 422, { error: "Body must be a JSON object with the Founder's email." });
     try { return jsonResponse(ctx, 200, await issueFounderOwnerInvitation(ctx, email)); }
     catch (e) { if (e instanceof OwnerBootstrapError) return jsonResponse(ctx, e.status, { error: e.message }); throw e; }
@@ -266,15 +284,16 @@ export function register(r: Router): void {
   // Email delivery certification (src/services/email-certification.ts): signed automation only (email-certification.yml).
   r.post("/api/ops/email-certification", async (ctx) => {
     const raw = await readBody(ctx.req);
-    await verifySigned(ctx, raw);
-    let body: unknown;
-    try { body = JSON.parse(raw); } catch { return jsonResponse(ctx, 400, { error: "Malformed JSON" }); }
-    const runId = body && typeof body === "object" && !Array.isArray(body) ? (body as { runId?: unknown }).runId : undefined;
+    const auth = await opsAuth(ctx, raw, "email_certification");
+    if (auth instanceof Response) return auth;
+    const runId = auth.payload ? auth.payload.runId : auth.body.runId;
     if (typeof runId !== "string" || !CERT_RUN_ID.test(runId)) return jsonResponse(ctx, 422, { error: "runId must be 4-40 lowercase letters, digits or hyphens" });
+    const part = auth.body.part ?? 0;
+    if (typeof part !== "number" || !Number.isInteger(part) || part < 0 || part >= certParts()) return jsonResponse(ctx, 422, { error: `part must be an integer 0-${certParts() - 1}` });
     if (ctx.email.kind !== "resend") return jsonResponse(ctx, 409, { error: "This environment has no Resend adapter (RESEND_API_KEY not set): nothing can be delivered." });
-    const sent = await sendCertificationBatch(ctx, runId);
-    await audit(ctx.db, { actorKind: "system", action: "email.certification_sent", subjectType: "email", details: { runId, count: sent.length } });
-    return jsonResponse(ctx, 200, { runId, sent });
+    const out = await sendCertificationBatch(ctx, runId, part);
+    await audit(ctx.db, { actorKind: "system", action: "email.certification_sent", subjectType: "email", details: { runId, part, count: out.sent.length } });
+    return jsonResponse(ctx, 200, { runId, ...out });
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.
