@@ -819,6 +819,7 @@ jobs:
         if: steps.frontend.outcome == 'success'
         env:
           BASE: ${{ steps.deploy.outputs.url }}
+          ASSISTANT_EXPECT_LIVE: "1"   # staging answers through Workers AI (wrangler.toml ASSISTANT_PROVIDER)
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pwf/node_modules/playwright/index.mjs
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pwf/browsers
         run: |

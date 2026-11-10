@@ -94,6 +94,44 @@ export const PENDING_WINDOW_MS = 15 * 60_000;
 /** The self-hosted model behind the build runner (no per-token fee). Jobs are queued and leased to the runner. */
 export const LOCAL_RUNNER = "local-runner" as const;
 export type AiBackend = AiProvider | typeof LOCAL_RUNNER | null;
+
+// ── Cloudflare Workers AI (the website assistant only; Founder, 2026-11-10) ──
+// Runs on the Worker's AI binding in the existing Cloudflare account: no key, no new subscription. Cloudflare includes a
+// free daily allocation (10,000 neurons); the assistant caps its own calls well below it (WORKERS_AI_DAILY_CALLS in
+// src/services/assistant.ts), so it never reaches billable usage. Not used by staff drafting or the AI Website Builder.
+export interface WorkersAiBinding { run(model: string, input: Record<string, unknown>): Promise<unknown> }
+export const WORKERS_AI_DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
+export class WorkersAiProvider implements AiProvider {
+  readonly name = "workers-ai";
+  readonly model: string;
+  private ai: WorkersAiBinding;
+  constructor(ai: WorkersAiBinding, model = WORKERS_AI_DEFAULT_MODEL) {
+    if (!/^@cf\/[a-z0-9._-]+\/[a-z0-9._-]+$/.test(model)) throw new Error("ASSISTANT_MODEL is not a Workers AI model id");
+    this.ai = ai; this.model = model;
+  }
+  async complete(system: string, prompt: string, opts: AiCallOptions = {}) {
+    const messages = [{ role: "system", content: system }, ...(opts.messages ?? [{ role: "user" as const, content: prompt }])];
+    const timeoutMs = opts.timeoutMs ?? 25_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const out = await Promise.race([
+      this.ai.run(this.model, { messages, max_tokens: opts.maxTokens ?? 450, temperature: 0.2 }),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Workers AI timed out after ${Math.round(timeoutMs / 1000)} s`)), timeoutMs); }),
+    ]).finally(() => clearTimeout(timer)) as { response?: unknown; usage?: { prompt_tokens?: number; completion_tokens?: number } } | null;
+    const text = typeof out?.response === "string" ? out.response : "";
+    const chars = messages.reduce((n, m) => n + String(m.content).length, 0);
+    return { text, inputTokens: out?.usage?.prompt_tokens ?? Math.ceil(chars / 4), outputTokens: out?.usage?.completion_tokens ?? Math.ceil(text.length / 4) };
+  }
+}
+
+/** The website assistant's backend: Workers AI when ASSISTANT_PROVIDER = "workers-ai" and the AI binding exists,
+ *  otherwise the same paid, Owner-budgeted backend as before (aiProviderFromEnv). */
+export function assistantProviderFromEnv(env: { AI?: WorkersAiBinding; ASSISTANT_PROVIDER?: string; ASSISTANT_MODEL?: string; ANTHROPIC_API_KEY?: string; AI_MODEL?: string; AI_PROVIDER?: string; BUILD_RUNNER_SECRET?: string }): AiBackend {
+  if (env.ASSISTANT_PROVIDER === "workers-ai") {
+    if (!env.AI) return null;
+    try { return new WorkersAiProvider(env.AI, env.ASSISTANT_MODEL || undefined); } catch { return null; }
+  }
+  return aiProviderFromEnv(env);
+}
 export const AI_SYSTEM_PROMPT = SYSTEM_BASE;
 
 export async function requestAiDraft(db: Db, provider: AiBackend, req: AiDraftRequest): Promise<{ jobId: string; status: "awaiting_approval" | "failed" | "queued"; text: string | null; error: string | null; reused?: boolean }> {

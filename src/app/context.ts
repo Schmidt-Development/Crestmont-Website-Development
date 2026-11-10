@@ -25,6 +25,12 @@ export interface Env {
   EMAIL_FROM?: string;
   /** Production only: "open" once the Founder authorizes the public launch; anything else keeps customer sign-up, enquiries and checkout closed (src/app/prelaunch.ts). */
   PUBLIC_LAUNCH?: string;
+  /** Cloudflare Workers AI binding (wrangler.toml `ai = { binding = "AI" }`), used only by the website assistant. */
+  AI?: import("../services/ai.ts").WorkersAiBinding;
+  /** "workers-ai": the website assistant answers through the AI binding, capped below the free daily allocation. */
+  ASSISTANT_PROVIDER?: string;
+  /** Workers AI model id for the assistant (default @cf/meta/llama-3.1-8b-instruct-fast). */
+  ASSISTANT_MODEL?: string;
   /** Staging only: comma-separated addresses and/or "@domain" entries that may receive real mail (default "@crestmontwebsitedevelopment.com"). */
   EMAIL_RECIPIENT_ALLOWLIST?: string;
   ANTHROPIC_API_KEY?: string;

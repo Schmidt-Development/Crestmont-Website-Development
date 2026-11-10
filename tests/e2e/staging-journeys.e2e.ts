@@ -1205,6 +1205,41 @@ test("[PAY-001] [PAY-003] standard packages from the real /pricing buttons: inta
   assertClean();
 });
 
+test("[AUTH-001] [PAY-001] a NEW customer chooses Business on /pricing, creates an account, confirms the email and arrives at the Business intake (package kept)", { skip: unset || false }, async () => {
+  // Founder, 2026-11-10: the package choice must survive sign-up for customers who do not have an account yet.
+  const v = await previewContext();
+  const p = v.page;
+  const who = { name: `Nadia Quinn ${RUN}`, email: `nadia.${RUN}@staging-journeys.example`, company: `Quinn Florists ${RUN}`, password: `Nq-${RUN}-pass!` };
+  await p.goto(`${BASE}/pricing`);
+  await nav(p, p.locator('main a[href="/checkout/business"]').first());
+  assert.equal(new URL(p.url()).pathname, "/login", "choosing a package asks a visitor to sign in");
+  assert.equal(new URL(p.url()).searchParams.get("next"), "/checkout/business");
+  await nav(p, p.getByRole("link", { name: "Create an account" }));
+  assert.equal(new URL(p.url()).searchParams.get("next"), "/checkout/business", "Create an account keeps the package");
+  await p.fill("#f-name", who.name);
+  await p.fill("#f-organization", who.company);
+  await p.fill("#f-email", who.email);
+  await p.fill("#f-password", who.password);
+  await p.check("input[name=terms]");
+  await awaitTurnstile(p);
+  await nav(p, btn(p, "Create account"));
+  assert.match(await text(p), /you will continue with your package after signing in/);
+  const body = await outbox(who.email, "verification");
+  const confirm = linkIn(body, "/verify-email");
+  assert.match(confirm, /next=%2Fcheckout%2Fbusiness/, "the confirmation email carries the package");
+  await p.goto(confirm);
+  assert.equal(new URL(p.url()).pathname, "/login");
+  assert.equal(new URL(p.url()).searchParams.get("next"), "/checkout/business");
+  await p.fill("#f-email", who.email);
+  await p.fill("#f-password", who.password);
+  await awaitTurnstile(p);
+  await nav(p, btn(p, "Sign in"));
+  assert.equal(new URL(p.url()).pathname, "/checkout/business/intake", `signed in straight into the Business intake. ${await alerts(p)}`);
+  assert.match(await text(p), /Business website package/);
+  assertClean();
+  await v.ctx.close();
+});
+
 // ───────────── 27–28. AI receptionist ─────────────
 
 // 27–28 verify a REAL call: a person rings the staging receptionist number (…2055), the live Retell agent answers and the
