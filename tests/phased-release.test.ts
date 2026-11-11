@@ -43,9 +43,10 @@ test("phased release: the committed production configuration keeps every AI syst
   assert.notEqual(on, toml);
   assert.match(checkPhase(on, ["AI Builds (addendum)"], null).join(" "), /AI_BUILD_AUTOMATION is "on"/);
   assert.match(checkPhase(toml.replace(', AI_BUILD_AUTOMATION = "off"', ""), ["AI Builds V4 (Founder architecture)"], null).join(" "), /AI_BUILD_AUTOMATION is not set/, "the gate must be stated, not implied");
-  for (const [subsystem, secret] of [["AI Builds (addendum)", "BUILD_RUNNER_SECRET"], ["AI Builds (addendum)", "AI_BUILD_AUTOMATION"], ["AI Receptionist", "RETELL_INBOUND_API_KEY"], ["AI Sales Optimization (addendum)", "RETELL_OUTBOUND_API_KEY"]]) {
+  for (const [subsystem, secret] of [["AI Builds (addendum)", "BUILD_RUNNER_SECRET"], ["AI Builds (addendum)", "AI_BUILD_AUTOMATION"], ["AI Receptionist", "RETELL_API_KEY"], ["AI Receptionist", "RETELL_OUTBOUND"], ["AI Sales Optimization (addendum)", "RETELL_OUTBOUND_API_KEY"]]) {
     assert.match(phaseConfigProblems([subsystem], vars, [secret]).join(" "), new RegExp(`holds the secret ${secret}`));
   }
+  assert.deepEqual(phaseConfigProblems(["AI Receptionist"], vars, ["RETELL_INBOUND_API_KEY"]), [], "Crestmont's own inbound line is answered in production (Founder, 2026-11-11)");
   assert.deepEqual(phaseConfigProblems([], { AI_BUILD_AUTOMATION: "on" }, ["BUILD_RUNNER_SECRET"]), [], "with nothing deferred the full scope is released and judged by the gates");
 });
 

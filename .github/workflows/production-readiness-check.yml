@@ -51,7 +51,7 @@ jobs:
           if [ -n "$missing" ]; then echo "::error title=Required production secret missing::$missing"; else echo "::notice title=Required production secrets::all present (TURNSTILE_SITE_KEY, TURNSTILE_SECRET, EVIDENCE_INGEST_SECRET, MFA_ENCRYPTION_KEY, CRM_ERASURE_HMAC_KEY)"; fi
           founder=$(grep -xE 'STRIPE_SECRET_KEY|STRIPE_WEBHOOK_SECRET|RESEND_API_KEY|RESEND_WEBHOOK_SECRET' names.txt | sort | paste -sd, - || true)
           [ -z "$founder" ] || echo "::notice title=Founder-managed activation secrets present::$founder (payments stay off until PAYMENTS_LIVE_AUTHORIZED = yes)"
-          deferred=$(grep -xE 'RETELL_API_KEY|RETELL_INBOUND_API_KEY|RETELL_OUTBOUND_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|AI_BUILD_AUTOMATION|RESEARCH_RUNNER_SECRET|CRM_IMPORT_SECRET|PAYMENT_SIMULATION_ENABLED|STAGING_ACCESS_PASSWORD' names.txt | sort | paste -sd, - || true)
+          deferred=$(grep -xE 'RETELL_API_KEY|RETELL_OUTBOUND_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|AI_BUILD_AUTOMATION|RESEARCH_RUNNER_SECRET|CRM_IMPORT_SECRET|PAYMENT_SIMULATION_ENABLED|STAGING_ACCESS_PASSWORD' names.txt | sort | paste -sd, - || true)
           [ -z "$deferred" ] || echo "::warning title=Phase-1 secret present::$deferred (voice, AI, simulation or preview; phase 1 never uses it)"
           [ -z "$missing" ]
 

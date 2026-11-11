@@ -19,6 +19,8 @@ export interface PortfolioProject {
   demo_url: string | null; demo_status: "none" | "ready" | "unavailable"; demo_verified_at: string | null; demo_verified_by: string | null; demo_revision: string | null;
   /** Genuine screenshots bundled under /assets/portfolio/ (survive preview database rebuilds; no R2 needed). */
   poster_desktop_asset: string | null; poster_mobile_asset: string | null; poster_tablet_asset: string | null;
+  /** Archived entries keep every record and image but never appear publicly (migration 0103). */
+  archived_at?: string | null; tablet_screenshot_file_id?: string | null;
   /** FD-13 explicit, recorded opt-in by the website owner (migration 0068). */
   portfolio_consent_at?: string | null; portfolio_consent_by?: string | null; portfolio_consent_method?: "written" | "portal" | null;
   portfolio_consent_evidence?: string | null; portfolio_consent_recorded_by?: string | null; portfolio_consent_withdrawn_at?: string | null;
@@ -154,10 +156,17 @@ export async function setDemo(db: Db, actor: Actor, id: string, input: DemoInput
 }
 
 export async function listPublished(db: Db): Promise<PortfolioProject[]> {
-  return (await db.prepare(`SELECT * FROM portfolio_projects WHERE published = 1 ORDER BY position, name`).all<PortfolioProject>()).results;
+  return (await db.prepare(`SELECT * FROM portfolio_projects WHERE published = 1 AND archived_at IS NULL ORDER BY position, name`).all<PortfolioProject>()).results;
 }
 export async function listAll(db: Db): Promise<PortfolioProject[]> {
   return (await db.prepare(`SELECT * FROM portfolio_projects ORDER BY position, name`).all<PortfolioProject>()).results;
+}
+/** Active (not archived) entries in display order. */
+export async function listActive(db: Db): Promise<PortfolioProject[]> {
+  return (await db.prepare(`SELECT * FROM portfolio_projects WHERE archived_at IS NULL ORDER BY position, name`).all<PortfolioProject>()).results;
+}
+export async function listArchived(db: Db): Promise<PortfolioProject[]> {
+  return (await db.prepare(`SELECT * FROM portfolio_projects WHERE archived_at IS NOT NULL ORDER BY archived_at DESC, name`).all<PortfolioProject>()).results;
 }
 export async function getBySlug(db: Db, slug: string) {
   return db.prepare(`SELECT * FROM portfolio_projects WHERE slug = ?`).bind(slug).first<PortfolioProject>();
@@ -174,7 +183,7 @@ export async function testimonialsFor(db: Db, projectId: string): Promise<(Testi
 
 /** True only when the file is the current screenshot of a published project (public media gate). */
 export async function isPublicPortfolioFile(db: Db, fileId: string): Promise<boolean> {
-  const row = await db.prepare(`SELECT 1 AS ok FROM portfolio_projects WHERE published = 1 AND (desktop_screenshot_file_id = ? OR mobile_screenshot_file_id = ?) LIMIT 1`).bind(fileId, fileId).first<{ ok: number }>();
+  const row = await db.prepare(`SELECT 1 AS ok FROM portfolio_projects WHERE published = 1 AND archived_at IS NULL AND (desktop_screenshot_file_id = ? OR mobile_screenshot_file_id = ? OR tablet_screenshot_file_id = ?) LIMIT 1`).bind(fileId, fileId, fileId).first<{ ok: number }>();
   return !!row;
 }
 
@@ -199,18 +208,23 @@ export function validateProject(input: ProjectInput): { values: Omit<ProjectInpu
   return { values: { ...v, featuresJson: JSON.stringify(feats) }, issues };
 }
 
-export async function createProject(db: Db, actor: Actor, input: ProjectInput, ip?: string | null) {
+export async function createProject(db: Db, actor: Actor, input: ProjectInput, ip?: string | null, insertAt?: number | null) {
   guard(actor);
   const { values, issues } = validateProject(input);
   if (issues.length) throw new PortfolioError(422, "Please fix the project details", issues);
   if (await getBySlug(db, values.slug)) throw new PortfolioError(422, "Please fix the project details", ["That slug is already used by another project"]);
   const id = newId("pf");
   const at = nowIso();
-  const pos = (await db.prepare(`SELECT COALESCE(MAX(position), 0) + 1 AS n FROM portfolio_projects`).first<{ n: number }>())!.n;
+  // A new entry can go anywhere in the display order (1 = first); default and out-of-range values append it.
+  const active = await listActive(db);
+  const at1 = insertAt && Number.isInteger(insertAt) && insertAt >= 1 && insertAt <= active.length ? insertAt : active.length + 1;
+  const order = [...active.map((p) => p.id)];
+  order.splice(at1 - 1, 0, id);
   await db.batch([
     db.prepare(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, technology_summary, position, published, updated_at, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?)`).bind(id, values.slug, values.name, values.industry, values.live_url, values.relationship, values.description, values.featuresJson, values.technology_summary || null, pos, at, at),
-    auditStmt(db, actor, "portfolio.created", id, { slug: values.slug }, ip),
+      VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?)`).bind(id, values.slug, values.name, values.industry, values.live_url, values.relationship, values.description, values.featuresJson, values.technology_summary || null, at1, at, at),
+    ...order.map((pid, i) => db.prepare(`UPDATE portfolio_projects SET position = ? WHERE id = ?`).bind(i + 1, pid)),
+    auditStmt(db, actor, "portfolio.created", id, { slug: values.slug, position: at1 }, ip),
   ]);
   return { id };
 }
@@ -263,7 +277,7 @@ export async function documentRelationship(db: Db, actor: Actor, id: string, rel
   ]);
 }
 
-export async function uploadScreenshot(db: Db, storage: StorageAdapter | null, actor: Actor, id: string, kind: "desktop" | "mobile", file: File, capturedOn: string, ip?: string | null) {
+export async function uploadScreenshot(db: Db, storage: StorageAdapter | null, actor: Actor, id: string, kind: "desktop" | "tablet" | "mobile", file: File, capturedOn: string, ip?: string | null) {
   guard(actor);
   if (!storage) throw new PortfolioError(503, "File storage is not configured in this environment, so screenshots cannot be uploaded yet.");
   const p = await getById(db, id);
@@ -286,8 +300,8 @@ export async function uploadScreenshot(db: Db, storage: StorageAdapter | null, a
   const key = `portfolio/${p.id}/${kind}/${fileId}.${ext === "jpeg" ? "jpg" : ext}`;
   const sha = toHex(await crypto.subtle.digest("SHA-256", bytes));
   await storage.put(key, bytes, contentType);
-  const col = kind === "desktop" ? "desktop_screenshot_file_id" : "mobile_screenshot_file_id";
-  const previous = p[col];
+  const col = kind === "desktop" ? "desktop_screenshot_file_id" : kind === "tablet" ? "tablet_screenshot_file_id" : "mobile_screenshot_file_id";
+  const previous = p[col] ?? null;
   const at = nowIso();
   const stmts = [
     db.prepare(`INSERT INTO files (id, organization_id, project_id, r2_key, filename, content_type, size_bytes, sha256, scan_status, folder, uploaded_by, created_at) VALUES (?,?,NULL,?,?,?,?,?,'pending','portfolio',?,?)`)
@@ -305,6 +319,7 @@ export async function setPublished(db: Db, actor: Actor, id: string, publish: bo
   const p = await getById(db, id);
   if (!p) throw new PortfolioError(404, "Project not found");
   if (publish) {
+    if (p.archived_at) throw new PortfolioError(409, "This project is archived", ["Restore it before publishing"]);
     const blockers = publishBlockers(p);
     if (blockers.length) throw new PortfolioError(409, "This project cannot be published yet", blockers);
   }
@@ -316,7 +331,7 @@ export async function setPublished(db: Db, actor: Actor, id: string, publish: bo
 
 export async function move(db: Db, actor: Actor, id: string, dir: "up" | "down", ip?: string | null) {
   guard(actor);
-  const all = await listAll(db);
+  const all = await listActive(db);
   const i = all.findIndex((p) => p.id === id);
   if (i < 0) throw new PortfolioError(404, "Project not found");
   const j = dir === "up" ? i - 1 : i + 1;
@@ -358,7 +373,46 @@ export async function setTestimonialPublished(db: Db, actor: Actor, testimonialI
   return { projectId: t.portfolio_project_id };
 }
 
-function auditStmt(db: Db, actor: Actor, action: string, subjectId: string, details: unknown, ip?: string | null) {
+function auditStmt(db: Db, actor: Actor, action: string, subjectId: string | null, details: unknown, ip?: string | null) {
   return db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (?,?,?,?,?,?,?,?)`)
     .bind(actor.userId ?? null, actor.kind, action, "portfolio_project", subjectId, JSON.stringify(details), ip ?? null, nowIso());
+}
+
+/**
+ * Saves the whole display order at once (drag and drop): `ids` must be exactly the active entries, each once. Positions
+ * become 1..n in that order; archived entries keep their records and follow after the active ones.
+ */
+export async function reorder(db: Db, actor: Actor, ids: string[], ip?: string | null) {
+  guard(actor);
+  const active = await listActive(db);
+  const want = new Set(active.map((p) => p.id));
+  if (ids.length !== want.size || new Set(ids).size !== ids.length || !ids.every((i) => want.has(i)))
+    throw new PortfolioError(409, "The portfolio changed while you were reordering it", ["Reload the page and save the order again"]);
+  const archived = await listArchived(db);
+  await db.batch([
+    ...ids.map((pid, i) => db.prepare(`UPDATE portfolio_projects SET position = ? WHERE id = ?`).bind(i + 1, pid)),
+    ...archived.map((p, i) => db.prepare(`UPDATE portfolio_projects SET position = ? WHERE id = ?`).bind(ids.length + i + 1, p.id)),
+    auditStmt(db, actor, "portfolio.reordered", null, { order: ids }, ip),
+  ]);
+}
+
+/** Archive: hidden from the site and the active list; every field, image and testimonial is kept. Restore brings it back
+ *  (unpublished) at the end of the order. */
+export async function setArchived(db: Db, actor: Actor, id: string, archive: boolean, ip?: string | null) {
+  guard(actor);
+  const p = await getById(db, id);
+  if (!p) throw new PortfolioError(404, "Project not found");
+  if (!!p.archived_at === archive) return;
+  const at = nowIso();
+  const end = (await db.prepare(`SELECT COALESCE(MAX(position), 0) + 1 AS n FROM portfolio_projects WHERE archived_at IS NULL`).first<{ n: number }>())!.n;
+  await db.batch([
+    archive
+      ? db.prepare(`UPDATE portfolio_projects SET archived_at = ?, published = 0, updated_at = ? WHERE id = ?`).bind(at, at, id)
+      : db.prepare(`UPDATE portfolio_projects SET archived_at = NULL, position = ?, updated_at = ? WHERE id = ?`).bind(end, at, id),
+    auditStmt(db, actor, archive ? "portfolio.archived" : "portfolio.restored", id, {}, ip),
+  ]);
+  if (archive) {
+    const rest = await listActive(db);
+    await db.batch(rest.map((r, i) => db.prepare(`UPDATE portfolio_projects SET position = ? WHERE id = ?`).bind(i + 1, r.id)));
+  }
 }

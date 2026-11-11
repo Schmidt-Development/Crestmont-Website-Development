@@ -883,7 +883,9 @@ journey(19, ["PM-007"], "authorized deployment occurs (this run's project, after
   await c.locator('form[action^="/checkout/maintenance/"] button[type=submit]').click();
   await payOnStripeCheckout(c);
   await until(pm, `${BASE}/staff/projects/${id}?tab=approvals`, /7\. Maintenance agreement signed and first subscription payment verified\s+Pass/,
-    "Stripe's signed webhook confirming the first maintenance payment", 180_000);
+    // 360 s: Stripe test-mode webhook delivery is occasionally slower than 3 minutes (staging run 42870980400 attempt 2
+    // timed out at 180 s while attempt 1 passed on the same commit); D1 overload refusals are now retried in the Worker.
+    "Stripe's signed webhook confirming the first maintenance payment", 360_000);
   await approve("deployment_authorized");
   const panel = await gate();
   for (const n of [1, 2, 3, 4, 5, 6, 7]) assert.match(panel, new RegExp(`${n}\\. [^\\n]+\\s+Pass`), `check ${n} passes`);
