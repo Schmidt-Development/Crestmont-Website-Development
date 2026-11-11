@@ -119,7 +119,11 @@ export async function auditInboundRetell(d: { db: Db; env: Env; fetch: typeof fe
   const key = retellKey(d.env, "inbound");
   if (!key) { add("inbound key", false, "RETELL_INBOUND_API_KEY is not set on this Worker"); return out("not_configured"); }
   const base = d.baseUrl.replace(/\/$/, "");
-  const want = { events: `${base}/api/webhooks/retell`, functions: `${base}/api/webhooks/retell/functions`, inbound: `${base}/api/webhooks/retell/inbound` };
+  // RECEPTIONIST_ORIGIN (Founder, 2026-11-11): Crestmont's own line is answered by PRODUCTION, so the staging Worker that
+  // runs this audit expects the agent, its tools and the number to point at that origin instead of itself.
+  const routed = /^https:\/\/[A-Za-z0-9.-]+$/.test(d.env.RECEPTIONIST_ORIGIN ?? "") ? d.env.RECEPTIONIST_ORIGIN! : base;
+  const urls = (o: string) => ({ events: `${o}/api/webhooks/retell`, functions: `${o}/api/webhooks/retell/functions`, inbound: `${o}/api/webhooks/retell/inbound` });
+  const want = urls(routed);
 
   // 1. The key works against the live Retell API.
   const list = await call(key, d.fetch, "POST", "/v2/list-agents?limit=100", {});
@@ -146,6 +150,7 @@ export async function auditInboundRetell(d: { db: Db; env: Env; fetch: typeof fe
   if (!agent) { add("get-agent", false, `could not read agent ${agentId}`); return out("failed", { agents, agentId }); }
 
   // 3. Agent-level settings.
+  add("receptionist routed to", "info", routed === base ? `this environment (${base})` : `production (${routed}); this Worker (${base}) no longer receives the receptionist's calls`);
   add("agent webhook URL", s(agent.webhook_url) === want.events, `webhook_url = ${s(agent.webhook_url) ?? "(none)"}; expected ${want.events}`);
   const events = arr(agent.webhook_events).filter((e): e is string => typeof e === "string");
   const missing = REQUIRED_EVENTS.filter((e) => !events.includes(e));

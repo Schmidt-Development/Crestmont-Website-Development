@@ -187,3 +187,32 @@ test("[SEC-007] the lost-record line is redacted like every other stored error",
   assert.ok(!logged.original.includes("sk_test_abcdef0123456789"), "the key is redacted");
   assert.match(logged.original, /sk_test_\[redacted\]/);
 });
+
+test("[INFRA-006] D1 overload (admission refusal) is retried with a longer backoff for reads, single writes and atomic batches; other write errors are not", async () => {
+  const { withTransientRetry, OVERLOAD_BACKOFF_MS } = await import("../src/lib/db.ts");
+  const overload = () => new Error("D1_ERROR: D1 DB is overloaded. Too many resources consumed within a 10 second window.");
+  const slept: number[] = [];
+  let reads = 0, runs = 0, batches = 0, constraint = 0;
+  const stmt = {
+    bind: () => stmt,
+    first: async () => { if (++reads < 3) throw overload(); return { ok: 1 }; },
+    all: async () => ({ results: [] }),
+    run: async () => { if (++runs < 2) throw overload(); return { meta: { changes: 1 } }; },
+  };
+  const db = withTransientRetry({ prepare: () => stmt, batch: async () => { if (++batches < 4) throw overload(); return []; } } as never, { sleep: async (ms) => { slept.push(ms); } });
+  assert.deepEqual(await db.prepare("SELECT 1").first(), { ok: 1 });
+  assert.equal(reads, 3);
+  assert.deepEqual(slept.splice(0), [OVERLOAD_BACKOFF_MS[0], OVERLOAD_BACKOFF_MS[1]]);
+  await db.prepare("UPDATE t SET x = 1").run();
+  assert.equal(runs, 2, "a refused write is retried once the window eases");
+  await db.batch([db.prepare("INSERT 1")]);
+  assert.equal(batches, 4);
+  assert.deepEqual(slept.splice(0), [OVERLOAD_BACKOFF_MS[0], ...OVERLOAD_BACKOFF_MS]);
+  // Bounded: a database that stays overloaded fails after the last backoff.
+  const stuck = withTransientRetry({ prepare: () => ({ ...stmt, run: async () => { throw overload(); } }), batch: async () => [] } as never, { sleep: async () => {} });
+  await assert.rejects(stuck.prepare("UPDATE t").run(), /overloaded/);
+  // A deterministic write error is never retried.
+  const strict = withTransientRetry({ prepare: () => ({ ...stmt, run: async () => { constraint++; throw new Error("D1_ERROR: UNIQUE constraint failed: t.x"); } }), batch: async () => [] } as never, { sleep: async () => {} });
+  await assert.rejects(strict.prepare("INSERT").run(), /UNIQUE/);
+  assert.equal(constraint, 1);
+});

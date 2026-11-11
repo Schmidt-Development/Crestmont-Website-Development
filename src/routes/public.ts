@@ -1018,8 +1018,9 @@ const projectFormValues = (f: FormData): pf.ProjectInput => ({
   features: String(f.get("features") ?? ""), technology_summary: str(f, "technology_summary"), relationship: str(f, "relationship"),
 });
 
-function projectForm(ctx: AppContext, action: string, v: Partial<pf.ProjectInput>, submit: string, errors: string[] = []): SafeHtml {
-  return html`${formErrors(errors)}<form method="post" action="${action}" class="card">${csrf(ctx)}
+function projectForm(ctx: AppContext, action: string, v: Partial<pf.ProjectInput>, submit: string, errors: string[] = [], positions = 0): SafeHtml {
+  const posField = positions ? select({ name: "position", label: "Position in the portfolio", value: String(positions), options: Array.from({ length: positions }, (_, i) => ({ value: String(i + 1), label: i + 1 === positions ? `${i + 1} — at the end` : i === 0 ? "1 — first" : String(i + 1) })) }) : html``;
+  return html`${formErrors(errors)}<form method="post" action="${action}" class="card">${csrf(ctx)}${posField}
 <div class="grid grid-2 form-grid">${input({ name: "name", label: "Project name", value: v.name, required: true, maxlength: 120 })}
 ${input({ name: "slug", label: "URL slug", value: v.slug, required: true, maxlength: 80, hint: "Lowercase letters, numbers and hyphens: /portfolio/<slug>" })}
 ${input({ name: "industry", label: "Industry", value: v.industry, required: true, maxlength: 120 })}
@@ -1039,14 +1040,24 @@ function registerPortfolioAdmin(r: Router) {
 
   r.post("/staff/portfolio", async (ctx) => {
     requireStaff(ctx, "portfolio.manage");
-    const v = projectFormValues(await ctx.form());
+    const f = await ctx.form();
+    const v = projectFormValues(f);
     try {
-      const { id } = await pf.createProject(ctx.db, ctx.actor!, v, ctx.ip);
+      const { id } = await pf.createProject(ctx.db, ctx.actor!, v, ctx.ip, Number(str(f, "position")) || null);
       return redirect(ctx, `/staff/portfolio/${id}`, { kind: "success", text: "Project added (unpublished)." });
     } catch (e) {
       if (e instanceof pf.PortfolioError && e.status === 422) return portfolioList(ctx, v, e.issues, 422);
       cmsFail(e);
     }
+  });
+
+  // Drag and drop / keyboard reordering: the whole active order at once ("order" = ids, comma-separated).
+  r.post("/staff/portfolio/order", async (ctx) => {
+    requireStaff(ctx, "portfolio.manage");
+    const ids = str(await ctx.form(), "order").split(",").map((x) => x.trim()).filter(Boolean);
+    try { await pf.reorder(ctx.db, ctx.actor!, ids, ctx.ip); }
+    catch (e) { if (e instanceof pf.PortfolioError) return redirect(ctx, "/staff/portfolio", { kind: "error", text: `${e.message}. ${e.issues.join(" ")}` }); throw e; }
+    return redirect(ctx, "/staff/portfolio", { kind: "success", text: "Display order saved." });
   });
 
   r.get("/staff/portfolio/files/:fileId", async (ctx, p) => {
@@ -1086,7 +1097,7 @@ function registerPortfolioAdmin(r: Router) {
       const f = await ctx.form();
       try {
         const msg = await run(ctx, p.id, f);
-        return redirect(ctx, path === "move" ? "/staff/portfolio" : `/staff/portfolio/${p.id}`, { kind: "success", text: msg });
+        return redirect(ctx, path === "move" || path === "archive" ? "/staff/portfolio" : `/staff/portfolio/${p.id}`, { kind: "success", text: msg });
       } catch (e) {
         if (e instanceof pf.PortfolioError && (e.status === 422 || e.status === 409 || e.status === 503)) return portfolioEditor(ctx, p.id, { errors: [e.message, ...e.issues], status: e.status });
         cmsFail(e);
@@ -1096,11 +1107,11 @@ function registerPortfolioAdmin(r: Router) {
 
   action("screenshot", async (ctx, id, f) => {
     const kind = str(f, "kind");
-    if (kind !== "desktop" && kind !== "mobile") throw new pf.PortfolioError(422, "Screenshot not accepted", ["Choose desktop or mobile"]);
+    if (kind !== "desktop" && kind !== "tablet" && kind !== "mobile") throw new pf.PortfolioError(422, "Screenshot not accepted", ["Choose desktop, tablet or mobile"]);
     const file = f.get("screenshot");
     if (!(file instanceof File) || file.size === 0) throw new pf.PortfolioError(422, "Screenshot not accepted", ["Choose an image file to upload"]);
     await pf.uploadScreenshot(ctx.db, ctx.storage, ctx.actor!, id, kind, file, str(f, "captured_on"), ctx.ip);
-    return `${kind === "desktop" ? "Desktop" : "Mobile"} screenshot saved.`;
+    return `${kind === "desktop" ? "Desktop" : kind === "tablet" ? "Tablet" : "Mobile"} screenshot saved.`;
   });
   action("verify-link", async (ctx, id, f) => { await pf.recordLinkVerification(ctx.db, ctx.actor!, id, str(f, "verified_on"), ctx.ip); return "Link verification recorded."; });
   action("relationship", async (ctx, id, f) => { await pf.documentRelationship(ctx.db, ctx.actor!, id, str(f, "relationship"), str(f, "evidence"), ctx.ip); return "Relationship documentation recorded."; });
@@ -1114,23 +1125,37 @@ function registerPortfolioAdmin(r: Router) {
   });
   action("publish", async (ctx, id) => { await pf.setPublished(ctx.db, ctx.actor!, id, true, ctx.ip); return "Project published."; });
   action("unpublish", async (ctx, id) => { await pf.setPublished(ctx.db, ctx.actor!, id, false, ctx.ip); return "Project unpublished."; });
+  action("archive", async (ctx, id) => { await pf.setArchived(ctx.db, ctx.actor!, id, true, ctx.ip); return "Project archived. It is hidden from the site; nothing was deleted."; });
+  action("restore", async (ctx, id) => { await pf.setArchived(ctx.db, ctx.actor!, id, false, ctx.ip); return "Project restored (unpublished), at the end of the order."; });
   action("move", async (ctx, id, f) => { await pf.move(ctx.db, ctx.actor!, id, str(f, "dir") === "up" ? "up" : "down", ctx.ip); return "Order updated."; });
   action("testimonials", async (ctx, id, f) => { await pf.addTestimonial(ctx.db, ctx.actor!, id, { author: str(f, "author"), body: str(f, "body"), evidence: str(f, "evidence") }, ctx.ip); return "Verified testimonial saved (unpublished)."; });
 }
 
 async function portfolioList(ctx: AppContext, v: Partial<pf.ProjectInput> = {}, errors: string[] = [], status = 200): Promise<Response> {
-  const all = await pf.listAll(ctx.db);
+  const all = await pf.listActive(ctx.db);
+  const archived = await pf.listArchived(ctx.db);
+  const approved = pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) });
+  const row = (p: pf.PortfolioProject, i: number) => {
+    const d = pf.demoState(p, approved);
+    const b = pf.publishBlockers(p);
+    return html`<li class="pf-order__item card" data-pf-id="${p.id}" data-testid="pf-row">
+<button type="button" class="pf-order__handle" data-pf-handle aria-label="Reorder ${p.name}: drag, or use the arrow keys" aria-describedby="pf-order-help">⠿</button>
+<span class="pf-order__pos" data-pf-pos aria-hidden="true">${i + 1}</span>
+<span class="pf-order__main"><a href="/staff/portfolio/${p.id}">${p.name}</a><br><span class="faint">${p.industry} · ${p.live_url}</span></span>
+<span class="pf-order__status">${p.published ? badge("published") : badge("draft", "Hidden")} ${d.kind === "embed" ? badge("ok", "Demo") : ""} ${b.length && !p.published ? badge("blocked", `${b.length} to publish`) : ""}</span>
+<span class="pf-order__moves">${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Up", { hidden: { dir: "up" }, size: "sm" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Down", { hidden: { dir: "down" }, size: "sm" })}</span></li>`;
+  };
   return staffShell(ctx, "Portfolio", html`${pageHead("Portfolio", undefined, "Content")}
-<p class="muted">Projects are public only when published. Publishing requires genuine desktop and mobile screenshots of the live site, a verified live link and documented relationship to Crestmont.</p>
-${table(all, [
-  { header: "#", cell: (p) => p.position, numeric: true },
-  { header: "Project", cell: (p) => html`<a href="/staff/portfolio/${p.id}">${p.name}</a><br><span class="faint">${p.live_url}</span>` },
-  { header: "Status", cell: (p) => p.published ? badge("published") : badge("draft", "Unpublished") },
-  { header: "Interactive demo", cell: (p) => { const d = pf.demoState(p, pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) })); return d.kind === "embed" ? badge("ok", "Embedded") : d.kind === "unavailable" ? badge("blocked", "Unavailable") : badge("draft", "None"); } },
-  { header: "Ready to publish", cell: (p) => { const b = pf.publishBlockers(p); return b.length ? html`${badge("blocked", `${b.length} blocker${b.length > 1 ? "s" : ""}`)}` : badge("ok", "Ready"); } },
-  { header: "Order", cell: (p) => html`${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Up", { hidden: { dir: "up" } })} ${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Down", { hidden: { dir: "down" } })}` },
-], { empty: emptyState("No portfolio projects", "Add a project below."), caption: "Portfolio projects" })}
-<h2 class="h4">Add a project</h2>${projectForm(ctx, "/staff/portfolio", { relationship: "Relationship documentation pending", ...v }, "Add project", errors)}`, status);
+<p class="muted">The public portfolio shows published projects in exactly this order. Drag a project by its handle (mouse or touch), or focus the handle and use the arrow keys, then save the order. Up and Down work without JavaScript. Publishing requires genuine screenshots of the live site, a verified live link, documented relationship and the owner's consent.</p>
+<p id="pf-order-help" class="visually-hidden">Press the up or down arrow key to move this project; then press Save order.</p>
+${all.length ? html`<ol class="pf-order" data-pf-order aria-label="Portfolio display order">${all.map(row)}</ol>
+<form method="post" action="/staff/portfolio/order" data-pf-order-form class="form-actions">${csrf(ctx)}<input type="hidden" name="order" value="${all.map((p) => p.id).join(",")}" data-pf-order-input>
+<button class="btn btn--primary" type="submit" data-pf-save>Save order</button> <span class="faint" data-pf-status role="status" aria-live="polite"></span></form>` : emptyState("No portfolio projects", "Add a project below.")}
+${archived.length ? html`<details class="card"><summary><strong>Archived (${archived.length})</strong> · hidden from the site; nothing deleted</summary>${table(archived, [
+  { header: "Project", cell: (p) => html`<a href="/staff/portfolio/${p.id}">${p.name}</a>` }, { header: "Archived", cell: (p) => formatDate(p.archived_at ?? null) },
+  { header: "", cell: (p) => actionForm(ctx, `/staff/portfolio/${p.id}/restore`, "Restore", { variant: "secondary", size: "sm" }) }], { caption: "Archived portfolio projects" })}</details>` : ""}
+<h2 class="h4">Add a project</h2>${projectForm(ctx, "/staff/portfolio", { relationship: "Relationship documentation pending", ...v }, "Add project", errors, all.length + 1)}
+<script src="/assets/portfolio-order.js" defer></script>`, status);
 }
 
 /** Interactive demo settings (PORTFOLIO.md): isolated demo deployment, its verification and bundled posters. */
@@ -1159,9 +1184,9 @@ async function portfolioEditor(ctx: AppContext, id: string, opts: { errors?: str
   const blockers = pf.publishBlockers(p);
   const tms = await pf.testimonialsFor(ctx.db, id);
   const v = opts.values ?? { name: p.name, slug: p.slug, industry: p.industry, live_url: p.live_url, description: p.description, features: pf.features(p).join("\n"), technology_summary: p.technology_summary ?? "", relationship: p.relationship };
-  const shotAdmin = (kind: "desktop" | "mobile") => {
-    const fid = kind === "desktop" ? p.desktop_screenshot_file_id : p.mobile_screenshot_file_id;
-    return html`<div class="card"><h3 class="card__title">${kind === "desktop" ? "Desktop" : "Mobile"} screenshot</h3>
+  const shotAdmin = (kind: "desktop" | "tablet" | "mobile") => {
+    const fid = kind === "desktop" ? p.desktop_screenshot_file_id : kind === "tablet" ? p.tablet_screenshot_file_id : p.mobile_screenshot_file_id;
+    return html`<div class="card"><h3 class="card__title">${kind === "desktop" ? "Desktop" : kind === "tablet" ? "Tablet (optional)" : "Mobile"} screenshot</h3>
 ${fid ? html`<a class="shot" href="/staff/portfolio/files/${fid}"><img src="/staff/portfolio/files/${fid}" alt="Current ${kind} screenshot of ${p.name}"></a>` : html`<div class="shot shot--pending"><span>Verified screenshot capture pending</span></div>`}
 <form method="post" action="/staff/portfolio/${p.id}/screenshot" enctype="multipart/form-data">${csrf(ctx)}<input type="hidden" name="kind" value="${kind}">
 ${fileInput("screenshot", fid ? "Replace with a new genuine capture" : "Upload a genuine capture of the live site", { accept: ".png,.jpg,.jpeg,.webp", hint: "PNG, JPEG or WebP captured from the live production site · up to 25 MB. Never mock-ups or AI-generated images." })}
@@ -1171,9 +1196,9 @@ ${input({ name: "captured_on", label: "Captured on", type: "date", required: tru
   return staffShell(ctx, p.name, html`${pageHead(p.name, html`${linkButton("All projects", "/staff/portfolio", "ghost", "sm")}${p.published ? linkButton("View public page", `/portfolio/${p.slug}`, "ghost", "sm") : ""}`, "Portfolio")}
 ${formErrors(opts.errors ?? [])}
 <div class="card"><div class="row row--between"><div>${p.published ? badge("published") : badge("draft", "Unpublished")} <span class="faint">Updated ${formatDateTime(p.updated_at)}</span></div>
-<div>${p.published ? actionForm(ctx, `/staff/portfolio/${p.id}/unpublish`, "Unpublish", { confirm: "Remove this project from the public portfolio?" }) : actionForm(ctx, `/staff/portfolio/${p.id}/publish`, "Publish", { variant: "primary" })}</div></div>
+<div>${p.archived_at ? html`${badge("muted", "Archived")} ${actionForm(ctx, `/staff/portfolio/${p.id}/restore`, "Restore", { variant: "secondary" })}` : html`${p.published ? actionForm(ctx, `/staff/portfolio/${p.id}/unpublish`, "Unpublish", { confirm: "Remove this project from the public portfolio?" }) : actionForm(ctx, `/staff/portfolio/${p.id}/publish`, "Publish", { variant: "primary" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/archive`, "Archive", { variant: "ghost", confirm: "Archive this project? It is hidden from the site and the list; its details and images are kept and it can be restored." })}`}</div></div>
 ${blockers.length ? html`<div class="alert alert--warn" role="status"><strong>Publishing is blocked until:</strong><ul>${blockers.map((b) => html`<li>${b}</li>`)}</ul></div>` : html`<p class="muted">All publishing requirements are met.</p>`}</div>
-<div class="grid grid-2">${shotAdmin("desktop")}${shotAdmin("mobile")}</div>
+<div class="grid grid-3">${shotAdmin("desktop")}${shotAdmin("tablet")}${shotAdmin("mobile")}</div>
 <div class="grid grid-2"><div class="card"><h3 class="card__title">Live link verification</h3>${dl([["Live link", html`<a href="${safeUrl(p.live_url)}" rel="noopener" target="_blank">${p.live_url}</a>`], ["Last verified", formatDate(p.link_verified_at)]])}
 <form method="post" action="/staff/portfolio/${p.id}/verify-link">${csrf(ctx)}${input({ name: "verified_on", label: "Date you opened the link and confirmed it loads the correct site", type: "date", required: true })}<div class="form-actions">${button("Record verification", { variant: "secondary", size: "sm" })}</div></form></div>
 <div class="card"><h3 class="card__title">Relationship documentation</h3>${dl([["Current", p.relationship], ["Documented", p.relationship_documented_at ? formatDate(p.relationship_documented_at) : "Not yet documented"], ["Evidence", p.relationship_evidence]])}

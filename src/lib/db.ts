@@ -98,13 +98,26 @@ export function isTransientDbError(e: unknown): boolean {
     || /storage operation exceeded timeout/i.test(m);
 }
 
+/**
+ * D1 admission control: "D1 DB is overloaded. Too many resources consumed within a 10 second window." The statement is
+ * refused before it runs (staging, 2026-11-10: /staff/research, /staff/legal, a cron job and, by its timing, the Stripe
+ * maintenance-payment webhook), so a read, a single write or an atomic batch can be retried; the window is 10 seconds,
+ * so the backoff is longer than for the transient faults above.
+ */
+export function isD1Overload(e: unknown): boolean {
+  return /D1 DB is overloaded/i.test(String((e as { message?: unknown })?.message ?? e));
+}
+/** Backoff before each overload retry (ms): about 5 s in total, inside a request. */
+export const OVERLOAD_BACKOFF_MS = [400, 1_500, 3_000] as const;
+
 /** How many times a read is attempted in total (one try plus two retries). */
 export const DB_READ_ATTEMPTS = 3;
 
 /**
- * Wraps a database so READS retry on a transient platform error. Writes are never retried: `run` and
+ * Wraps a database so READS retry on a transient platform error. Writes are not retried on those: `run` and
  * `batch` may already have applied when the error surfaced, and repeating one could double-apply it. A
- * write that hits a transient error still fails, loudly, exactly as before.
+ * write that hits a transient error still fails, loudly, exactly as before. The one exception is D1's overload
+ * refusal (isD1Overload), which rejects a statement or an atomic batch before it runs.
  *
  * If every attempt fails the last error is thrown unchanged, so nothing is hidden and recordAppError still
  * sees it.
@@ -117,11 +130,22 @@ export function withTransientRetry(
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
   async function read<T>(op: () => Promise<T>): Promise<T> {
-    for (let i = 1; ; i++) {
+    for (let i = 1, o = 0; ; i++) {
       try { return await op(); }
       catch (e) {
+        if (isD1Overload(e) && o < OVERLOAD_BACKOFF_MS.length) { await sleep(OVERLOAD_BACKOFF_MS[o++]); continue; }
         if (i >= attempts || !isTransientDbError(e)) throw e;
         await sleep(25 * i * i); // 25ms, then 100ms: short enough to stay well inside a request
+      }
+    }
+  }
+  // Writes retry ONLY on overload: D1 refused the statement (or the whole atomic batch) before running it.
+  async function write<T>(op: () => Promise<T>): Promise<T> {
+    for (let o = 0; ; o++) {
+      try { return await op(); }
+      catch (e) {
+        if (!isD1Overload(e) || o >= OVERLOAD_BACKOFF_MS.length) throw e;
+        await sleep(OVERLOAD_BACKOFF_MS[o]);
       }
     }
   }
@@ -134,13 +158,13 @@ export function withTransientRetry(
     bind: (...values: unknown[]) => wrapStatement(stmt.bind(...values)),
     all: <T = Record<string, unknown>>() => read(() => stmt.all<T>()),
     first: <T = Record<string, unknown>>() => read(() => stmt.first<T>()),
-    run: () => stmt.run(),
+    run: () => write(() => stmt.run()),
   } as DbStatement);
 
   return {
     [RAW_DB]: underlyingDb(db),
     prepare: (sql: string) => wrapStatement(db.prepare(sql)),
-    batch: (statements: DbStatement[]) => db.batch(statements.map(unwrapStatement)),
+    batch: (statements: DbStatement[]) => write(() => db.batch(statements.map(unwrapStatement))),
   } as Db;
 }
 

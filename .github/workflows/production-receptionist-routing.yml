@@ -1,0 +1,143 @@
+name: Production receptionist routing
+
+# Founder, 2026-11-11: real inbound calls to Crestmont's own line reach PRODUCTION, not staging, with the existing
+# prompts and configuration, and outbound calling stays disabled.
+#
+#  1. staging job      reads the receptionist's operating settings the Founder configured on staging (hours, transfer,
+#                      scheduling, number binding, agent id); receptionist follow-up calling is forced OFF in the copy.
+#  2. production job   (GitHub `production` environment approval)
+#                      - installs RETELL_INBOUND_API_KEY on the production Worker from the production environment
+#                        secret of the same name, so production verifies the receptionist's signed webhooks;
+#                      - proves it with a signed no-op webhook (accepted) and an unsigned one (refused);
+#                      - gives production the staging settings when production has none (its own are never replaced);
+#                      - repoints the Retell agent's webhook, its tool URLs and the number's inbound webhook from the
+#                        staging origin to the production origin (scripts/retell-route.ts: prompts untouched, read-back
+#                        verified, published only when nothing else differs from the published version).
+# Dry run unless `apply` is ticked. Rollback: target = staging (moves the URLs back; leaves the production key).
+# Outbound: RETELL_OUTBOUND stays unset on production, the outbound and legacy Retell keys stay forbidden there
+# (src/readiness/phased-release.ts), and the sales workspace is never touched (this key cannot see it).
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Make the change (unticked = dry run: report what would change)"
+        type: boolean
+        default: false
+      target:
+        description: "Where the receptionist's calls go"
+        type: choice
+        options: ["production", "staging"]
+        default: "production"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-receptionist-routing
+  cancel-in-progress: false
+
+jobs:
+  staging-settings:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: staging
+    outputs:
+      settings: ${{ steps.export.outputs.settings }}
+      agent: ${{ steps.export.outputs.agent }}
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Read the receptionist settings configured on staging
+        id: export
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node --no-warnings scripts/receptionist-settings.ts export --out "$RUNNER_TEMP/voice.json"
+          echo "settings=$(base64 -w0 "$RUNNER_TEMP/voice.json")" >> "$GITHUB_OUTPUT"
+          echo "agent=$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(c&&c.inbound&&/^agent_[A-Za-z0-9]+$/.test(c.inbound.agent_id||"")?c.inbound.agent_id:"")' "$RUNNER_TEMP/voice.json")" >> "$GITHUB_OUTPUT"
+          rm -f "$RUNNER_TEMP/voice.json"
+
+  route:
+    needs: staging-settings
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+      PROD: ${{ vars.PRODUCTION_URL }}
+      STAGING: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+      APPLY: ${{ inputs.apply }}
+      TARGET: ${{ inputs.target }}
+      AGENT: ${{ needs.staging-settings.outputs.agent || 'agent_b6ed20f033422649ecf1aedd38' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Inputs and the receptionist key
+        env:
+          RETELL_INBOUND_API_KEY: ${{ secrets.RETELL_INBOUND_API_KEY }}
+        run: |
+          printf '%s' "$PROD" | grep -Eq '^https://[A-Za-z0-9.-]+$' || { echo "::error::The repository variable PRODUCTION_URL must be a bare https origin."; exit 1; }
+          printf '%s' "$AGENT" | grep -Eq '^agent_[A-Za-z0-9]+$' || { echo "::error::No receptionist agent id."; exit 1; }
+          if [ -z "$RETELL_INBOUND_API_KEY" ]; then
+            echo "::error title=RETELL_INBOUND_API_KEY missing on the production environment::Founder action: in GitHub → Settings → Environments → production → Environment secrets, add RETELL_INBOUND_API_KEY with the same value as the staging environment's RETELL_INBOUND_API_KEY (Retell dashboard → the receptionist's (inbound) workspace → API Keys → the key with the webhook badge). Then run this workflow again."
+            exit 1
+          fi
+          echo "Receptionist agent: $AGENT · target: $TARGET · apply: $APPLY"
+
+      - name: Install the receptionist key on the production Worker
+        if: inputs.apply && inputs.target == 'production'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          RETELL_INBOUND_API_KEY: ${{ secrets.RETELL_INBOUND_API_KEY }}
+        run: |
+          printf '%s' "$RETELL_INBOUND_API_KEY" | $WRANGLER secret put RETELL_INBOUND_API_KEY --env production > /dev/null
+          echo "RETELL_INBOUND_API_KEY installed on the production Worker (value not shown)."
+
+      - name: Production verifies the receptionist's signature
+        if: inputs.target == 'production'
+        continue-on-error: ${{ !inputs.apply }}
+        env:
+          RETELL_INBOUND_API_KEY: ${{ secrets.RETELL_INBOUND_API_KEY }}
+        run: |
+          for i in 1 2 3 4 5 6; do
+            node --no-warnings scripts/retell-route.ts --check "$PROD" && exit 0
+            sleep 10
+          done
+          exit 1
+
+      - name: Receptionist settings for production (hours, transfer, scheduling, numbers; outbound off)
+        if: inputs.target == 'production'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SETTINGS: ${{ needs.staging-settings.outputs.settings }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/rs"
+          printf '%s' "$SETTINGS" | base64 -d > "$RUNNER_TEMP/rs/voice.json"
+          if [ "$APPLY" = "true" ]; then
+            node --no-warnings scripts/receptionist-settings.ts plan --in "$RUNNER_TEMP/rs/voice.json" --apply --sql "$RUNNER_TEMP/rs/voice.sql"
+          else
+            node --no-warnings scripts/receptionist-settings.ts plan --in "$RUNNER_TEMP/rs/voice.json"
+          fi
+          rm -rf "$RUNNER_TEMP/rs"
+
+      - name: Repoint the Retell receptionist (read-back verified)
+        env:
+          RETELL_INBOUND_API_KEY: ${{ secrets.RETELL_INBOUND_API_KEY }}
+        run: |
+          if [ "$TARGET" = "production" ]; then from="$STAGING"; to="$PROD"; else from="$PROD"; to="$STAGING"; fi
+          node --no-warnings scripts/retell-route.ts --agent "$AGENT" --from "$from" --to "$to" $( [ "$APPLY" = "true" ] && echo --apply )

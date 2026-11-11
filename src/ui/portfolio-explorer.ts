@@ -13,7 +13,7 @@ const EXTERNAL = html`<svg viewBox="0 0 16 16" width="13" height="13" aria-hidde
 
 const hostOf = (u: string): string => { try { return new URL(u).host; } catch { return ""; } };
 const posterOf = (p: PortfolioProject, kind: "desktop" | "tablet" | "mobile"): string | null => {
-  if (kind === "tablet") return p.poster_tablet_asset;
+  if (kind === "tablet") return p.tablet_screenshot_file_id ? `/portfolio-media/${p.tablet_screenshot_file_id}` : p.poster_tablet_asset;
   const asset = kind === "desktop" ? p.poster_desktop_asset : p.poster_mobile_asset;
   const file = kind === "desktop" ? p.desktop_screenshot_file_id : p.mobile_screenshot_file_id;
   return file ? `/portfolio-media/${file}` : asset;

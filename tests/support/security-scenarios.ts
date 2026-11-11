@@ -157,10 +157,16 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/portfolio/:id/consent", fields: () => ({ given_by: "B. Owner, owner of the matrix business", method: "written", given_on: day(-1), evidence: "Signed consent email from the owner, filed in the matrix shared drive" }) },
     { key: "POST /staff/portfolio/:id/publish" },
     { key: "POST /staff/portfolio/:id/move", fields: () => ({ dir: "up" }) },
+    { key: "POST /staff/portfolio/order", setup: async () => {
+      const rows = (await w.db.prepare(`SELECT id FROM portfolio_projects WHERE archived_at IS NULL ORDER BY position, name`).all<{ id: string }>()).results;
+      x.portfolioOrder = rows.map((r) => r.id).reverse().join(",");
+    }, fields: () => ({ order: x.portfolioOrder }) },
     { key: "POST /staff/portfolio/:id/testimonials", fields: () => ({ author: "B. Person", body: "Clear, careful and on time.", evidence: "Email from author dated 2026-10-26 granting permission" }) },
     { key: "POST /staff/portfolio/testimonials/:tid/:action" },
     { key: "POST /staff/portfolio/:id/unpublish" },
     { key: "POST /staff/portfolio/:id/consent-withdraw", fields: () => ({ note: "Owner asked by email to stop showing the site" }) },
+    { key: "POST /staff/portfolio/:id/archive" },
+    { key: "POST /staff/portfolio/:id/restore" },
 
     // ── Customer portal (tenant A administrator) ──
     cust("POST /portal/projects/:id/onboarding", { setup: async () => { await w.db.prepare(`UPDATE projects SET status = 'awaiting_onboarding' WHERE id = ?`).bind(a.ids.project).run(); } }),

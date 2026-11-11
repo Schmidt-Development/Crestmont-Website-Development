@@ -50,10 +50,13 @@ export const PRODUCTION_GATES: readonly ProductionGate[] = [
   BUILDER_GATE("AI Builds V4 (Founder architecture)"),
   {
     subsystem: "AI Receptionist",
-    capability: "AI voice receptionist (Crestmont's own line and the client service)",
-    gate: "The client service is \"Coming soon\" and cannot be quoted or bought (FD-45); no Retell key on the production Worker, so no call webhook verifies and no call is placed; outbound calling off.",
+    // Founder, 2026-11-11: Crestmont's OWN inbound line is answered by the receptionist in production (its webhooks reach
+    // the production Worker, verified with RETELL_INBOUND_API_KEY). What stays deferred is the AI Receptionist sold to
+    // clients and every outbound call, so the gate is the "Coming soon" offer plus no outbound key or switch.
+    capability: "AI Receptionist as a client service, and outbound calling (Crestmont's own inbound line runs in production)",
+    gate: "The client service is \"Coming soon\" and cannot be quoted or bought (FD-45); outbound calling is off (RETELL_OUTBOUND not on) and no outbound or legacy Retell key is on the production Worker, so no call is ever placed.",
     vars: [{ name: "RETELL_OUTBOUND", mustBe: "off", defaultWhenAbsent: "off" }],
-    forbiddenSecrets: ["RETELL_INBOUND_API_KEY", "RETELL_API_KEY", "RETELL_OUTBOUND"],
+    forbiddenSecrets: ["RETELL_API_KEY", "RETELL_OUTBOUND", "RETELL_OUTBOUND_API_KEY"],
   },
   {
     subsystem: "AI Sales Optimization (addendum)",

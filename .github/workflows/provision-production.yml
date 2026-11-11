@@ -184,7 +184,7 @@ jobs:
           # guess which secret it meant (provisioning run 42119243249).
           founder=$(grep -xE 'STRIPE_SECRET_KEY|STRIPE_WEBHOOK_SECRET|RESEND_API_KEY|RESEND_WEBHOOK_SECRET' names.txt | sort | paste -sd, - || true)
           [ -z "$founder" ] || echo "::notice title=Founder-managed activation secrets present::$founder on $WORKER (installed by the Founder, not by this setup). Payments stay off until PAYMENTS_LIVE_AUTHORIZED is set; email sends once the deploy runs."
-          deferred=$(grep -xE 'RETELL_API_KEY|RETELL_INBOUND_API_KEY|RETELL_OUTBOUND_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|AI_BUILD_AUTOMATION|RESEARCH_RUNNER_SECRET|CRM_IMPORT_SECRET|PAYMENT_SIMULATION_ENABLED|STAGING_ACCESS_PASSWORD' names.txt | sort | paste -sd, - || true)
+          deferred=$(grep -xE 'RETELL_API_KEY|RETELL_OUTBOUND_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|AI_BUILD_AUTOMATION|RESEARCH_RUNNER_SECRET|CRM_IMPORT_SECRET|PAYMENT_SIMULATION_ENABLED|STAGING_ACCESS_PASSWORD' names.txt | sort | paste -sd, - || true)
           if [ -n "$deferred" ]; then
             echo "::warning title=Phase-1 secret present::$WORKER holds $deferred, which phase 1 never uses (voice, AI, simulation or preview). Review it in the Cloudflare dashboard."
           fi

@@ -2078,3 +2078,17 @@ html.has-intro .cb { animation: show-now 1ms linear 2.4s backwards; }
 .research-findings a { word-break: break-all; }
 .inline-form { display: flex; gap: var(--s-2); align-items: end; flex-wrap: wrap; margin-top: var(--s-2); }
 .inline-form .field { margin: 0; flex: 1 1 14rem; }
+
+/* Staff → Portfolio display order (drag handle, mouse / touch / keyboard; Up / Down fallback). */
+.pf-order { list-style: none; padding: 0; margin: 0 0 var(--s-3); display: grid; gap: var(--s-2); }
+.pf-order__item { display: grid; grid-template-columns: auto auto 1fr auto auto; gap: var(--s-3); align-items: center; padding: var(--s-3); }
+.pf-order__item.is-dragging { outline: 2px dashed var(--gold, #c9a227); opacity: .85; }
+.pf-order__handle { min-width: 44px; min-height: 44px; cursor: grab; touch-action: none; border: 1px solid var(--line, #3a3222); border-radius: 8px; background: transparent; color: inherit; font-size: 1.2rem; }
+.pf-order__handle:active { cursor: grabbing; }
+.pf-order__handle:focus-visible { outline: 2px solid var(--gold, #c9a227); outline-offset: 2px; }
+.pf-order__pos { font-variant-numeric: tabular-nums; min-width: 1.5rem; text-align: right; color: var(--muted, #8d887c); }
+.pf-order__main { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .pf-order__item { grid-template-columns: auto auto 1fr; }
+  .pf-order__status, .pf-order__moves { grid-column: 3; }
+}
