@@ -43,14 +43,19 @@ export const click = async (l, ms = 10_000) => {
 };
 
 /** Fills the visible fields of `scope` (Page, Frame or Locator) by typing, with synthetic values. */
+// A fresh synthetic identity per run: demos may allow one booking per email/phone per day (the Lansing Car Rentals
+// partner calendar does), so reusing one address used up every day of its 60-day window after enough runs. The phone
+// stays in the fictional 555-0100…0199 range and the address on example.com.
+const RUN_TAG = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+const RUN_PHONE = `(517) 555-01${String(Math.floor(Math.random() * 100)).padStart(2, "0")}`;
 export async function fillVisible(scope) {
-  const plan = await scope.evaluate(() => {
+  const plan = await scope.evaluate(([runTag, runPhone]) => {
     const root = document;
     const vis = (e) => e.offsetParent !== null && !e.disabled && !e.readOnly;
     const val = (e) => {
       const k = `${e.name} ${e.id} ${e.placeholder} ${e.getAttribute("aria-label") || ""} ${e.labels?.[0]?.textContent || ""}`.toLowerCase();
-      if (e.type === "email" || /e-?mail/.test(k)) return "visitor@example.com";
-      if (e.type === "tel" || /phone|mobile/.test(k)) return "(517) 555-0142";
+      if (e.type === "email" || /e-?mail/.test(k)) return `visitor+${runTag}@example.com`;
+      if (e.type === "tel" || /phone|mobile/.test(k)) return runPhone;
       if (/\bvin\b/.test(k)) return "4S4BTAFCXM3123456"; if (/zip|postal/.test(k)) return "48906"; if (/year/.test(k)) return "2018";
       if (/make/.test(k)) return "Honda"; if (/model/.test(k)) return "Civic"; if (/mile|odometer/.test(k)) return "60000";
       if (/last/.test(k)) return "Visitor"; if (/full ?name/.test(k)) return "Demo Visitor"; if (/first|your name|\bname\b/.test(k)) return "Demo";
@@ -69,7 +74,7 @@ export async function fillVisible(scope) {
       if (!e.value) { const v = val(e); if (v) out.push({ tag, op: "fill", v }); }
     }
     return out;
-  });
+  }, [RUN_TAG, RUN_PHONE]);
   const page = scope.page ? scope : scope;
   for (const s of plan) {
     const l = page.locator(`[data-pf-fill="${s.tag}"]`);
