@@ -167,7 +167,7 @@ export function voiceConfigProblems(c: VoiceConfig): string[] {
 }
 
 /** Merges stored JSON over defaults so new fields added later always have a safe value. */
-function normalise(raw: unknown): VoiceConfig {
+export function normalise(raw: unknown): VoiceConfig {
   const d = defaultVoiceConfig();
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<VoiceConfig>;
   const week = (src: unknown): Record<Weekday, Window[]> => {

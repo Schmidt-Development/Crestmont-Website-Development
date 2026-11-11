@@ -231,3 +231,32 @@ test("[INFRA-004] .gitattributes forces LF, so the suite behaves the same on Win
   assert.match(ga, /^\s*\* text=auto eol=lf\s*$/m, "every text file is checked out with LF");
   assert.match(ga, /autocrlf/, "and it says why, since the symptom does not point at the cause");
 });
+
+test("[READY-012] [INFRA-006] production monitor: the staging-recorded CI feed never alerts on production; a down service, stopped scheduler or failing feed still does", () => {
+  const block = runBlock(wf("production-health-monitor.yml"), "Service and evidence-feed health");
+  const run = (appCode: string, feedsCode: string, feeds: unknown) => {
+    const dir = mkdtempSync(join(tmpdir(), "monitor-stub-"));
+    const body = join(dir, "feeds-body.json");
+    writeFileSync(body, JSON.stringify(feeds));
+    // curl stub: copy the right body to the -o file and print the HTTP code; sleep stub: return at once.
+    writeFileSync(join(dir, "curl"), `#!/bin/sh\nout=""; url=""\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; http*) url="$1";; esac; shift; done\n` +
+      `case "$url" in *readiness/health*) cp "${body}" "$out"; printf '${feedsCode}';; *) echo '{"status":"ok"}' > "$out"; printf '${appCode}';; esac\n`);
+    writeFileSync(join(dir, "sleep"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "curl"), 0o755); chmodSync(join(dir, "sleep"), 0o755);
+    try {
+      const out = execFileSync("bash", ["-c", block], { env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, BASE: "https://example.com", GITHUB_STEP_SUMMARY: join(dir, "summary") }, encoding: "utf8" });
+      return { code: 0, out };
+    } catch (e) { return { code: (e as { status: number }).status, out: String((e as { stdout: string }).stdout) }; }
+  };
+  const feed = (source: string, required: boolean, status: string) => ({ source, required, status });
+  const prod = (...extra: object[]) => ({ status: "degraded", feeds: [feed("ci", true, "unavailable"), feed("scheduler", true, "healthy"), feed("mfa-key:production", false, "healthy"), ...extra] });
+  assert.equal(run("200", "503", prod()).code, 0, "only the CI feed (recorded on staging) is unavailable: no alert");
+  assert.equal(run("200", "200", { status: "ok", feeds: [] }).code, 0);
+  let r = run("200", "503", { status: "degraded", feeds: [feed("ci", true, "unavailable"), feed("scheduler", true, "stale")] });
+  assert.equal(r.code, 1, "stopped cron jobs alert");
+  assert.match(r.out, /scheduler=stale/);
+  r = run("200", "503", prod(feed("mfa-key:production", false, "failing")));
+  assert.equal(r.code, 1, "a failing feed alerts");
+  assert.equal(run("503", "503", prod()).code, 1, "a down service alerts");
+  assert.equal(run("200", "503", "not json").code, 1, "an unreadable feed report alerts rather than passing silently");
+});
