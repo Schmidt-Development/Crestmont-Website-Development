@@ -36,17 +36,31 @@
     li.classList.add("is-dragging");
     h.setPointerCapture(e.pointerId);
   });
+  // The dragged project goes before the first other project whose middle is below the pointer (or last), so a fast
+  // drag, a drag above or below the list, or one released in the gap between cards all land where the pointer is.
+  const place = (y) => {
+    const before = items().find((x) => x !== drag.li && (() => { const r = x.getBoundingClientRect(); return y < r.top + r.height / 2; })());
+    if ((before ?? null) !== drag.li.nextElementSibling) { list.insertBefore(drag.li, before ?? null); sync(); }
+  };
+  // Held near the top or bottom of the screen, the page keeps scrolling (a finger held still sends no move events), so
+  // a long list can be reordered on a phone.
+  const EDGE = 60;
+  const tick = () => {
+    if (!drag) return;
+    const dy = drag.y < EDGE ? -14 : drag.y > window.innerHeight - EDGE ? 14 : 0;
+    if (dy) { const before = window.scrollY; window.scrollBy(0, dy); if (window.scrollY !== before) place(drag.y); }
+    drag.raf = requestAnimationFrame(tick);
+  };
   list.addEventListener("pointermove", (e) => {
     if (!drag || e.pointerId !== drag.id) return;
     e.preventDefault();
-    const over = items().find((x) => x !== drag.li && (() => { const r = x.getBoundingClientRect(); return e.clientY >= r.top && e.clientY <= r.bottom; })());
-    if (!over) return;
-    const r = over.getBoundingClientRect();
-    list.insertBefore(drag.li, e.clientY < r.top + r.height / 2 ? over : over.nextElementSibling);
-    sync();
+    drag.y = e.clientY;
+    place(e.clientY);
+    if (!drag.raf) drag.raf = requestAnimationFrame(tick);
   });
   const end = (e) => {
     if (!drag || e.pointerId !== drag.id) return;
+    if (drag.raf) cancelAnimationFrame(drag.raf);
     drag.li.classList.remove("is-dragging");
     announce(drag.li);
     drag = null;
