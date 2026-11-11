@@ -817,6 +817,7 @@ jobs:
       - name: Frontend browser verification on staging (pages, interactions, portfolio demos)
         id: frontend_browser
         if: steps.frontend.outcome == 'success'
+        timeout-minutes: 20   # normally ~6 minutes; each external demo transaction is capped at 150 s
         env:
           BASE: ${{ steps.deploy.outputs.url }}
           ASSISTANT_EXPECT_LIVE: "1"   # staging answers through Workers AI (wrangler.toml ASSISTANT_PROVIDER)
