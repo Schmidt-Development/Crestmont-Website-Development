@@ -23,6 +23,8 @@ const host = new URL(base).hostname;
 
 const results = [], fails = [];
 const ok = (cond, msg) => { (cond ? results : fails).push(msg); console.log(`${cond ? "ok  " : "FAIL"} ${msg}`); };
+const DEMO_FLOW_MS = 150_000;
+const withTimeout = (promise, ms, what) => { let t; return Promise.race([promise, new Promise((_, no) => { t = setTimeout(() => no(new Error(`${what} timed out after ${ms / 1000}s`)), ms); })]).finally(() => clearTimeout(t)); };
 const step = async (label, fn) => { try { await fn(); } catch (e) { ok(false, `${label}: ${String(e.message).split("\n")[0].slice(0, 200)}`); } };
 const b = await chromium.launch();
 async function context(name, viewport, mobile, extra = {}) {
@@ -67,7 +69,9 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
     for (let k = 0; k < 80; k++) { if (await p.evaluate(() => { const s = document.querySelector(".pfx__slide:not([inert])"); return s.classList.contains("is-ready") || s.dataset.unavailable === "true" || !s.dataset.demoUrl; })) break; await p.waitForTimeout(400); }
     if (!(await p.evaluate(() => document.querySelector(".pfx__slide:not([inert])").classList.contains("is-ready")))) continue;
     await step(`${name} interactive demo ${i + 1}`, () => checkInteractive(p, `${name} /portfolio`, ok, { touch: mobile }));
-    if (!mobile) await step(`${name} simulated transaction ${i + 1}`, () => checkFlow(p, `${name} /portfolio`, ok));
+    // External demo Workers (other repositories): a hung demo fails this one check after DEMO_FLOW_MS instead of
+    // holding the whole staging pipeline.
+    if (!mobile) await step(`${name} simulated transaction ${i + 1}`, () => withTimeout(checkFlow(p, `${name} /portfolio`, ok), DEMO_FLOW_MS, "portfolio demo transaction"));
   }
   });
   await step(`${name} receptionist`, async () => {
