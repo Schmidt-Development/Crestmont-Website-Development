@@ -45,16 +45,18 @@ export const click = async (l, ms = 10_000) => {
 /** Fills the visible fields of `scope` (Page, Frame or Locator) by typing, with synthetic values. */
 // A fresh synthetic identity per run: demos may allow one booking per email/phone per day (the Lansing Car Rentals
 // partner calendar does), so reusing one address used up every day of its 60-day window after enough runs. The phone
-// stays in the fictional 555-0100…0199 range and the address on example.com.
+// stays in the fictional 555-0100…0199 range and the address on example.com (letters and digits only).
 const RUN_TAG = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 const RUN_PHONE = `(517) 555-01${String(Math.floor(Math.random() * 100)).padStart(2, "0")}`;
 export async function fillVisible(scope) {
-  const plan = await scope.evaluate(([runTag, runPhone]) => {
+  // Page/Frame.evaluate(fn, arg) calls fn(arg); Locator.evaluate(fn, arg) calls fn(element, arg).
+  const plan = await scope.evaluate((a, b) => {
+    const [runTag, runPhone] = Array.isArray(a) ? a : b;
     const root = document;
     const vis = (e) => e.offsetParent !== null && !e.disabled && !e.readOnly;
     const val = (e) => {
       const k = `${e.name} ${e.id} ${e.placeholder} ${e.getAttribute("aria-label") || ""} ${e.labels?.[0]?.textContent || ""}`.toLowerCase();
-      if (e.type === "email" || /e-?mail/.test(k)) return `visitor+${runTag}@example.com`;
+      if (e.type === "email" || /e-?mail/.test(k)) return `visitor${runTag}@example.com`;
       if (e.type === "tel" || /phone|mobile/.test(k)) return runPhone;
       if (/\bvin\b/.test(k)) return "4S4BTAFCXM3123456"; if (/zip|postal/.test(k)) return "48906"; if (/year/.test(k)) return "2018";
       if (/make/.test(k)) return "Honda"; if (/model/.test(k)) return "Civic"; if (/mile|odometer/.test(k)) return "60000";
