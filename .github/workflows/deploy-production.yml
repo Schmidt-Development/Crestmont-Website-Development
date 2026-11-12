@@ -227,7 +227,7 @@ jobs:
           EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
         run: >
           node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment production --commit "$TARGET_COMMIT"
-          --status started --url "$PRODUCTION_URL" --by "github-actions:${{ github.actor }}"
+          --status started --url "$PRODUCTION_URL" --by "github-actions:${{ github.actor }}" --authorized-by deploy_pipeline
           --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           --notes "tag ${RELEASE_TAG}"
 

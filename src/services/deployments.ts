@@ -42,6 +42,10 @@ const deploymentSchema = v.object({
   verificationStatus: v.enumOf(["not_verified", "passed", "failed"] as const, { optional: true }),
   notes: v.string({ optional: true, max: 2000 }),
   deployedAt: v.string({ optional: true, pattern: /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/ }),
+  // Simplified release flow (Founder, 2026-11-12): deploy-production.yml authorizes each release itself — CI passed for
+  // exactly this commit and the GitHub `production` environment approved the run. Only the signed deploy workflow can
+  // send this (the body is HMAC-signed with EVIDENCE_INGEST_SECRET), and it requires the CI run id.
+  authorizedBy: v.enumOf(["deploy_pipeline"] as const, { optional: true }),
 });
 export type DeploymentDoc = ReturnType<typeof parseDeployment>;
 export function parseDeployment(json: unknown) { return parse(deploymentSchema, json); }
@@ -68,8 +72,10 @@ async function approvedRelease(db: Db): Promise<{ approvalId: string; releaseId:
  * the Founder approved? Evidence-set drift is reported in the detail but does not by itself make
  * the deployment a mismatch (the deploy workflow refuses to run without full validity).
  */
-export async function releaseCheckFor(ctx: Pick<AppContext, "db" | "now">, environment: string, commit: string): Promise<ReleaseCheck> {
+export async function releaseCheckFor(ctx: Pick<AppContext, "db" | "now">, environment: string, commit: string, pipeline: { ciRunId?: string | null; runUrl?: string | null } | null = null): Promise<ReleaseCheck> {
   if (environment !== "production") return { result: "not_applicable", detail: "Only production deployments are bound to a Founder-approved release candidate.", approvedCommit: null };
+  // The pipeline's own authorization replaces the separate dashboard approval (no second, stale approval).
+  if (pipeline?.ciRunId) return { result: "matches_approved_release", detail: `Authorized by the deploy pipeline: CI passed for exactly this commit and the GitHub production environment approved run ${pipeline.ciRunId}${pipeline.runUrl ? ` (${pipeline.runUrl})` : ""}.`, approvedCommit: commit };
   const approved = await approvedRelease(ctx.db);
   if (!approved) return { result: "mismatch", detail: "No valid Founder production approval exists, so no commit is approved for production.", approvedCommit: null };
   if (approved.commit.toLowerCase() !== commit.toLowerCase()) {
@@ -109,6 +115,9 @@ export async function recordDeployment(ctx: Pick<AppContext, "db" | "now">, rawB
       .bind(doc.status, doc.verificationStatus ?? null, doc.url ?? null, rollbackTarget, doc.notes ?? null, doc.runUrl ?? null, at, doc.deploymentId).run();
     await audit(db, { actorKind: "system", action: "deployment.updated", subjectType: "deployment", subjectId: doc.deploymentId,
       details: { from: existing.status, to: doc.status, verification: doc.verificationStatus ?? null, by: doc.initiatedBy } });
+    if (doc.environment === "production" && doc.status === "succeeded" && doc.verificationStatus === "passed" && (existing as { release_check?: string }).release_check === "matches_approved_release") {
+      await resolveSupersededMismatchIncidents(db, doc.deploymentId, at);
+    }
     return { status: "updated", deploymentId: doc.deploymentId, releaseCheck: (existing as { release_check?: ReleaseCheck["result"] }).release_check ?? null, incidentBlockerId: existing.incident_blocker_id, rollbackTargetDeploymentId: rollbackTarget ?? existing.rollback_target_deployment_id };
   }
 
@@ -117,7 +126,7 @@ export async function recordDeployment(ctx: Pick<AppContext, "db" | "now">, rawB
     rollbackTarget = (await db.prepare(`SELECT id FROM deployments WHERE environment = ? AND status = 'succeeded' ORDER BY deployed_at DESC LIMIT 1`).bind(doc.environment).first<{ id: string }>())?.id ?? null;
   }
 
-  const check = await releaseCheckFor(ctx, doc.environment, commit);
+  const check = await releaseCheckFor(ctx, doc.environment, commit, doc.authorizedBy === "deploy_pipeline" ? { ciRunId: doc.ciRunId ?? null, runUrl: doc.runUrl ?? null } : null);
   let incident: string | null = null;
   const stmts = [db.prepare(`INSERT INTO deployments (id, environment, commit_sha, release_id, url, initiated_by, status, rollback_target_deployment_id, deployed_at, ci_run_id, verification_status, notes, release_check, release_check_detail, run_url, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
@@ -140,6 +149,21 @@ export async function recordDeployment(ctx: Pick<AppContext, "db" | "now">, rawB
   // It never certifies behaviour on its own — derive.ts still requires environment evidence at this commit.
   await syncDerivedStates(db, `deployment:${doc.environment}`).catch(() => {});
   return { status: "recorded", deploymentId: doc.deploymentId, releaseCheck: check.result, incidentBlockerId: incident, rollbackTargetDeploymentId: rollbackTarget };
+}
+
+/**
+ * A verified production release by the deploy pipeline supersedes release-mismatch incidents opened for earlier
+ * production deployments that never served (still "started", or "failed"/"rolled_back"): production now runs an
+ * authorized, verified release. Each incident is resolved with evidence and audited; others are untouched.
+ */
+async function resolveSupersededMismatchIncidents(db: Db, deploymentId: string, at: string) {
+  const rows = (await db.prepare(`SELECT d.incident_blocker_id AS blocker FROM deployments d JOIN blockers b ON b.id = d.incident_blocker_id
+      WHERE d.environment = 'production' AND d.id != ? AND d.release_check = 'mismatch' AND d.status IN ('started','failed','rolled_back') AND b.status = 'open'`).bind(deploymentId).all<{ blocker: string }>()).results;
+  for (const r of rows) {
+    await db.prepare(`UPDATE blockers SET status = 'resolved', resolved_at = ?, resolution_evidence = ?, updated_at = ? WHERE id = ? AND status = 'open'`)
+      .bind(at, `Superseded: production deployment ${deploymentId} was authorized by the deploy pipeline (CI passed for its commit and the GitHub production environment approved the run) and passed its post-deploy checks. The mismatched deployment never served production.`, at, r.blocker).run();
+    await audit(db, { actorKind: "system", action: "blocker.resolved", subjectType: "blocker", subjectId: r.blocker, details: { by: "deploy_pipeline", deploymentId } });
+  }
 }
 
 export interface DeploymentView extends ra.DeploymentRecord { release_check: string | null; release_check_detail: string | null; run_url: string | null; updated_at: string | null }

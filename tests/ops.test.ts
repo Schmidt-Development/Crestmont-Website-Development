@@ -238,6 +238,31 @@ test("[LAUNCH-002] a production deployment that differs from the approved releas
   assert.equal(none.releaseCheck, "mismatch");
 });
 
+test("[LAUNCH-002] a release authorized by the deploy pipeline (CI + GitHub production approval) needs no second dashboard approval; an unauthorized mismatch still opens an incident, which the next verified pipeline release resolves", async () => {
+  const t = await setup();
+  const c = t.client();
+  await approve(t.o); // an older dashboard approval for COMMIT
+  // A deployment of another commit without the pipeline's authorization: still a mismatch with an incident.
+  const stale = await (await signedPost(c, "/api/readiness/deployments", deployment({ deploymentId: "gh-1-1-production", environment: "production", commitSha: OTHER, status: "started" }))).json() as { releaseCheck: string; incidentBlockerId: string };
+  assert.equal(stale.releaseCheck, "mismatch");
+  // The pipeline-authorized release of that commit: no incident, recorded with the run that authorized it.
+  const auth = { deploymentId: "gh-2-1-production", environment: "production", commitSha: OTHER, status: "started", authorizedBy: "deploy_pipeline", ciRunId: "gh-2-1", runUrl: "https://github.com/o/r/actions/runs/2" };
+  const ok = await (await signedPost(c, "/api/readiness/deployments", deployment(auth))).json() as { releaseCheck: string; incidentBlockerId: string | null };
+  assert.deepEqual([ok.releaseCheck, ok.incidentBlockerId], ["matches_approved_release", null]);
+  const detail = await t.db.prepare(`SELECT release_check_detail FROM deployments WHERE id = 'gh-2-1-production'`).first<{ release_check_detail: string }>();
+  assert.match(detail!.release_check_detail, /Authorized by the deploy pipeline: CI passed for exactly this commit and the GitHub production environment approved run gh-2-1/);
+  // Claiming the pipeline without its CI run id is not enough.
+  const noRun = await (await signedPost(c, "/api/readiness/deployments", deployment({ ...auth, deploymentId: "gh-3-1-production", ciRunId: undefined }))).json() as { releaseCheck: string };
+  assert.equal(noRun.releaseCheck, "mismatch");
+  // Unsigned requests are refused as before.
+  assert.equal((await c.request("POST", "/api/readiness/deployments", { body: JSON.stringify(deployment(auth)), headers: { "content-type": "application/json" } })).status, 401);
+  // The verified pipeline release resolves the incident of the deployment that never served.
+  await signedPost(c, "/api/readiness/deployments", deployment({ ...auth, status: "succeeded", verificationStatus: "passed" }));
+  const blk = await t.db.prepare(`SELECT status, resolution_evidence FROM blockers WHERE id = ?`).bind(stale.incidentBlockerId).first<{ status: string; resolution_evidence: string }>();
+  assert.equal(blk!.status, "resolved");
+  assert.match(blk!.resolution_evidence, /Superseded: production deployment gh-2-1-production was authorized by the deploy pipeline/);
+});
+
 // ───────────── Environment probe ─────────────
 
 function fakeFetch(opts: { resolve?: boolean; healthEnv?: string; healthStatus?: number; tlsFail?: boolean } = {}): typeof fetch {
