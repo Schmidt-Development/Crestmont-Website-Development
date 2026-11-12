@@ -1,0 +1,50 @@
+name: Purchase flow probe
+
+# Founder, 2026-11-12: proves that a new customer can go from a package to a Stripe Checkout session, without paying
+# (scripts/production-purchase-probe.ts). One labelled probe customer is created in the target database, walks
+# sign-in → intake → review (server price, required maintenance plan, agreements) → Pay, and must be redirected to
+# checkout.stripe.com with a session of the expected mode (staging: test; production: live). Nothing is paid; the unpaid
+# sessions expire on their own and the expiry webhook voids the invoices. The probe user is disabled afterwards.
+# deploy-production.yml runs the same probe automatically on the release that opens live payments.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment to probe"
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+
+concurrency:
+  group: purchase-probe-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.target }}
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Walk the purchase flow to Stripe Checkout (nothing is paid)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TARGET: ${{ inputs.target }}
+          PROD_URL: ${{ vars.PRODUCTION_URL }}
+          STAGING_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+        run: |
+          if [ "$TARGET" = production ]; then export BASE="$PROD_URL" D1_ENV=production EXPECT_MODE=live; else export BASE="$STAGING_URL" D1_ENV=staging EXPECT_MODE=test; fi
+          node --no-warnings scripts/production-purchase-probe.ts starter,business,premium | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"

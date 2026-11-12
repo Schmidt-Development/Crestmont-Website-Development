@@ -95,12 +95,12 @@ test("[INFRA-005] [LAUNCH-002] staging workflows: one resolver, no random secret
   assert.match(wf("deploy-production.yml"), /scripts\/evidence-secret\.ts fingerprint/);
 });
 
-test("[INFRA-005] production workflow: first release tolerates an empty database, waits for the custom domain, and stays manual and gated", () => {
+test("[INFRA-005] production workflow: first release tolerates an empty database, waits for the custom domain, and deploys only green commits on main", () => {
   const p = wf("deploy-production.yml");
-  assert.match(p, /on:\s*\n\s*workflow_dispatch:/);
-  assert.doesNotMatch(p, /^\s*push:/m, "never deployed on push");
+  assert.match(p, /on:\s*\n\s*workflow_run:[\s\S]*workflow_dispatch:/);
+  assert.doesNotMatch(p, /^\s*push:/m, "never deployed on a raw push (only after CI)");
   assert.match(p, /environment:\s*\n\s*name: production/);
-  assert.equal((p.match(/scripts\/release-authorization\.ts/g) ?? []).length, 2, "authorization checked twice");
+  assert.match(p, /status=success/, "CI result required");
   assert.match(p, /sqlite_master[\s\S]*if \[ "\$tables" = "0" \][\s\S]*d1 export crestmont-production/, "export skipped only for a database with no tables");
   assert.ok(p.indexOf("Wait for the production URL") > p.indexOf("Deploy Worker (production)"));
   assert.ok(p.indexOf("Wait for the production URL") < p.indexOf("Post-deploy production checks"));

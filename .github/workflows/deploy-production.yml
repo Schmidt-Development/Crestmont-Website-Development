@@ -1,29 +1,37 @@
 name: Deploy production
 
-# INFRA-005, LAUNCH-002, LAUNCH-003, §78–§79. PRODUCTION IS NEVER DEPLOYED AUTOMATICALLY.
-# - Manual trigger only (workflow_dispatch) with the exact commit of the approved release candidate.
-# - Runs in the GitHub `production` environment: the Founder configures required reviewers there, so
-#   GitHub itself pauses the job until the Founder approves the run.
-# - Refuses to deploy unless the readiness API reports a VALID Founder approval for exactly this commit,
-#   this wrangler.toml and the current evidence set (GET /api/readiness/release-authorization). Checked
-#   before any change and again immediately before `wrangler deploy`.
-# - After deploying, runs the production checks (LAUNCH-003) and records them as production_check
-#   evidence; on a critical failure it rolls the Worker back with `wrangler rollback`.
+# INFRA-005, LAUNCH-003, §78–§79. Simplified release flow (Founder, 2026-11-12): one deployment pipeline, no separate
+# release-approval screen.
+# - Runs automatically when CI succeeds on main, or by hand (workflow_dispatch; the commit defaults to main's head).
+# - Refuses any commit that is not on main or whose CI run did not succeed (required tests), then runs the typecheck and
+#   the full test suite again here before anything changes.
+# - Runs in the GitHub `production` environment, which holds the production credentials. Required reviewers on that
+#   environment are a GitHub setting (Settings → Environments → production); without them a green main deploys itself.
+# - Before changing production: required Worker secrets present, no deferred AI system switched on, a private safety
+#   export of the database, and, when the committed configuration opens live payments, a read-only check of the live
+#   Stripe account and webhook endpoint through the running Worker (no charge, nothing created).
+# - After deploying: binding preservation, the post-deploy production checks and the public smoke test; on a critical
+#   failure the Worker is rolled back automatically (`wrangler rollback`). Every step is recorded as deployment evidence.
 
 on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       commit:
-        description: "Full 40-character commit SHA of the Founder-approved release candidate"
-        required: true
+        description: "Full 40-character commit SHA on main to deploy (empty: the head of main)"
+        required: false
         type: string
       tag:
-        description: "Release tag of that commit (e.g. v1.0.0), for the record"
+        description: "Release tag of that commit (e.g. v1.0.0), for the record (optional)"
         required: false
         type: string
 
 permissions:
   contents: read
+  actions: read   # read the CI result for the commit (github.token, this repository only)
 
 concurrency:
   group: deploy-production
@@ -31,6 +39,8 @@ concurrency:
 
 jobs:
   deploy:
+    # A CI run that did not succeed, or one on another branch, deploys nothing.
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -41,7 +51,7 @@ jobs:
     env:
       READINESS_URL: ${{ vars.READINESS_URL }}
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
-      TARGET_COMMIT: ${{ inputs.commit }}
+      TARGET_COMMIT: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit || github.sha }}
       # F-23: free-text input reaches scripts only through this variable, never interpolated into `run:`.
       RELEASE_TAG: ${{ inputs.tag }}
       DEPLOYMENT_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-production
@@ -72,7 +82,7 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.commit }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit || github.sha }}
           fetch-depth: 0
 
       - name: Verify the checked-out commit is the requested one and is on main
@@ -99,11 +109,16 @@ jobs:
         id: cfg
         run: echo "sha256=$(node --no-warnings scripts/release-candidate.ts --print-config-digest)" >> "$GITHUB_OUTPUT"
 
-      - name: Founder authorization for exactly this commit (LAUNCH-002)
-        env:
-          EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
+      - name: CI succeeded for exactly this commit (required tests)
         id: auth
-        run: node --no-warnings scripts/release-authorization.ts --commit "$TARGET_COMMIT" --config "${{ steps.cfg.outputs.sha256 }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ok=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$TARGET_COMMIT&status=success&per_page=1" --jq '.total_count')
+          [ "${ok:-0}" -ge 1 ] || { echo "::error title=CI has not passed::No successful CI run for $TARGET_COMMIT. Nothing was deployed."; exit 1; }
+          echo "CI passed for $TARGET_COMMIT." >> "$GITHUB_STEP_SUMMARY"
+          # Phased launch: every AI system in the production gates stays off unless its gate is lifted in code.
+          echo "deferred_subsystems=$(node --no-warnings -e 'import("./src/readiness/phased-release.ts").then(m=>process.stdout.write(JSON.stringify(m.PRODUCTION_GATES.map(g=>g.subsystem))))')" >> "$GITHUB_OUTPUT"
 
       # Before any change: the production Worker must hold the secrets production cannot work without (names only; the
       # values are never read), and — phased release, docs/PHASED-LAUNCH.md — no secret may switch on a deferred AI
@@ -160,10 +175,35 @@ jobs:
           echo "Pre-deploy export stored at r2://crestmont-files-production/_backups/pre-deploy-production-${TARGET_COMMIT}-${{ github.run_id }}.sql (sha256 $(sha256sum "$f" | cut -d' ' -f1))." >> "$GITHUB_STEP_SUMMARY"
           rm -f "$f"
 
-      - name: Re-check Founder authorization immediately before changing production
+      # Live payments (Founder authorization, 2026-11-12): when the committed production configuration opens checkout
+      # (PAYMENTS_LIVE_AUTHORIZED = "yes"), the live Stripe setup is verified through the RUNNING Worker before anything
+      # changes: GET-only calls with the Worker's own live key (balance, account, webhook endpoints; no charge, nothing
+      # created). The release is refused unless the key is live, the account can take charges and the webhook endpoint
+      # for PRODUCTION_URL/api/webhooks/stripe is enabled with every handled event (scripts/stripe-live-gate.ts). A
+      # one-time database challenge authorizes the call (production's ops secret is known to no workflow).
+      - name: Checkout state of the running release (before this deploy)
+        id: before
+        run: |
+          state=$(curl -fsS --max-time 20 "$PRODUCTION_URL/api/health" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).payments?.checkout??"unknown")}catch{process.stdout.write("unknown")}})' || echo unknown)
+          echo "checkout=$state" >> "$GITHUB_OUTPUT"
+          echo "Checkout before this deploy: $state"
+
+      - name: Live payments — verify the live Stripe account and webhook before opening checkout
+        id: stripe_gate
         env:
-          EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
-        run: node --no-warnings scripts/release-authorization.ts --commit "$TARGET_COMMIT" --config "${{ steps.cfg.outputs.sha256 }}"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node --no-warnings scripts/stripe-live-gate.ts flags wrangler.toml > flags.txt
+          if ! grep -qx 'live=yes' flags.txt; then echo "Live payments stay closed in this configuration; nothing to verify."; exit 0; fi
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          node --no-warnings scripts/ops-challenge.ts --purpose integration_probe --out-sql "$work/c.sql" --out-nonce "$work/nonce"
+          echo "::add-mask::$(cat "$work/nonce")"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
+          code=$(curl -s -o "$work/out.json" -w '%{http_code}' --max-time 60 -X POST -H 'content-type: application/json' --data "{\"challenge\":\"$(cat "$work/nonce")\"}" "$PRODUCTION_URL/api/ops/integration-probe" || echo 000)
+          [ "$code" = "200" ] || { echo "::error title=Live Stripe not verified::The integration probe answered HTTP $code. Live payments were not opened; nothing was deployed."; exit 1; }
+          node --no-warnings scripts/stripe-live-gate.ts check "$work/out.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
 
       # `wrangler deploy` without --keep-vars deletes every plain-text variable added in the Cloudflare dashboard; that is
       # how the Founder's STRIPE_PUBLISHABLE_KEY vanished from staging on 2026-10-31 (docs/DEPLOYMENT.md). Staging was
@@ -187,7 +227,7 @@ jobs:
           EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
         run: >
           node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment production --commit "$TARGET_COMMIT"
-          --status started --url "$PRODUCTION_URL" --by "github-actions:${{ github.actor }}" --release "${{ steps.auth.outputs.release_id }}"
+          --status started --url "$PRODUCTION_URL" --by "github-actions:${{ github.actor }}"
           --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           --notes "tag ${RELEASE_TAG}"
 
@@ -223,6 +263,30 @@ jobs:
         run: >
           node --no-warnings scripts/production-checks.ts --base "$PRODUCTION_URL" --environment production --commit "$TARGET_COMMIT"
           --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" --out evidence/production-check.json
+
+      # The public smoke test (scripts/production-smoke.ts) against the release: customer access must be exactly as
+      # committed (open after the public launch, closed before it). A failure rolls the release back like the checks.
+      - name: Public smoke test of the live site (customer access as released)
+        id: smoke
+        run: |
+          node --no-warnings scripts/stripe-live-gate.ts flags wrangler.toml > flags.txt
+          if grep -qx 'open=yes' flags.txt; then pre=no; else pre=yes; fi
+          node --no-warnings scripts/production-smoke.ts --base "$PRODUCTION_URL" --expect-prelaunch "$pre" --out evidence/production-smoke.json
+
+      # On the release that OPENS live payments (checkout was closed before it and the configuration opens it), a
+      # labelled probe customer walks every package to a live Stripe Checkout session without paying
+      # (scripts/production-purchase-probe.ts). If live checkout does not work, the release is rolled back like any
+      # failed check, so customers are never shown an open but broken checkout.
+      - name: Live purchase flow probe (release that opens live payments; nothing is paid)
+        id: purchase_probe
+        if: steps.before.outputs.checkout == 'closed'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if ! grep -qx 'live=yes' flags.txt; then echo "Live payments stay closed; no purchase probe."; exit 0; fi
+          BASE="$PRODUCTION_URL" D1_ENV=production EXPECT_MODE=live node --no-warnings scripts/production-purchase-probe.ts starter,business,premium | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
 
       - name: Running Worker's AI website generation matches the released configuration
         id: gate

@@ -543,12 +543,16 @@ test("[INFRA-005] deployment workflows are gated: staging skips without Cloudfla
   // Production
   const onBlock = prod.slice(prod.indexOf("\non:"), prod.indexOf("\npermissions:"));
   assert.match(onBlock, /workflow_dispatch:/);
-  assert.doesNotMatch(onBlock, /\n {2}(push|schedule|pull_request|workflow_run|release):/, "production is never triggered automatically");
-  assert.match(prod, /commit:\n\s+description: .*\n\s+required: true/);
+  // Simplified release flow (Founder, 2026-11-12): a green CI run on main deploys; nothing else triggers production.
+  assert.doesNotMatch(onBlock, /\n {2}(push|schedule|pull_request|release):/, "production deploys only after CI or by hand");
+  assert.match(onBlock, /workflow_run:\n\s+workflows: \["CI"\]\n\s+types: \[completed\]\n\s+branches: \[main\]/);
+  assert.match(prod, /github\.event\.workflow_run\.conclusion == 'success' && github\.event\.workflow_run\.head_branch == 'main'/, "a failed CI run deploys nothing");
   assert.match(prod, /environment:\n\s+name: production/);
-  assert.match(prod, /scripts\/release-authorization\.ts --commit "\$TARGET_COMMIT"/);
-  assert.ok(prod.indexOf("release-authorization.ts") < prod.indexOf("deploy --env production"), "authorization checked before deploying");
-  assert.equal((prod.match(/scripts\/release-authorization\.ts/g) ?? []).length >= 2, true, "re-checked right before changing production");
+  assert.match(prod, /actions\/workflows\/ci\.yml\/runs\?head_sha=\$TARGET_COMMIT&status=success/, "CI must have passed for exactly this commit");
+  assert.ok(prod.indexOf("CI succeeded for exactly this commit") < prod.indexOf("deploy --env production"), "checked before deploying");
+  assert.doesNotMatch(prod, /release-authorization\.ts/, "no separate dashboard approval");
+  assert.ok(prod.indexOf("stripe-live-gate.ts check") < prod.indexOf("deploy --env production"), "live Stripe verified before opening payments");
+  assert.match(prod, /production-smoke\.ts --base "\$PRODUCTION_URL"/, "public smoke test after deploying");
   assert.match(prod, /merge-base --is-ancestor "\$TARGET_COMMIT" origin\/main/);
   assert.match(prod, /scripts\/production-checks\.ts .*--environment production/);
   assert.match(prod, /post-evidence\.ts evidence\/production-check\.json/);
