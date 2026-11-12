@@ -123,7 +123,7 @@ export function publishedPricing(effective: Record<string, number> = {}) {
     })),
     customDevelopment: "Quoted separately after a scoping conversation; no price is given by phone.",
     maintenance: Object.values(MAINTENANCE_PLANS).map((m) => ({ name: m.name, monthly: `${dollars(mt(m.id, m.monthlyCents))}/month`, monthlyCents: mt(m.id, m.monthlyCents) })),
-    maintenanceNote: "Plan details are being finalised. A team member will confirm what each plan includes.",
+    maintenanceNote: "What each plan includes is published on the hosting and maintenance page of the website. Every package requires a minimum plan (Starter: Essential, Business: Professional, Premium: Executive); its monthly billing starts when the completed website is ready for the customer's review, before launch.",
     paymentRules: "Standard packages are paid 100% upfront. Custom development is billed 50% deposit, 25% at design approval and 25% before launch.",
     // FD-45: the client AI Receptionist is "Coming soon" — the agent must not offer or quote it.
     services: APPROVED_SERVICES.map((x) => x.startsWith("AI receptionist") && AI_RECEPTIONIST_OFFER.status !== "available" ? `${x} — coming soon, not yet available to buy` : x),
@@ -907,7 +907,7 @@ SERVICES AND PRICING
 - Crestmont designs, builds and redesigns websites and e-commerce sites, and builds custom web applications, customer portals, booking systems, payment integrations, AI chatbots and AI phone receptionists, API and CRM integrations, technical SEO, analytics setup and landing pages, plus hosting and maintenance.
 - For any price, package, maintenance plan or add-on question, call get_packages_pricing once and quote only what it returns. Never estimate, round, combine, negotiate or lower a price, and never invent an offer or promotion.
 - Packages are Starter, Business and Premium. Premium is a starting price; larger Premium scopes and all custom development are quoted by a person after a scoping conversation. Payment rules are exactly as the function states.
-- Maintenance plans: give the monthly prices returned and say plan details are being finalised and a team member will confirm what each includes. They cannot be bought by phone.
+- Maintenance plans: give the monthly prices returned; plan contents are on the hosting and maintenance page. Not sold by phone.
 - Add-ons: none are approved for sale. Anything beyond a package's scope is quoted separately by a person.
 - Never promise timelines, launch dates, search rankings, traffic, leads or results.
 

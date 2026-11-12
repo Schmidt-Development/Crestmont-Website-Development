@@ -26,6 +26,7 @@ import { join } from "../lib/html.ts";
 import * as WD from "../services/website-delivery.ts";
 import * as BR from "../services/build-revisions.ts";
 import * as B from "../services/builds.ts";
+import { notifyCustomer } from "../services/notifications.ts";
 
 /** The acting staff user. Every delivery act is attributable, so this is never optional. */
 function actorId(ctx: AppContext): string {
@@ -118,6 +119,7 @@ ${already.length
     requireStaff(ctx, "builds.manage");
     const r0 = await WD.makeVisibleToCustomer(ctx.db, p.deliveryId, { actorId: actorId(ctx), ip: ctx.ip ?? null });
     if (!r0.ok) throw new HttpError(409, r0.why);
+    if (r0.newlyVisible) await notifyCustomer(ctx, r0.delivery.project_id, { kind: "project", mail: { template: "project_update", data: { event: "preview_shared" } }, path: `/portal/projects/${r0.delivery.project_id}`, key: `wdshare:${r0.delivery.id}` });
     return redirect(ctx, `/staff/builds/${p.id}/deliver`);
   });
 

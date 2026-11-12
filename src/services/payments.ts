@@ -149,10 +149,13 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
         const subRow = await db.prepare(`SELECT id FROM subscriptions WHERE stripe_subscription_id = ?`).bind(evt.data.object.id).first<{ id: string }>();
         if (subRow) await completeActivationForSubscription(db, org, subRow.id, change.productId, change.status);
         // EMAIL-002 subscription_update: customer administrators hear about real status changes of an existing plan.
-        if (change.previous && change.previous !== change.status) {
+        // A NEW active plan is confirmed too (Founder audit, 2026-11-12: activation was silent), once per subscription
+        // whichever of the created/updated events arrives first.
+        const activated = !change.previous && ["active", "trialing"].includes(change.status);
+        if (activated || (change.previous && change.previous !== change.status)) {
           const plan = change.productId ? (MAINTENANCE_PLANS as Record<string, { name: string }>)[change.productId]?.name ?? change.productId : "maintenance";
           const admins = (await db.prepare(`SELECT u.email FROM memberships mb JOIN users u ON u.id = mb.user_id WHERE mb.organization_id = ? AND mb.role_id = 'customer_admin' AND u.disabled_at IS NULL`).bind(org).all<{ email: string }>()).results;
-          for (const a of admins) await sendMail(ctx, { template: "subscription_update", to: a.email, idempotencyKey: `sub:${evt.id}:${a.email}`, data: { planName: plan, status: change.status, url: `${ctx.baseUrl}/portal/billing` } });
+          for (const a of admins) await sendMail(ctx, { template: "subscription_update", to: a.email, idempotencyKey: activated ? `sub-activated:${evt.data.object.id}:${a.email}` : `sub:${evt.id}:${a.email}`, data: { planName: plan, status: change.status, url: `${ctx.baseUrl}/portal/billing` } });
         }
         break;
       }

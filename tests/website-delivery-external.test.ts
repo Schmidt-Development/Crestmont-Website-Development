@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createTestApp, createStaff, createCustomer, type TestClient } from "./support/app.ts";
+import { createTestApp, createStaff, createCustomer, lastEmail, type TestClient } from "./support/app.ts";
 import { validateExternalUrl } from "../src/domain/external-url.ts";
 import * as WD from "../src/services/website-delivery.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
@@ -182,6 +182,13 @@ test("[WDX-03] staff add a hosted website as a draft, share it, and the right cu
     assert.ok((await WD.byId(w.t.db, v1.id))!.visible_at);
     const audit = await w.t.db.prepare(`SELECT action FROM audit_logs WHERE subject_id = ? AND action LIKE 'website_delivery.%' ORDER BY id`).bind(w.projectA).all<{ action: string }>();
     assert.deepEqual(audit.results.map((r) => r.action), ["website_delivery.created", "website_delivery.made_visible"]);
+    // The customer is told by email (and in the portal) that the website is ready for review — once.
+    const told = await lastEmail(w.t.db, w.a.email);
+    assert.equal(told?.template, "project_update");
+    assert.match(told!.text_body, /\/portal\/projects\//);
+    await w.staff.post(`/staff/website-delivery/${v1.id}/share`, {});
+    assert.equal((await w.t.db.prepare(`SELECT COUNT(*) AS n FROM email_deliveries WHERE to_email = ? AND template = 'project_update'`).bind(w.a.email).first<{ n: number }>())!.n, 1, "sharing again sends nothing");
+    assert.equal((await w.t.db.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND subject_id = ?`).bind(w.a.id, w.projectA).first<{ n: number }>())!.n, 1, "one portal notice");
 
     // The customer sees it on their EXISTING project page, with a View Website link to the exact URL, in a new tab.
     const portal = await (await w.custA.get(`/portal/projects/${w.projectA}`)).text();
@@ -268,6 +275,10 @@ test("[WDX-05] the customer approves or requests changes; staff see the decision
     assert.equal(d.version, 1, "against the right version");
     const said = await w.t.db.prepare(`SELECT actor_user_id FROM audit_logs WHERE action = 'website_delivery.customer_decision' AND subject_id = ?`).bind(w.projectA).first<{ actor_user_id: string }>();
     assert.equal(said?.actor_user_id, w.a.id);
+    // "Your project team has been told" is true: the team (the Owner/PM fallback here) gets the decision by email.
+    const team = await lastEmail(w.t.db, w.owner.email);
+    assert.equal(team?.template, "project_update");
+    assert.match(team!.text_body, /Please use the new logo on the home page|changes/i);
 
     // A decision on a version is not silently overwritten.
     const again = await w.custA.post(`/portal/projects/${w.projectA}/website/decision`, { decision: "approved" });

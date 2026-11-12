@@ -23,6 +23,7 @@ import { requireStaff } from "../app/app.ts";
 import { actionForm, alert, badge, button, csrf, dl, emptyState, formErrors, input, linkButton, pageHead, pagination, pageParam, select, table, textarea } from "../ui/components.ts";
 import { staffPage } from "./crm.ts";
 import * as WD from "../services/website-delivery.ts";
+import { notifyCustomer } from "../services/notifications.ts";
 
 const BASE = "/staff/website-delivery";
 const PERM = "website_delivery.manage" as const;
@@ -78,6 +79,12 @@ function websiteLink(d: WD.DeliveryRow, short = false): SafeHtml {
 }
 
 const sourceLabel = (d: WD.DeliveryRow) => (d.source === "external_url" ? "Hosted website (external URL)" : "AI build");
+
+/** The customer is told once per version that a website is ready for their review (email + portal notice). */
+async function tellCustomer(ctx: AppContext, d: { id: string; project_id: string; visible_at: string | null }) {
+  if (!d.visible_at) return;
+  await notifyCustomer(ctx, d.project_id, { kind: "project", mail: { template: "project_update", data: { event: "preview_shared" } }, path: `/portal/projects/${d.project_id}`, key: `wdshare:${d.id}` });
+}
 
 export function register(r: Router): void {
   // ── Dashboard ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -223,6 +230,7 @@ ${formErrors(general)}${step1}${step2}`;
       actorId: actorId(ctx), assignedTo: v.assignedTo || null, ip: ctx.ip ?? null,
     });
     if (!res.ok) return addPage(ctx, v, {}, 422, [res.why]);
+    if (share) await tellCustomer(ctx, res.delivery);
     return redirect(ctx, `${BASE}/${res.delivery.id}`, {
       kind: "success",
       text: share
@@ -336,6 +344,8 @@ ${head.customer_decision === "approved" ? alert("success", html`<strong>The cust
     const f = await ctx.form();
     const res = await WD.makeVisibleToCustomer(ctx.db, p.id, { actorId: actorId(ctx), ip: ctx.ip ?? null });
     if (!res.ok) return redirect(ctx, back(f, p.id), { kind: "error", text: res.why });
+    // The customer is told once per version that a website is ready for their review (email + portal notice).
+    if (res.newlyVisible) await tellCustomer(ctx, res.delivery);
     return redirect(ctx, back(f, p.id), { kind: "success", text: `Version ${res.delivery.version} is now visible in the customer's portal.` });
   });
 
@@ -349,6 +359,7 @@ ${head.customer_decision === "approved" ? alert("success", html`<strong>The cust
       note: String(f.get("note") ?? "").trim() || null, share, actorId: actorId(ctx), ip: ctx.ip ?? null,
     });
     if (!res.ok) return redirect(ctx, `${BASE}/${p.id}#replace`, { kind: "error", text: res.why });
+    if (share) await tellCustomer(ctx, res.delivery);
     return redirect(ctx, `${BASE}/${res.delivery.id}`, {
       kind: "success", text: `Version ${res.delivery.version} added${share ? " and shared with the customer" : " as a draft"}.`,
     });
@@ -371,6 +382,7 @@ ${head.customer_decision === "approved" ? alert("success", html`<strong>The cust
     const share = str(f, "share") === "yes";
     const res = await WD.rollbackTo(ctx.db, { projectId: d.project_id, deliveryId: d.id, actorId: actorId(ctx), makeVisible: share, ip: ctx.ip ?? null });
     if (!res.ok) return redirect(ctx, `${BASE}/${d.id}`, { kind: "error", text: res.why });
+    if (share) await tellCustomer(ctx, res.delivery);
     return redirect(ctx, `${BASE}/${res.delivery.id}`, {
       kind: "success", text: `Version ${d.version} restored as version ${res.delivery.version}${share ? " and shared with the customer" : " (draft)"}.`,
     });

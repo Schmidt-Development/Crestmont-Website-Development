@@ -25,7 +25,7 @@ import * as O from "../services/onboarding.ts";
 import { intakeSections, intakeSummary } from "../ui/intake-form.ts";
 import * as S from "../services/share-links.ts";
 import { sharePanel } from "../ui/share.ts";
-import { listNotifications, markNotificationsRead, notificationHref } from "../services/notifications.ts";
+import { listNotifications, markNotificationsRead, notificationHref, notifyProjectTeam } from "../services/notifications.ts";
 import { createInvitation, AuthError } from "../services/auth.ts";
 import { sendMail } from "../services/mailer.ts";
 import { audit } from "../services/security.ts";
@@ -292,6 +292,9 @@ ${rec && !done ? html`<p class="faint">Draft last saved ${formatDateTime(rec.upd
       actorId: ctx.actor?.userId ?? "", note: String(form.get("note") ?? "").trim() || null, ip: ctx.ip ?? null,
     });
     if (!r0.ok) return redirect(ctx, `/portal/projects/${p.id}`, { kind: "error", text: r0.why.charAt(0).toUpperCase() + r0.why.slice(1) + "." });
+    // "Your project team has been told" is true: the team gets an email and a notice (once per version and decision).
+    await notifyProjectTeam(ctx, p.id, { kind: "project", mail: { template: "project_update", data: { event: "preview_reviewed", decision: decision === "approved" ? "approved" : "changes_requested", note: r0.delivery.customer_note ?? null } },
+      path: `/staff/projects/${p.id}`, key: `wddecision:${r0.delivery.id}:${decision}`, exceptUserId: ctx.actor?.userId });
     return redirect(ctx, `/portal/projects/${p.id}`, {
       kind: "success",
       text: decision === "approved" ? "Thank you — you approved the website. Your project team has been told." : "Thank you — your requested changes were sent to your project team.",

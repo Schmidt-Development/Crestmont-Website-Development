@@ -49,7 +49,11 @@ const checks: Check[] = [
   // Readiness self-monitoring: the endpoint must answer; a 503 (degraded feeds) is recorded honestly as
   // a failed READY-012 check but does not trigger a rollback of a healthy service.
   { requirementId: "READY-012", testName: `${environment} readiness evidence feeds healthy (/api/readiness/health)`, critical: false,
-    run: () => get200("/api/readiness/health", (r, b) => { try { const j = JSON.parse(b); return r.status === 200 && j.status === "ok" ? null : `HTTP ${r.status}: ${j.status ?? "unknown"}`; } catch { return `HTTP ${r.status}: not JSON`; } }) },
+    // The required "ci" feed is recorded on staging (where CI posts evidence), never on production, so on production it
+    // is always unavailable; every other required feed, and any failing feed, still counts (as in the health monitor).
+    run: () => get200("/api/readiness/health", (r, b) => { try { const j = JSON.parse(b) as { status?: string; feeds?: { source: string; required?: boolean; status: string }[] }; if (r.status === 200 && j.status === "ok") return null;
+      const bad = (j.feeds ?? []).filter((f) => f.source !== "ci" && ((f.required && f.status !== "healthy") || f.status === "failing")).map((f) => `${f.source}=${f.status}`);
+      return Array.isArray(j.feeds) && !bad.length ? null : `HTTP ${r.status}: ${bad.join(", ") || j.status || "unknown"}`; } catch { return `HTTP ${r.status}: not JSON`; } }) },
 ];
 
 const startedAt = new Date().toISOString();

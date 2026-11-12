@@ -268,11 +268,11 @@ export async function makeVisibleToCustomer(
   db: Db,
   deliveryId: string,
   o: { actorId: string; ip?: string | null },
-): Promise<{ ok: true; delivery: DeliveryRow } | { ok: false; why: string }> {
+): Promise<{ ok: true; delivery: DeliveryRow; newlyVisible?: boolean } | { ok: false; why: string }> {
   const d = await byId(db, deliveryId);
   if (!d) return { ok: false, why: "no such delivery" };
   if (d.superseded_at) return { ok: false, why: "this delivery has been superseded; show the current one instead" };
-  if (d.visible_at) return { ok: true, delivery: d };
+  if (d.visible_at) return { ok: true, delivery: d, newlyVisible: false };
 
   const at = nowIso();
   await db.prepare(`UPDATE website_deliveries SET visible_at = ?, visible_by = ?, status = 'customer_visible', updated_at = ? WHERE id = ? AND superseded_at IS NULL`)
@@ -284,7 +284,7 @@ export async function makeVisibleToCustomer(
       revision: d.source === "ai_build" ? `${d.revision_attempt}-${d.revision_cycle}` : null },
     ip: o.ip ?? null,
   });
-  return { ok: true, delivery: (await byId(db, deliveryId))! };
+  return { ok: true, delivery: (await byId(db, deliveryId))!, newlyVisible: true };
 }
 
 /**
