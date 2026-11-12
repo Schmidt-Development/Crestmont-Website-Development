@@ -28,14 +28,18 @@ const [cmd, ...wbase] = (process.env.WRANGLER ?? "npx --yes wrangler@4.149.0").s
 const D1_ENV = process.env.D1_ENV === "staging" ? "staging" : "production";
 const MODE = process.env.EXPECT_MODE === "test" ? "test" : "live";
 const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
-const d1 = (sql: string) => {
+const wr = (args: string[]) => execFileSync(cmd, [...wbase, "d1", "execute", `crestmont-${D1_ENV}`, "--remote", "--env", D1_ENV, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
+/** Writes: a SQL file (wrangler prints progress, not JSON, for --file). */
+const d1Write = (sql: string) => {
   const dir = mkdtempSync(join(tmpdir(), "probe-"));
-  try {
-    writeFileSync(join(dir, "q.sql"), sql, { mode: 0o600 });
-    const out = execFileSync(cmd, [...wbase, "d1", "execute", `crestmont-${D1_ENV}`, "--remote", "--env", D1_ENV, "--json", "--file", join(dir, "q.sql"), "--yes"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
-    const parsed = JSON.parse(out) as { results?: Record<string, unknown>[] }[];
-    return parsed.flatMap((p) => p.results ?? []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  try { writeFileSync(join(dir, "q.sql"), sql, { mode: 0o600 }); wr(["--file", join(dir, "q.sql"), "--yes"]); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+};
+/** One read query: --command --json returns clean JSON. */
+const d1 = (sql: string) => {
+  const out = wr(["--json", "--command", sql]);
+  const parsed = JSON.parse(out.slice(out.indexOf("["))) as { results?: Record<string, unknown>[] }[];
+  return parsed.flatMap((p) => p.results ?? []);
 };
 
 let failed = 0;
@@ -59,7 +63,8 @@ const run = randomBytes(4).toString("hex");
 const email = `purchase-probe-${run}@example.com`;
 const password = randomBytes(24).toString("base64url");
 const userId = `usr_probe_${run}`, orgId = `org_probe_${run}`, now = new Date().toISOString();
-d1(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, mfa_enabled, created_at) VALUES (${q(userId)}, ${q(email)}, 'Purchase Probe', ${q(await hashPassword(password))}, ${q(now)}, 0, ${q(now)});
+d1Write(`UPDATE users SET disabled_at = ${q(now)} WHERE id LIKE 'usr_probe_%' AND disabled_at IS NULL;
+INSERT INTO users (id, email, display_name, password_hash, email_verified_at, mfa_enabled, created_at) VALUES (${q(userId)}, ${q(email)}, 'Purchase Probe', ${q(await hashPassword(password))}, ${q(now)}, 0, ${q(now)});
 INSERT INTO organizations (id, name, kind, created_at) VALUES (${q(orgId)}, ${q(`[Purchase probe ${run}] Crestmont live checkout check`)}, 'customer', ${q(now)});
 INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (${q(`mbr_probe_${run}`)}, ${q(userId)}, ${q(orgId)}, 'customer_admin', ${q(now)});
 INSERT INTO audit_logs (actor_kind, action, subject_type, subject_id, details_json, created_at) VALUES ('system', 'ops.purchase_probe_started', 'organization', ${q(orgId)}, '{"note":"live checkout session check; nothing is paid"}', ${q(now)});`);
@@ -101,7 +106,7 @@ try {
   }
 } finally {
   const end = new Date().toISOString();
-  d1(`UPDATE users SET disabled_at = ${q(end)} WHERE id = ${q(userId)};
+  d1Write(`UPDATE users SET disabled_at = ${q(end)} WHERE id = ${q(userId)};
 DELETE FROM sessions WHERE user_id = ${q(userId)};
 INSERT INTO audit_logs (actor_kind, action, subject_type, subject_id, details_json, created_at) VALUES ('system', 'ops.purchase_probe_finished', 'organization', ${q(orgId)}, ${q(JSON.stringify({ failed }))}, ${q(end)});`);
   console.log(`probe customer disabled; its unpaid Stripe sessions expire on their own (the expiry webhook voids the invoices).`);
