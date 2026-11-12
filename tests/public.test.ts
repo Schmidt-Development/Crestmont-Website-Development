@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, lastEmail } from "./support/app.ts";
+import type { Env } from "../src/app/context.ts";
 import { findProhibitedClaims, PACKAGES, packageAdditions, MAINTENANCE_PLANS, APPROVED_SERVICES, priceQuote } from "../src/domain/catalog.ts";
 import { SERVICES, servicePath } from "../src/content/services.ts";
 import { PUBLIC_PATHS } from "../src/routes/public.ts";
@@ -17,6 +18,14 @@ const hrefs = (h: string) => [...h.matchAll(/href="([^"]+)"/g)].map((m) => m[1].
 async function staffClient(app: Awaited<ReturnType<typeof createTestApp>>, role: Parameters<typeof createStaff>[1], email?: string) {
   const s = await createStaff(app.db, role, email);
   return { s, c: await app.client().login(s.email, undefined, s.secret) };
+}
+
+/** Puts a seeded project back in its migration-0005 placeholder state (undocumented, no screenshots, unpublished), as
+ *  on a database where migration 0105 found an Owner-edited row; the workflow tests below start from it. */
+async function asPlaceholder(db: Env["DB"], id: string) {
+  await db.prepare(`UPDATE portfolio_projects SET relationship = 'Founder-authorized portfolio project — relationship documentation pending (BLK-008)',
+      relationship_documented_at = NULL, relationship_evidence = NULL, poster_desktop_asset = NULL, poster_mobile_asset = NULL, poster_tablet_asset = NULL,
+      portfolio_consent_at = NULL, portfolio_consent_by = NULL, portfolio_consent_method = NULL, portfolio_consent_evidence = NULL, published = 0, published_at = NULL WHERE id = ?`).bind(id).run();
 }
 
 test("[WEB-001] [WEB-002] [WEB-003] [WEB-004] [WEB-007] [WEB-008] every public page returns 200 with a title", async () => {
@@ -272,32 +281,39 @@ test("[CMS-003] [CAT-007] pricing presentation edits need the Owner to publish a
   assert.ok(await app.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'cms.pricing_presentation_approved' AND actor_user_id = ?`).bind(ownerUser.id).first());
 });
 
-test("[PORT-004] [PORT-006] seeded portfolio projects are unpublished, verified-only and not public", async () => {
+test("[PORT-004] [PORT-006] the Founder-owned portfolio projects are documented, published and public; nothing unverified is claimed", async () => {
+  // Migrations 0005 (seed), 0104 (Glassly) and 0105 (Founder authorization of 2026-10-27 recorded on the placeholders).
   const { db, client } = await createTestApp();
-  // Migration 0104 restores Glassly Auto Glass as a published, documented entry (tests/portfolio-glassly-restore.test.ts);
-  // the three placeholder projects of migration 0005 stay unpublished until they are documented.
-  const rows = (await db.prepare(`SELECT slug, live_url, published, desktop_screenshot_file_id, mobile_screenshot_file_id, relationship, description FROM portfolio_projects WHERE id != 'pf_glassly_auto_glass' ORDER BY position`).all<Record<string, unknown>>()).results;
-  assert.deepEqual(rows.map((r) => r.live_url), ["https://betterlansingmechanics.com", "https://lansingcarrentals.com", "https://mentorship.lansingcarrentals.com"]);
+  const rows = (await db.prepare(`SELECT id, slug, live_url, published, relationship, relationship_documented_at, portfolio_consent_at, poster_desktop_asset, description FROM portfolio_projects ORDER BY position`).all<Record<string, unknown>>()).results;
+  assert.deepEqual(rows.map((r) => r.live_url).sort(), ["https://betterlansingmechanics.com", "https://glasslyautoglass.com", "https://lansingcarrentals.com", "https://mentorship.lansingcarrentals.com"]);
   for (const r of rows) {
-    assert.equal(r.published, 0);
-    assert.equal(r.desktop_screenshot_file_id, null);
-    assert.equal(r.mobile_screenshot_file_id, null);
-    assert.match(String(r.relationship), /relationship documentation pending \(BLK-008\)/);
+    assert.equal(r.published, 1, String(r.id));
+    assert.ok(r.relationship_documented_at && r.portfolio_consent_at && r.poster_desktop_asset, `${r.id} documented, consented, with screenshots`);
+    assert.match(String(r.relationship), /^Founder-owned business/);
     assert.doesNotMatch(String(r.description), /\b\d+\s+(cars|vehicles)\b|revenue|\$\d/i, "owner-reported figures are not repeated");
   }
-  const c = client();
-  const list = await (await c.get("/portfolio")).text();
-  assert.doesNotMatch(list, /Better Lansing Mechanics|Lansing Car Rentals/);
-  assert.match(list, /Glassly Auto Glass/);
-  assert.doesNotMatch(await (await c.get("/")).text(), /Better Lansing Mechanics/);
-  assert.equal((await c.get("/portfolio/better-lansing-mechanics")).status, 404);
-  assert.doesNotMatch(await (await c.get("/sitemap.xml")).text(), /portfolio\/better/);
+  const list = await (await client().get("/portfolio")).text();
+  for (const sl of ["better-lansing-mechanics", "glassly-auto-glass", "lansing-car-rentals", "lansing-car-rentals-mentorship"]) assert.match(list, new RegExp(`href="/portfolio/${sl}"`));
+  assert.equal((await client().get("/portfolio/better-lansing-mechanics")).status, 200);
+  assert.match(await (await client().get("/sitemap.xml")).text(), /portfolio\/better-lansing-mechanics/);
+});
+
+test("[PORT-004] migration 0105 never touches an entry the Owner already edited, unpublished or archived", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { db } = await createTestApp();
+  const raw = (db as unknown as { raw: { exec(sql: string): void } }).raw;
+  await asPlaceholder(db, "pf_lansing_car_rentals");
+  await db.prepare(`UPDATE portfolio_projects SET description = 'Owner wording', archived_at = '2026-11-11T00:00:00Z' WHERE id = 'pf_lansing_car_rentals'`).run();
+  raw.exec(readFileSync("migrations/0105_publish_founder_portfolio.sql", "utf8"));
+  const r = await db.prepare(`SELECT description, published FROM portfolio_projects WHERE id = 'pf_lansing_car_rentals'`).first<{ description: string; published: number }>();
+  assert.deepEqual({ ...r }, { description: "Owner wording", published: 0 });
 });
 
 test("[PORT-007] publishing is refused while screenshots or relationship documentation are missing", async () => {
   const app = await createTestApp();
   const { c } = await staffClient(app, "owner");
   const id = "pf_better_lansing_mechanics";
+  await asPlaceholder(app.db, id);
   const editor = await (await c.get(`/staff/portfolio/${id}`)).text();
   assert.match(editor, /Publishing is blocked until/);
   assert.match(editor, /shot shot--pending/);
@@ -324,6 +340,7 @@ test("[PORT-007] [PORT-006] full portfolio workflow: upload, replace, verify, do
   const app = await createTestApp();
   const { c, s } = await staffClient(app, "administrator");
   const id = "pf_lansing_car_rentals";
+  await asPlaceholder(app.db, id);
   await c.post(`/staff/portfolio/${id}/screenshot`, { kind: "desktop", captured_on: "2026-10-26", screenshot: pngFile() });
   const first = (await app.db.prepare(`SELECT desktop_screenshot_file_id AS f FROM portfolio_projects WHERE id = ?`).bind(id).first<{ f: string }>())!.f;
   await c.post(`/staff/portfolio/${id}/screenshot`, { kind: "desktop", captured_on: "2026-10-27", screenshot: pngFile("d2.png") });
@@ -352,7 +369,7 @@ test("[PORT-007] [PORT-006] full portfolio workflow: upload, replace, verify, do
   assert.match(csh, /<dialog id="viewer"/);
   assert.match(csh, /data-viewer/);
   assert.match(csh, /href="https:\/\/lansingcarrentals\.com" rel="noopener noreferrer" target="_blank">Visit live website/);
-  assert.match(csh, /Booking via links to Turo/);
+  assert.match(csh, /Vehicle showcase with Turo booking links/);
   const media = await anon.get(`/portfolio-media/${second}`);
   assert.equal(media.status, 200);
   assert.equal(media.headers.get("content-type"), "image/png");
