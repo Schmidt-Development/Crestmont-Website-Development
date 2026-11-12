@@ -23,10 +23,14 @@ const answers: Record<string, string> = {
 };
 const sub = await c.post(`/checkout/${pkg}/intake`, answers);
 const reviewHtml = await (await c.get(`/checkout/${pkg}/review`)).text();
+// Validation-error state: an incomplete submission re-renders the intake with errors (422).
+const c2 = await t.client().login((await createCustomer(t.db, "second.customer@example.com", "Second Co")).email, TEST_PASSWORD);
+const errorRes = await c2.post(`/checkout/${pkg}/intake`, { business_name: "Second Co", intent: "submit" });
+const errorHtml = await errorRes.text();
 const b = await chromium.launch();
 const problems: string[] = [];
-for (const [name, html] of [["intake", intakeHtml], ["review", reviewHtml]] as const) {
-  for (const vp of [{ w: 1440, h: 900, m: false, n: "desktop" }, { w: 820, h: 1180, m: true, n: "tablet" }, { w: 390, h: 844, m: true, n: "phone" }]) {
+for (const [name, html] of [["intake", intakeHtml], ["review", reviewHtml], ["intake-errors", errorHtml]] as const) {
+  for (const vp of [{ w: 1440, h: 900, m: false, n: "desktop" }, { w: 1280, h: 800, m: false, n: "laptop" }, { w: 768, h: 1024, m: true, n: "tablet" }, { w: 390, h: 844, m: true, n: "phone" }, { w: 320, h: 640, m: true, n: "small" }]) {
     const ctx = await b.newContext({ viewport: { width: vp.w, height: vp.h }, isMobile: vp.m, hasTouch: vp.m, deviceScaleFactor: 1 });
     const p = await ctx.newPage();
     await p.route("**/*", async (r: any) => {
@@ -36,7 +40,7 @@ for (const [name, html] of [["intake", intakeHtml], ["review", reviewHtml]] as c
       return r.fulfill({ status: 404, body: "" });
     });
     const errors: string[] = []; p.on("pageerror", (e: Error) => errors.push(e.message));
-    await p.goto(`http://crestmont.test/checkout/${pkg}/${name}`);
+    await p.goto(`http://crestmont.test/checkout/${pkg}/${name.replace("-errors", "")}`);
     await p.waitForTimeout(300);
     const found = await p.evaluate(() => {
       const issues: string[] = [];
@@ -68,4 +72,4 @@ for (const [name, html] of [["intake", intakeHtml], ["review", reviewHtml]] as c
   }
 }
 await b.close();
-console.log(JSON.stringify({ intakeSubmit: sub.status, reviewHasPay: /Pay \$/.test(reviewHtml), problems }, null, 1));
+console.log(JSON.stringify({ intakeSubmit: sub.status, errorStatus: errorRes.status, errorsShown: /class="alert/.test(errorHtml), reviewHasPay: /Pay \$/.test(reviewHtml), problems }, null, 1));
