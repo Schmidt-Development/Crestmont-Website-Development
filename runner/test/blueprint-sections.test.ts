@@ -126,3 +126,14 @@ test("[BP-SEC-007] a corrupt or foreign sections file never breaks the build", (
   writeFileSync(sectionsPath(d), JSON.stringify({ schema: "something.else/9", sections: [] }));
   assert.equal(outstanding(loadSections(d, JOB, 1, HASH)).length, SECTION_ORDER.length);
 });
+
+test("[BP-SEC-008] section progress is archived, so a resume on another host does not start again", async () => {
+  // The sections live in the job directory, outside the agent's repository, so the git bundle does not carry
+  // them. If the checkpoint did not either, a cross-host resume would regenerate every section from nothing --
+  // which is precisely the all-or-nothing behaviour sectioning exists to end.
+  const { RUNNER_STATE_FILES } = await import("../src/checkpoint.ts");
+  assert.ok(RUNNER_STATE_FILES.includes("blueprint-sections.json" as never),
+    `the sections file is archived with the checkpoint (${RUNNER_STATE_FILES.join(", ")})`);
+  assert.ok(RUNNER_STATE_FILES.includes("reference-manifest.json" as never),
+    "and so is the provenance record, or a resumed build cannot say what it was shown");
+});
