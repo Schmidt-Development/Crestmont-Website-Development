@@ -274,7 +274,9 @@ test("[CMS-003] [CAT-007] pricing presentation edits need the Owner to publish a
 
 test("[PORT-004] [PORT-006] seeded portfolio projects are unpublished, verified-only and not public", async () => {
   const { db, client } = await createTestApp();
-  const rows = (await db.prepare(`SELECT slug, live_url, published, desktop_screenshot_file_id, mobile_screenshot_file_id, relationship, description FROM portfolio_projects ORDER BY position`).all<Record<string, unknown>>()).results;
+  // Migration 0104 restores Glassly Auto Glass as a published, documented entry (tests/portfolio-glassly-restore.test.ts);
+  // the three placeholder projects of migration 0005 stay unpublished until they are documented.
+  const rows = (await db.prepare(`SELECT slug, live_url, published, desktop_screenshot_file_id, mobile_screenshot_file_id, relationship, description FROM portfolio_projects WHERE id != 'pf_glassly_auto_glass' ORDER BY position`).all<Record<string, unknown>>()).results;
   assert.deepEqual(rows.map((r) => r.live_url), ["https://betterlansingmechanics.com", "https://lansingcarrentals.com", "https://mentorship.lansingcarrentals.com"]);
   for (const r of rows) {
     assert.equal(r.published, 0);
@@ -286,7 +288,7 @@ test("[PORT-004] [PORT-006] seeded portfolio projects are unpublished, verified-
   const c = client();
   const list = await (await c.get("/portfolio")).text();
   assert.doesNotMatch(list, /Better Lansing Mechanics|Lansing Car Rentals/);
-  assert.match(list, /Portfolio projects are being prepared/);
+  assert.match(list, /Glassly Auto Glass/);
   assert.doesNotMatch(await (await c.get("/")).text(), /Better Lansing Mechanics/);
   assert.equal((await c.get("/portfolio/better-lansing-mechanics")).status, 404);
   assert.doesNotMatch(await (await c.get("/sitemap.xml")).text(), /portfolio\/better/);
@@ -366,6 +368,8 @@ test("[PORT-007] [PORT-006] full portfolio workflow: upload, replace, verify, do
   await c.post(`/staff/portfolio/testimonials/${tid.id}/publish`);
   assert.match(await (await anon.get("/portfolio/lansing-car-rentals")).text(), /Great to work with/);
   // Reorder.
+  // Lansing Car Rentals is third (migration 0104 restored Glassly Auto Glass at position 2): two moves up make it first.
+  await c.post(`/staff/portfolio/${id}/move`, { dir: "up" });
   await c.post(`/staff/portfolio/${id}/move`, { dir: "up" });
   const order = (await app.db.prepare(`SELECT id FROM portfolio_projects ORDER BY position`).all<{ id: string }>()).results.map((r) => r.id);
   assert.equal(order[0], id);
@@ -386,7 +390,7 @@ test("[PORT-007] staff can add a new project; it starts unpublished", async () =
   const ok = await c.post("/staff/portfolio", { name: "New Project", slug: "new-project", industry: "Retail", live_url: "https://new.example", description: "A verified description of the live website.", features: "Contact form", technology_summary: "", relationship: "Relationship documentation pending" });
   assert.equal(ok.status, 303);
   const row = await app.db.prepare(`SELECT published, position FROM portfolio_projects WHERE slug = 'new-project'`).first<{ published: number; position: number }>();
-  assert.deepEqual({ ...row }, { published: 0, position: 4 });
+  assert.deepEqual({ ...row }, { published: 0, position: 5 }, "appended after the four seeded projects (three from 0005, Glassly from 0104)");
 });
 
 test("[PORT-006] /portfolio-media serves only screenshots of published portfolio projects", async () => {

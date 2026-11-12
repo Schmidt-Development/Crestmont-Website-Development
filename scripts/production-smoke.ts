@@ -44,7 +44,8 @@ export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch 
   await check("health", "file storage (R2) bound", true, async () => (health.fileStorage === "bound" ? null : `fileStorage: ${String(health.fileStorage)}`));
   // What the running Worker states about payments and the website assistant (no secret: modes, reasons, presence only).
   try {
-    const p = health.payments as { mode?: string; checkout?: string; reason?: string; webhookSecret?: boolean } | undefined;
+    const p = health.payments as { mode?: string; checkout?: string; reason?: string; webhookSecret?: boolean; keyKind?: string; blockers?: string[] } | undefined;
+    console.log(`  stripe key: ${p?.keyKind ?? "?"}; checkout blockers: ${p?.blockers?.length ? p.blockers.join(" | ") : "none"}; customer access: ${String(health.customerAccess ?? "?")}`);
     const a = await (await req("GET", "/api/assistant")).json().catch(() => ({})) as { available?: boolean; reason?: string };
     console.log(`  payments: mode ${p?.mode ?? "?"}, checkout ${p?.checkout ?? "?"}${p?.reason ? ` (${p.reason})` : ""}, webhook secret ${p?.webhookSecret ? "present" : "missing"}`);
     console.log(`  website assistant: ${a.available ? "available" : `unavailable (${a.reason ?? "?"})`}`);
@@ -59,10 +60,17 @@ export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch 
     console.log(`  phone on the site: ${/href="tel:\+\d+"/.test(home) ? `shown (${/href="tel:(\+\d+)"/.exec(home)![1].replace(/\d(?=\d{4})/g, "•")})` : "not shown"}`);
   } catch { /* informational only */ }
   await check("ai", "AI website generation is off", true, async () => (health.aiBuildAutomation === "off" ? null : `aiBuildAutomation: ${String(health.aiBuildAutomation)}`));
-  await check("payments", "checkout is closed (no live charges before the payments authorization)", true, async () => {
-    const p = health.payments as { checkout?: string; mode?: string; reason?: string } | undefined;
-    return p?.checkout === "closed" ? null : `payments: ${JSON.stringify(p)}`;
-  });
+  if (expectPrelaunch) {
+    await check("payments", "checkout is closed (no live charges before the payments authorization)", true, async () => {
+      const p = health.payments as { checkout?: string; mode?: string; reason?: string } | undefined;
+      return p?.checkout === "closed" ? null : `payments: ${JSON.stringify(p)}`;
+    });
+  } else {
+    await check("payments", "checkout is open in live mode with the webhook secret set (after the payments authorization)", true, async () => {
+      const p = health.payments as { checkout?: string; mode?: string; reason?: string; webhookSecret?: boolean; blockers?: string[] } | undefined;
+      return p?.checkout === "open" && p?.mode === "live" && p?.webhookSecret ? null : `payments: ${JSON.stringify(p)}`;
+    });
+  }
 
   // ── Public website ──
   for (const [path, must] of [["/", /Crestmont/i], ["/pricing", /\$/], ["/services", /Crestmont/i], ["/about", /Crestmont/i], ["/portfolio", /Crestmont/i],
@@ -95,6 +103,18 @@ export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch 
       !/max-age=\d+/.test(r.headers.get("strict-transport-security") ?? "") && "HSTS"].filter(Boolean);
     return missing.length ? `missing: ${missing.join(", ")}` : null;
   });
+
+  // ── After the public launch: a new visitor reaches registration and every package's purchase flow ──
+  if (!expectPrelaunch) {
+    for (const path of ["/register", "/checkout/starter", "/checkout/business", "/checkout/premium"]) {
+      await check("launch", `GET ${path} is open to a new visitor (no "opening soon")`, true, async () => {
+        const r = await req("GET", path);
+        const b = await text(r);
+        if (/We are opening soon/.test(b) || r.status === 503) return `HTTP ${r.status}: still the "opening soon" page`;
+        return r.status === 200 || (r.status >= 300 && r.status < 400) ? null : `HTTP ${r.status}`;
+      });
+    }
+  }
 
   // ── Customer access stays closed before the public launch ──
   if (expectPrelaunch) {

@@ -50,7 +50,7 @@ export const FAQ_DEFAULT = block([
   ["Do you use AI?", "Yes, as an assistant. Package copy is AI-assisted draft copy that you review and approve, and our team uses AI to help draft and summarise. People make every decision about refunds, contracts, pricing and releases."],
   ["How do I get support?", "Customers can submit support tickets at any time from the customer portal. Our staffed support hours are published on the support policy page."],
   ["Do you offer refunds?", "Refund requests are reviewed by our support team and decided by the Founder, except where law or card-network rules require otherwise. See the refund policy for details."],
-  ["Do you offer ongoing maintenance?", `Yes. Monthly plans — ${Object.values(MAINTENANCE_PLANS).map((m) => m.name).join(", ")} — cover hosting and upkeep after launch. Each website package requires a minimum plan (Starter: Essential, Business: Professional, Premium: Executive); you may choose a higher plan, and billing starts when you approve and launch your website. Full plan details are published on the hosting and maintenance page once finalised.`],
+  ["Do you offer ongoing maintenance?", `Yes. Monthly plans — ${Object.values(MAINTENANCE_PLANS).map((m) => m.name).join(", ")} — cover hosting and upkeep after launch. Each website package requires a minimum plan (Starter: Essential, Business: Professional, Premium: Executive); you may choose a higher plan, and its monthly billing starts when your completed website is ready for your review, before it goes live. Full plan details are published on the hosting and maintenance page once finalised.`],
 ]);
 
 const PROCESS_DEFAULT = block([

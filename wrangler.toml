@@ -89,7 +89,11 @@ routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true },
 # (docs/FULFILLMENT-HUMAN-SUPERVISED.md). Production is closed for ANY value but exactly "on" (src/domain/ai-build-gate.ts),
 # and the release workflow refuses "on" while AI-builder requirements are Founder-deferred. Change it only after the
 # builder's separate certification and Founder authorization, in a new release candidate.
-vars = { ENVIRONMENT = "production", APP_URL = "https://crestmontwebsitedevelopment.com", HSTS_MAX_AGE = "300", AI_BUILD_AUTOMATION = "off" }
+# PUBLIC_LAUNCH / PAYMENTS_LIVE_AUTHORIZED (Founder authorization, 2026-11-12): customer registration, intake and live
+# Stripe checkout are open. The deploy (deploy-production.yml) refuses to release this unless the running Worker's
+# read-only probe verifies the live Stripe key, a charge-enabled account and the webhook endpoint with every handled
+# event (scripts/stripe-live-gate.ts); the post-deploy smoke test then checks that a new visitor reaches every package.
+vars = { ENVIRONMENT = "production", APP_URL = "https://crestmontwebsitedevelopment.com", HSTS_MAX_AGE = "300", AI_BUILD_AUTOMATION = "off", PUBLIC_LAUNCH = "open", PAYMENTS_LIVE_AUTHORIZED = "yes" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "c667f1a9-0802-4c52-a0e1-b512219a6eea", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
 triggers = { crons = ["* * * * *", "*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts

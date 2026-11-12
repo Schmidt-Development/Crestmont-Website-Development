@@ -156,7 +156,7 @@ export const SERVICES: ServiceDef[] = [
   {
     slug: "hosting-maintenance", name: "Hosting & maintenance", approved: ["Hosting and maintenance"], group: "Ongoing care", pricing: "maintenance", path: "/hosting-maintenance",
     summary: "Monthly plans for hosting, updates, monitoring and backups after launch; every website package requires a minimum plan.",
-    intro: "Each website package requires a minimum monthly plan (Starter: Essential, Business: Professional, Premium: Executive); you may choose a higher plan. Billing starts when you approve and launch your website, and your domain always remains yours.",
+    intro: "Each website package requires a minimum monthly plan (Starter: Essential, Business: Professional, Premium: Executive); you may choose a higher plan. Billing starts when your completed website is ready for your review, before it goes live, and your domain always remains yours.",
     includes: [], boundaries: [],
   },
 ];

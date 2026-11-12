@@ -786,7 +786,7 @@ async function acceptProposalRoute(ctx: AppContext, token: string) {
 // payment → project fulfilment. Customers describe what they want before paying (purchase_intakes, migration 0089).
 const CHECKOUT_STEPS = ["Website intake", "Review and agree", "Secure payment"] as const;
 function checkoutSteps(current: 0 | 1 | 2): SafeHtml {
-  return html`<ol class="row faint" data-testid="checkout-steps" style="list-style:none;padding:0;gap:1rem">${CHECKOUT_STEPS.map((s, i) => html`<li${i === current ? html` aria-current="step"` : ""}>${i === current ? html`<strong>${i + 1}. ${s}</strong>` : html`${i + 1}. ${s}`}</li>`)}</ol>`;
+  return html`<ol class="checkout-steps" data-testid="checkout-steps">${CHECKOUT_STEPS.map((s, i) => html`<li class="checkout-steps__item${i < current ? " is-done" : i === current ? " is-current" : ""}"${i === current ? html` aria-current="step"` : ""}><span class="checkout-steps__dot" aria-hidden="true">${i < current ? "✓" : String(i + 1)}</span><span>${s}</span></li>`)}</ol>`;
 }
 function checkoutPackage(packageId: string) {
   const pkg = packageById(packageId);
@@ -818,6 +818,7 @@ async function checkoutIntakePage(ctx: AppContext, packageId: string, errors: st
   return htmlResponse(ctx, publicLayout(ctx, { title: `Website intake — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:860px">
 ${preview ? previewBanner(ctx) : ""}<div class="eyebrow">Checkout · ${pkg.name} website package</div><h1>Tell us about your website</h1>${checkoutSteps(0)}
 <p class="lede">Before you pay, describe the website you want: your business, goals, pages and content. You review the scope and price next, and pay only after that. Save a draft any time and come back to finish it. Never send passwords here — we arrange access securely.</p>
+<p class="ob-legend-note"><span class="ob-req" aria-hidden="true">*</span> Required. Logos, photos and other files are optional now — you can add them later from your customer portal.</p>
 ${intake?.completed_at ? alert("info", html`You completed this intake ${formatDateTime(intake.completed_at)}. <a href="/checkout/${pkg.id}/review">Continue to review</a>, or change your answers and submit again.`) : intake ? html`<p class="faint" data-testid="intake-draft-saved">Draft last saved ${formatDateTime(intake.updated_at)}.</p>` : ""}${formErrors(errors)}
 ${form}
 </div></section>`), status);
@@ -904,13 +905,18 @@ async function checkoutReviewPage(ctx: AppContext, packageId: string, errors: st
   const tax = computeTax([{ description: `${pkg.name} website package`, amountCents: priceCents, productKey: pkg.id }], await loadTaxConfig(ctx.db));
   const dueCents = tax.configured ? tax.totalCents : priceCents;
   // FD-26/FD-27: the customer chooses a hosting and maintenance plan at or above the package minimum. Nothing is billed
-  // for it today: the monthly subscription starts when the customer approves and launches the completed website.
+  // for it today: the first monthly payment is collected when the completed website is ready for the customer's review,
+  // before launch (src/services/maintenance-lifecycle.ts, Founder directive 2026-11-08), then it renews monthly.
   const minPlan = MINIMUM_PLAN_FOR_PACKAGE[pkg.id];
   const planChoices = await Promise.all(eligiblePlansFor(pkg.id).map(async (id) => ({ id, name: MAINTENANCE_PLANS[id].name, monthlyCents: (await effectivePrice(ctx.db, "maintenance", id, ctx.now())).cents })));
-  const planFieldset = html`<fieldset class="stack" data-testid="checkout-maintenance-plan"><legend><strong>Hosting and maintenance plan (required)</strong></legend>
-<p class="faint">The ${pkg.name} package requires the ${MAINTENANCE_PLANS[minPlan].name} plan or higher. ${ONE_BUSINESS_PROJECT_SCOPE}</p>
-${planChoices.map((p) => html`<label class="row"><input type="radio" name="maintenance_plan" value="${p.id}" required${selectedPlan === p.id ? html` checked` : ""}> ${p.name} — ${formatCents(p.monthlyCents)}/month${p.id === minPlan ? html` <small>(minimum)</small>` : ""}</label>`)}
-<p class="faint" data-testid="checkout-maintenance-billing">You are not charged for the plan today. Monthly billing starts only when you approve and launch your completed website. <a href="/hosting-maintenance">Compare plans</a></p></fieldset>`;
+  const planFieldset = html`<fieldset class="ob-section ob-section--flat" data-testid="checkout-maintenance-plan"><legend class="ob-section__title">Hosting and maintenance plan <span class="ob-req">*</span></legend>
+<div class="ob-section__body"><p class="faint">The ${pkg.name} package requires the ${MAINTENANCE_PLANS[minPlan].name} plan or higher. ${ONE_BUSINESS_PROJECT_SCOPE}</p>
+<div class="plan-choices">${planChoices.map((p) => html`<label class="plan-choice"><input type="radio" name="maintenance_plan" value="${p.id}" required${selectedPlan === p.id ? html` checked` : ""}><span class="plan-choice__name">${p.name}${p.id === minPlan ? html` <small class="faint">(minimum)</small>` : ""}</span><span class="plan-choice__price">${formatCents(p.monthlyCents)}<small>/month</small></span></label>`)}</div>
+<p class="faint" data-testid="checkout-maintenance-billing">You are not charged for the plan today. Its first monthly payment is collected when your completed website is ready for your review, before it goes live, and it renews monthly until you cancel. <a href="/hosting-maintenance">Compare plans</a></p></div></fieldset>`;
+  const minMonthly = planChoices.find((p) => p.id === minPlan)?.monthlyCents ?? planChoices[0]?.monthlyCents ?? 0;
+  const charges = html`<div class="charge-summary" data-testid="checkout-charges"><div class="charge-summary__row"><span>Due today — ${pkg.name} website (one-time)</span><strong>${formatCents(dueCents)}</strong></div>
+<div class="charge-summary__row"><span>Hosting and maintenance — the plan you choose (recurring)</span><strong>from ${formatCents(minMonthly)}/month</strong></div>
+<p class="faint">The monthly plan is billed separately, starting when your website is ready for your review.</p></div>`;
   return htmlResponse(ctx, publicLayout(ctx, { title: `Checkout — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:760px">
 ${preview ? previewBanner(ctx) : ""}<div class="eyebrow">Checkout</div><h1>${pkg.name} website package</h1>${checkoutSteps(1)}
 ${cancelled ? alert("info", "Checkout was cancelled. Nothing was charged.") : ""}${formErrors(errors)}
@@ -923,6 +929,7 @@ ${pkg.priceIsFloor ? html`<p class="faint">Need more than the standard Premium s
 <details class="card" data-testid="checkout-intake-summary"${preview ? html` open` : ""}><summary><strong>Your website intake</strong> · submitted ${formatDateTime(intake.completed_at)} · <a href="${base}/intake">Edit</a></summary>${intakeSummary(pkg.id, intake.answers as never)}</details>
 ${preview ? html`<form class="card stack" data-testid="checkout-preview-payment">
 ${planFieldset}
+${charges}
 ${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Refund Policy and Data Processing Addendum.", { required: true })}
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p>
 <p class="faint">You will be taken to Stripe's secure checkout. Your payment is confirmed only when Stripe notifies us.</p>
@@ -930,6 +937,7 @@ ${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Ref
 <p class="faint" data-testid="checkout-preview-note">Owner preview: the payment button is disabled. ${configured ? "" : html`Customers currently see "${NOT_CONFIGURED} You cannot pay online right now." here instead of this form.`}</p></form>`
     : configured ? html`<form method="post" action="/checkout/${pkg.id}" class="card stack">${csrf(ctx)}
 ${planFieldset}
+${charges}
 ${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Refund Policy and Data Processing Addendum.", { required: true })}
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p>
 <p class="faint">You will be taken to Stripe's secure checkout. Your payment is confirmed only when Stripe notifies us.</p>

@@ -2050,6 +2050,53 @@ html.has-intro .cb { animation: show-now 1ms linear 2.4s backwards; }
 /* ── Touch targets (CREST-GAP-045) ────────────────────────────────────────────────────────────────
    The site's own rule: every control is at least 44 × 44 px on touch screens and phones. Placed last so it wins over
    the compact component sizes above (portfolio segmented control, journey stops, assistant, simulations, toasts). */
+/* ── Purchase intake and checkout (Founder, 2026-11-12): section headings sit inside their cards, required questions
+   carry a gold asterisk after the label, consistent field rhythm, a real progress indicator, phone-friendly padding. ── */
+.ob-section { margin: 0; padding: var(--s-5) var(--s-5) var(--s-3); }
+.ob-section > legend.ob-section__title { float: left; width: 100%; padding: 0 0 var(--s-3); margin: 0 0 var(--s-4); border-bottom: 1px solid var(--line);
+  display: flex; align-items: baseline; gap: var(--s-3); font: 600 var(--fs-lg)/1.3 var(--font-body); color: var(--white); letter-spacing: -.012em; }
+.ob-section > legend.ob-section__title + * { clear: both; }
+.ob-section__num { font: 500 var(--fs-xs)/1 var(--font-mono, monospace); color: var(--gold-1); letter-spacing: .08em; }
+.ob-section__intro { clear: both; color: var(--text-2); font-size: var(--fs-sm); margin: 0 0 var(--s-4); }
+.ob-section__body { clear: both; display: grid; gap: var(--s-1); }
+.ob-field > .field, .ob-field > fieldset.field { margin-bottom: var(--s-4); }
+.ob-field .field > label, .ob-field fieldset.field > legend { font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
+.ob-field fieldset.field > legend { margin-bottom: var(--s-2); }
+.ob-field--req > .field > label:not(.checkbox)::after, .ob-field--req > fieldset.field > legend::after { content: " *"; color: var(--gold-1); font-weight: 600; }
+.ob-field fieldset.field { display: grid; gap: var(--s-2); }
+.ob-field .dropzone { text-align: left; padding: var(--s-4); }
+.ob-legend-note { font-size: var(--fs-sm); color: var(--text-2); margin: 0; }
+.ob-req { color: var(--gold-1); font-weight: 600; }
+.checkout-steps { list-style: none; padding: 0; margin: var(--s-2) 0 var(--s-4); display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-5); counter-reset: none; }
+.checkout-steps__item { display: inline-flex; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); color: var(--text-3); }
+.checkout-steps__dot { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line-2); font: 600 var(--fs-xs)/1 var(--font-body); color: var(--text-2); flex: none; }
+.checkout-steps__item.is-current { color: var(--white); font-weight: 600; }
+.checkout-steps__item.is-current .checkout-steps__dot { background: var(--gold-2); border-color: var(--gold-2); color: var(--ink-0, #0d0d0d); }
+.checkout-steps__item.is-done { color: var(--text-2); }
+.checkout-steps__item.is-done .checkout-steps__dot { border-color: var(--gold-1); color: var(--gold-1); }
+@media (max-width: 640px) {
+  .ob-section { padding: var(--s-4) var(--s-4) var(--s-2); }
+  .ob-section > legend.ob-section__title { font-size: var(--fs-md); }
+  .checkout-steps { gap: var(--s-2) var(--s-4); }
+  .checkout-steps__item { font-size: var(--fs-xs); }
+  .form-actions .btn { flex: 1 1 auto; justify-content: center; }
+}
+.ob-section--flat { border: 0; padding: 0; background: transparent; }
+.plan-choices { display: grid; gap: var(--s-2); }
+.plan-choice { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: var(--s-3); padding: var(--s-3) var(--s-4); border: 1px solid var(--line-control); border-radius: var(--r-2); background: var(--ink-3); cursor: pointer; transition: border-color var(--t-fast) var(--ease-out), background-color var(--t-fast) var(--ease-out); }
+.plan-choice:hover { border-color: var(--text-3); }
+.plan-choice:has(input:checked) { border-color: var(--gold-1); background: var(--gold-wash); }
+.plan-choice input { margin: 0; }
+.plan-choice__name { font-weight: 600; color: var(--white); }
+.plan-choice__price { font: 600 var(--fs-md) var(--font-body); color: var(--white); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.plan-choice__price small { font-weight: 400; color: var(--text-3); }
+.charge-summary { border: 1px solid var(--line-gold); border-radius: var(--r-2); padding: var(--s-3) var(--s-4); background: var(--ink-1); display: grid; gap: var(--s-2); }
+.charge-summary__row { display: flex; justify-content: space-between; gap: var(--s-3); align-items: baseline; font-size: var(--fs-sm); color: var(--text-2); }
+.charge-summary__row strong { color: var(--white); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.charge-summary p { margin: 0; font-size: var(--fs-xs); }
+@media (max-width: 640px) { .charge-summary__row { flex-direction: column; gap: 2px; } }
+
+
 @media (pointer: coarse), (max-width: 760px) {
   .btn.btn--sm, .btn--cta.btn--sm { min-height: 44px; }
   .pfx__page, .pfx__tool, .pfx__seg .pfx__tool { min-height: 44px; min-width: 44px; }

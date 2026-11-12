@@ -45,7 +45,7 @@ test("[LAUNCH-003] [PAY-001] Owner checkout preview on pre-launch production: re
     assert.match(r, /data-testid="checkout-scope"><li>/, `${id}: scope listed`);
     assert.match(r, /Fixed price, paid 100% upfront/);
     assert.match(r, /Coffee shops/, "the intake answers are shown in the order summary");
-    assert.match(r, new RegExp(`name="maintenance_plan" value="${plan}"[^>]*>[^<]*<small>\\(minimum\\)`), `${id}: minimum plan ${plan}`);
+    assert.match(r, new RegExp(`name="maintenance_plan" value="${plan}"[^>]*><span[^>]*>[^<]*<small[^>]*>\\(minimum\\)`), `${id}: minimum plan ${plan}`);
     assert.match(r, /I agree to the Development Agreement, Terms of Service, Refund Policy and Data Processing Addendum\./);
     for (const l of ["/legal/development-agreement", "/legal/terms", "/legal/refunds", "/legal/data-processing"]) assert.ok(r.includes(`href="${l}"`), l);
     assert.match(r, new RegExp(`<button class="btn btn--primary" type="button" disabled aria-disabled="true">Pay \\${price}</button>`), `${id}: payment disabled in preview`);

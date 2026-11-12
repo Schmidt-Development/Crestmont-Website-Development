@@ -41,11 +41,13 @@ test("[LAUNCH-003] the public launch is one committed setting; staging and devel
   assert.equal((await open.client().get("/register")).status, 200);
   const staging = await createTestApp({ ENVIRONMENT: "staging" });
   assert.equal((await staging.client().get("/register")).status, 200);
-  // The committed production configuration does not open early.
+  // The committed production configuration opens customer access (Founder authorization, 2026-11-12) together with live
+  // payments, which the deploy verifies against the live Stripe account before releasing (scripts/stripe-live-gate.ts).
   const toml = readFileSync("wrangler.toml", "utf8");
   const start = toml.indexOf("[env.production]");
   const next = toml.indexOf("\n[env.", start + 1);
   const prod = toml.slice(start, next > 0 ? next : undefined);
   assert.ok(start >= 0 && prod.includes('ENVIRONMENT = "production"'));
-  assert.doesNotMatch(prod, /PUBLIC_LAUNCH\s*=\s*"open"/, "opening customer access needs the Founder's separate authorization");
+  assert.match(prod, /PUBLIC_LAUNCH\s*=\s*"open"/, "customer access is open in production");
+  assert.match(prod, /PAYMENTS_LIVE_AUTHORIZED\s*=\s*"yes"/, "opened together with live payments");
 });

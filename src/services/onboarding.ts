@@ -32,6 +32,10 @@ export const ONBOARDING_SECTIONS: OnboardingSection[] = [
     { name: "contact_email", label: "Contact email", type: "email", required: true, max: 254 },
     { name: "contact_phone", label: "Contact phone", type: "tel", max: 40 },
     { name: "industry", label: "Industry", type: "text", required: true, max: 120 },
+    // Founder, 2026-11-12: the intake also asks what the business does and whether it has a website today (optional).
+    { name: "business_description", label: "Describe your business", type: "textarea", max: 3000,
+      hint: "What you do, what makes you different, and the services or products the website should feature." },
+    { name: "existing_website", label: "Existing website (if any)", type: "text", max: 300, hint: "The address of your current website, if you have one." },
     // Acceptance gate A refuses to let the builder invent a service area for a website that takes quote requests
     // or bookings (starters/fullstack-v1: config-check.mjs pushes "service area" as missing customer information),
     // and until this field existed the form never asked for it. A customer could answer every question on the form
@@ -47,9 +51,11 @@ export const ONBOARDING_SECTIONS: OnboardingSection[] = [
   { id: "branding", title: "Branding", fields: [
     { name: "has_branding", label: "Do you have existing branding (logo, colors, guidelines)?", type: "radio", required: true, options: yesNo },
     { name: "brand_guidelines", label: "Describe your brand or link to guidelines", type: "textarea", showWhen: { field: "has_branding", values: ["yes"] }, max: 3000 },
-    { name: "logo", label: "Upload your logo", type: "file", showWhen: { field: "has_branding", values: ["yes"] }, hint: "PNG, JPG, WEBP or PDF. SVG is not accepted for security reasons; send a PDF or PNG instead." },
+    { name: "logo", label: "Upload your logo", type: "file", showWhen: { field: "has_branding", values: ["yes"] }, hint: "Optional — you can also add it later from your customer portal. PNG, JPG, WEBP or PDF (SVG is not accepted for security reasons)." },
     { name: "brand_style", label: "What style should we aim for?", type: "textarea", required: true, showWhen: { field: "has_branding", values: ["no"] }, hint: "Words that describe the feel you want (e.g. classic, modern, warm).", max: 2000 },
     { name: "colors", label: "Preferred colors", type: "text", hint: "Hex codes or color names.", max: 300 },
+    { name: "design_preferences", label: "Design preferences", type: "textarea", max: 2000,
+      hint: "Layouts, fonts or websites you like, and anything you want to avoid. Optional." },
   ] },
   { id: "pages", title: "Pages and functionality", fields: [
     { name: "pages", label: "Which pages do you need?", type: "textarea", required: true, hint: "List each page. Your package page limit applies; extra pages need a change order.", max: 3000 },
@@ -68,7 +74,7 @@ export const ONBOARDING_SECTIONS: OnboardingSection[] = [
     { name: "content_notes", label: "Content notes", type: "textarea", showWhen: { field: "content_source", values: ["customer", "mix"] }, hint: "Where the content lives today and when it will be ready.", max: 2000 },
     { name: "images_source", label: "Images", type: "radio", required: true, options: [
       { value: "customer", label: "We will provide photos" }, { value: "licensed", label: "Use appropriately licensed imagery" }, { value: "mix", label: "A mix" }] },
-    { name: "images", label: "Upload images", type: "file", showWhen: { field: "images_source", values: ["customer", "mix"] }, hint: "You can upload more later under Files." },
+    { name: "images", label: "Upload images", type: "file", showWhen: { field: "images_source", values: ["customer", "mix"] }, hint: "Optional now — you can upload photos later from your customer portal under Files." },
   ] },
   { id: "domain", title: "Domain and hosting", fields: [
     { name: "domain_status", label: "Do you already own a domain?", type: "radio", required: true, options: [
@@ -87,7 +93,7 @@ export const ONBOARDING_SECTIONS: OnboardingSection[] = [
       { value: "analytics", label: "Analytics / Search Console" }, { value: "crm", label: "CRM" }, { value: "email_marketing", label: "Email marketing" },
       { value: "payments", label: "Payments" }, { value: "scheduling", label: "Scheduling" }, { value: "other", label: "Other" }] },
     { name: "integration_details", label: "Integration details", type: "textarea", required: true, showWhen: { field: "integrations", values: ["crm", "email_marketing", "payments", "scheduling", "other"] }, hint: "Which products you use (e.g. HubSpot, Mailchimp, Stripe).", max: 2000 },
-    { name: "special_instructions", label: "Special instructions", type: "textarea", max: 3000 },
+    { name: "special_instructions", label: "Additional instructions", type: "textarea", max: 3000, hint: "Anything else we should know before we start." },
   ] },
 ];
 
