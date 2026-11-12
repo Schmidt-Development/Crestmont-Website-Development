@@ -288,6 +288,14 @@ jobs:
           BASE="$PRODUCTION_URL" D1_ENV=production EXPECT_MODE=live node --no-warnings scripts/production-purchase-probe.ts starter,business,premium | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
+      - name: Production data report (read-only; no personal data)
+        if: always() && steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/production-data-report.ts | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Running Worker's AI website generation matches the released configuration
         id: gate
         run: |

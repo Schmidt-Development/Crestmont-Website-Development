@@ -83,6 +83,15 @@ export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch 
       return must.test(b) ? null : "expected content missing";
     });
   }
+  // Portfolio: every published entry listed on /portfolio opens its case study (the public order is printed).
+  await check("portfolio", "every published portfolio entry opens its case study", true, async () => {
+    const b = await text(await req("GET", "/portfolio"));
+    const slugs = [...new Set([...b.matchAll(/href="\/portfolio\/([a-z0-9-]+)"/g)].map((m) => m[1]))];
+    console.log(`  portfolio (public order): ${slugs.join(", ") || "none published"}`);
+    const bad: string[] = [];
+    for (const sl of slugs) { const r = await req("GET", `/portfolio/${sl}`); await text(r); if (r.status !== 200) bad.push(`${sl}=${r.status}`); }
+    return bad.length ? bad.join(", ") : null;
+  });
   await check("purchase", "/pricing package buttons lead to the standard purchase flow (intake and checkout), never the custom quote form", true, async () => {
     const r = await req("GET", "/pricing");
     const b = await text(r);

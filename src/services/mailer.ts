@@ -532,7 +532,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       }
     },
     samples: [
-      { event: "package_information", name: "Morgan", packages: [{ name: "Starter", price: "$999" }, { name: "Business", price: "$2,499" }, { name: "Premium", price: "$4,999+" }], maintenanceNote: "Maintenance plans ($99, $199 and $299 per month) are being finalised; a team member will confirm what each includes.", pricingUrl: "https://example.com/pricing" },
+      { event: "package_information", name: "Morgan", packages: [{ name: "Starter", price: "$999" }, { name: "Business", price: "$2,499" }, { name: "Premium", price: "$4,999+" }], maintenanceNote: "Maintenance plans ($99, $199 and $299 per month): every package requires a minimum plan, and what each plan includes is published on our hosting and maintenance page.", pricingUrl: "https://example.com/pricing" },
       { event: "checkout_link", name: "Morgan", packageName: "Business", price: "$2,499", url: "https://example.com/buy/preview", expires: "November 7, 2026" },
       { event: "follow_up", name: null, when: "on Tuesday afternoon", url: "https://example.com" },
       { event: "onboarding_instructions", name: "Morgan", url: "https://example.com/portal" },
@@ -714,7 +714,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
         subject: "Crestmont website packages and prices", heading: "Our website packages",
         paragraphs: [`Hello ${d.name}, thank you for calling Crestmont Website Development. Here are our published prices.`,
           ...d.packages.map((p) => `${p.name}: ${p.price}`),
-          ...(d.maintenance.length ? ["Maintenance plans (plan details are being finalised; a team member will confirm what each includes):", ...d.maintenance.map((m) => `${m.name}: ${m.monthly}`)] : []),
+          ...(d.maintenance.length ? ["Maintenance plans (what each includes is on our hosting and maintenance page):", ...d.maintenance.map((m) => `${m.name}: ${m.monthly}`)] : []),
           "Standard packages are paid 100% upfront. Custom development is quoted separately after a scoping conversation.", notMe],
         cta: { label: "Compare packages", url: d.url },
       };

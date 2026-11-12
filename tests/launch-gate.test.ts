@@ -241,6 +241,11 @@ test("[PAY-004] launch gate: no release path can bypass it — deployment record
   await stripe(t, "customer.subscription.created", subObject("sub_gate_ok", cu.organizationId, "active"));
   await stripe(t, "invoice.paid", firstInvoice("in_gate_ok", "sub_gate_ok"));
   assert.equal((await gate(t.db, projectId)).eligible, true);
+  // The customer is told their new plan is active (once, whichever subscription event comes first).
+  const activated = (await t.db.prepare(`SELECT COUNT(*) AS n FROM email_deliveries WHERE template = 'subscription_update' AND idempotency_key LIKE 'sub-activated:sub_gate_ok:%'`).first<{ n: number }>())!.n;
+  assert.equal(activated, 1);
+  await stripe(t, "customer.subscription.updated", subObject("sub_gate_ok", cu.organizationId, "active"));
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM email_deliveries WHERE template = 'subscription_update' AND idempotency_key LIKE 'sub-activated:sub_gate_ok:%'`).first<{ n: number }>())!.n, 1, "not repeated");
   assert.equal((await staff.post(`/staff/projects/${projectId}/deployments`, { url: "https://harbor.example" })).status, 303);
   const act = await one<{ launched_at: string | null; trigger: string }>(t.db, `SELECT launched_at, trigger FROM maintenance_activations WHERE project_id = ?`, projectId);
   assert.ok(act.launched_at, "the launch is recorded on the activation");

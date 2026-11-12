@@ -438,7 +438,7 @@ async function sendEmail(db: Db, deps: SalesFnDeps, b: Bound, a: { email_type: s
     case "package_information": {
       const p = publishedPricing(await effectivePrices(db, now));
       return done(await sendSalesMail(db, deps, b, "package_information", a.email, { template: "sales_info", data: { event: "package_information", name, packages: p.packages.map((x) => ({ name: x.name, price: x.price })),
-        maintenanceNote: `Maintenance plans (${p.maintenance.map((m) => m.monthly).join(", ")}) are being finalised; a team member will confirm what each includes.`, pricingUrl: `${deps.baseUrl}/pricing` } } as never, now), "Package information has been emailed.");
+        maintenanceNote: `Maintenance plans (${p.maintenance.map((m) => m.monthly).join(", ")}): every package requires a minimum plan, and what each plan includes is published on our hosting and maintenance page.`, pricingUrl: `${deps.baseUrl}/pricing` } } as never, now), "Package information has been emailed.");
     }
     case "checkout_link": {
       if (!a.package) return say(422, "Say which package the link is for.");
