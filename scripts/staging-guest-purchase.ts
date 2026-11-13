@@ -165,7 +165,7 @@ try {
         await c2.close();
       }
       // 6. Staff fulfilment access.
-      if (projects[0]) { const r = await staff.goto(`${BASE}/staff/projects/${projects[0].id}`); check(r?.status() === 200 && (await staff.locator("main").innerText()).includes(business.slice(0, 20)), `${id}: a Crestmont Owner opens the project for fulfilment`, `HTTP ${r?.status()}`); }
+      if (projects[0]) { const r = await staff.goto(`${BASE}/staff/projects/${projects[0].id}`); const st = await staff.locator("main").innerText(); check(r?.status() === 200 && (st.includes(run) || st.includes(pkg.name)), `${id}: a Crestmont Owner opens the project for fulfilment`, `HTTP ${r?.status()}`); }
     } catch (e) {
       check(false, `${id}: journey`, (e as Error).message.slice(0, 300));
       await p.screenshot({ path: `evidence/guest-purchase-${id}-failure.png`, fullPage: true }).catch(() => undefined);
