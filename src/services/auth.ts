@@ -539,7 +539,10 @@ export async function resetPassword(db: Db, token: string, newPassword: string, 
   const u = await db.prepare(`SELECT email FROM users WHERE id = ?`).bind(userId).first<{ email: string }>();
   const problems = passwordProblems(newPassword, u?.email);
   if (problems.length) throw new AuthError(problems.join(". "));
-  await db.prepare(`UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(await hashPassword(newPassword), userId).run();
+  // Using a link sent to the address proves the customer owns it: a guest buyer's account setup (and any reset)
+  // confirms the email, and their CRM contacts are linked as on confirmation.
+  await db.prepare(`UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL, email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?`).bind(await hashPassword(newPassword), nowIso(), userId).run();
+  if (u) await linkContactsToUser(db, userId, u.email);
   await invalidateResetTokens(db, userId);
   await revokeAllSessions(db, userId, null, userId);
   // Account recovery forgets every remembered browser (CREST-GAP-003): they must complete a sign-in again.

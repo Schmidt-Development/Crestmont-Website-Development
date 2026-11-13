@@ -30,6 +30,7 @@ import * as integ from "../services/integrations.ts";
 import { issueFounderOwnerInvitation, deliveryStatus, OwnerBootstrapError } from "../services/owner-bootstrap.ts";
 import { sendCertificationBatch, certParts, CERT_RUN_ID } from "../services/email-certification.ts";
 import { consumeOpsChallenge, type OpsChallengePurpose } from "../services/ops-challenge.ts";
+import { runDatabaseBackup } from "../services/db-backup.ts";
 
 // ───────────── Signed automation ─────────────
 
@@ -308,6 +309,18 @@ export function register(r: Router): void {
       catch (e) { out[id] = { status: "not_probed", detail: (e as Error).message.slice(0, 400) }; }
     }
     return jsonResponse(ctx, 200, out);
+  });
+  // Database backup now (src/services/db-backup.ts): the same dump the daily Cron Trigger writes, run on demand by the
+  // deploy pipeline so its restore drill always tests a fresh automated backup. Signed (staging) or a one-time database
+  // challenge (production). Returns the manifest only (key, sha256, sizes, row counts) — never data.
+  r.post("/api/ops/database-backup", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    const auth = await opsAuth(ctx, raw, "database_backup");
+    if (auth instanceof Response) return auth;
+    if (!ctx.storage || ctx.storage.kind !== "r2") return jsonResponse(ctx, 409, { error: "This environment has no R2 bucket bound: nothing can be backed up." });
+    const m = await runDatabaseBackup({ db: ctx.db, storage: ctx.storage, now: ctx.now });
+    await audit(ctx.db, { actorKind: "system", action: "database.backup_written", subjectType: "backup", details: { key: m.key, bytes: m.bytes, totalRows: m.totalRows } });
+    return jsonResponse(ctx, 200, m);
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.

@@ -36,6 +36,11 @@ import { computeTax, type TaxResult } from "../domain/tax.ts";
 import { usd } from "../services/finance-documents.ts";
 import { businessDate } from "../lib/business-time.ts";
 import { requireVerifiedForPayment } from "./verify-gate.ts";
+import { startGuestCustomer, openGuestSession, GuestCheckoutError } from "../services/guest-checkout.ts";
+import { SESSION_TTL_CUSTOMER_S } from "../services/auth.ts";
+import { cookie, hostCookieName, isSecure } from "../app/http.ts";
+import { verifyTurnstile } from "./api.ts";
+import { turnstileWidget } from "./public.ts";
 import { effectivePrices } from "../services/pricing-approvals.ts";
 import { staffCanSeeProject } from "../services/projects.ts";
 import { disabledOwnerFlag } from "../services/offboarding.ts";
@@ -797,22 +802,29 @@ function checkoutPackage(packageId: string) {
 /** GET /checkout/:packageId — the package's entry point: the intake first, then the review once the intake is complete. */
 async function checkoutEntry(ctx: AppContext, packageId: string) {
   const pkg = checkoutPackage(packageId);
+  // Guest checkout (2026-11-13): a new visitor starts the intake straight away; no account first.
+  if (!ctx.user) return redirect(ctx, `/checkout/${pkg.id}/intake${ctx.url.search}`);
   const org = requireCustomerOrg(ctx);
   const done = await completedOpenIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
   return redirect(ctx, `/checkout/${pkg.id}/${done ? "review" : "intake"}${ctx.url.search}`);
 }
 
-async function checkoutIntakePage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200, preview = false) {
+async function checkoutIntakePage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200, preview = false, guestAnswers: Record<string, string> | null = null) {
   const pkg = checkoutPackage(packageId);
-  const org = preview ? requireOwnerCheckoutPreview(ctx) : requireCustomerOrg(ctx);
-  const intake = preview ? null : await findIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
-  const a = intake?.answers ?? { business_name: org.organizationName, contact_name: ctx.user!.displayName, contact_email: ctx.user!.email };
-  const sections = await intakeSections(ctx, org.organizationId, pkg.id, a);
+  const guest = !preview && !ctx.user;
+  const org = preview ? requireOwnerCheckoutPreview(ctx) : guest ? null : requireCustomerOrg(ctx);
+  const intake = preview || !org ? null : await findIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
+  const a = intake?.answers ?? (org && !preview ? { business_name: org.organizationName, contact_name: ctx.user!.displayName, contact_email: ctx.user!.email } : guestAnswers ?? {});
+  const sections = await intakeSections(ctx, org?.organizationId ?? "", pkg.id, a);
   // Owner preview: the same form, sent with GET to the preview review (answers travel in the address, are shown back in
   // the order summary and are never stored). No CSRF token, no draft, no file upload, no submit to the real route.
   const form = preview
     ? html`<form method="get" action="${PREVIEW_BASE}/${pkg.id}/review" class="stack" data-testid="checkout-preview-intake">${sections}
 <div class="form-actions">${button("Continue to review (preview)")}</div></form>`
+    : guest ? html`<form method="post" action="/checkout/${pkg.id}/intake" enctype="multipart/form-data" class="stack" data-testid="guest-intake">${csrf(ctx)}${sections}
+${turnstileWidget(ctx)}<input type="hidden" name="intent" value="submit">
+<div class="form-actions">${button("Continue to review")}</div>
+<p class="faint">No account is needed to order. Your Crestmont account is created with this order: after your payment we email you a link to choose a password. Already a customer? <a href="/login?next=${encodeURIComponent(`/checkout/${pkg.id}`)}">Sign in</a>.</p></form>`
     : html`<form method="post" action="/checkout/${pkg.id}/intake" enctype="multipart/form-data" class="stack">${csrf(ctx)}${sections}
 <div class="form-actions">${button("Save draft", { variant: "secondary", name: "intent", value: "draft" })}${button("Continue to review", { name: "intent", value: "submit" })}</div></form>`;
   return htmlResponse(ctx, publicLayout(ctx, { title: `Website intake — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:860px">
@@ -876,6 +888,7 @@ ${previewBanner(ctx)}`));
 
 async function checkoutIntakePost(ctx: AppContext, packageId: string) {
   const pkg = checkoutPackage(packageId);
+  if (!ctx.user) return guestIntakePost(ctx, pkg.id);
   const org = requireCustomerOrg(ctx);
   const f = await ctx.form();
   const submit = str(f, "intent") === "submit";
@@ -887,6 +900,38 @@ async function checkoutIntakePost(ctx: AppContext, packageId: string) {
   } catch (e) {
     if (e instanceof OnboardingError) return checkoutIntakePage(ctx, packageId, e.errors, 422);
     if (e instanceof HttpError && (e.status === 409 || e.status === 422)) return checkoutIntakePage(ctx, packageId, [e.message], e.status);
+    throw e;
+  }
+}
+
+/**
+ * Guest checkout (2026-11-13): the first intake submit of a new visitor creates their account records from the intake
+ * (src/services/guest-checkout.ts), signs this browser in, and saves the intake under the new organization. An email
+ * that already has an account is never taken over: the visitor is asked to sign in.
+ */
+async function guestIntakePost(ctx: AppContext, packageId: string) {
+  const f = await ctx.form();
+  const typed = Object.fromEntries(["business_name", "contact_name", "contact_email", "contact_phone", "industry"].map((k) => [k, str(f, k)]));
+  const devNoWidget = !ctx.env.TURNSTILE_SITE_KEY && !ctx.env.TURNSTILE_SECRET && ctx.env.ENVIRONMENT === "development";
+  if (!devNoWidget && !(await verifyTurnstile(ctx, f.get("cf-turnstile-response")))) {
+    return checkoutIntakePage(ctx, packageId, ["Please complete the security check, then press Continue to review again."], 422, false, typed);
+  }
+  let started;
+  try { started = await startGuestCustomer(ctx.db, { email: typed.contact_email, name: typed.contact_name, businessName: typed.business_name }, ctx.ip); }
+  catch (e) { if (e instanceof GuestCheckoutError) return checkoutIntakePage(ctx, packageId, [e.message], e.status, false, typed); throw e; }
+  if (started.kind === "existing_account") {
+    return checkoutIntakePage(ctx, packageId, ["This email address already has a Crestmont account. Sign in to continue your order — your package choice is kept (use \u201cForgot password\u201d if you have not set one yet)."], 409, false, typed);
+  }
+  const token = await openGuestSession(ctx.db, started.userId, { ip: ctx.ip, userAgent: ctx.req.headers.get("user-agent"), maxAgeS: SESSION_TTL_CUSTOMER_S });
+  ctx.setCookies.push(cookie(hostCookieName("cm_session", isSecure(ctx)), token, { maxAge: SESSION_TTL_CUSTOMER_S, secure: isSecure(ctx), httpOnly: true, sameSite: "Lax" }));
+  try {
+    const res = await savePurchaseIntake(ctx, { organizationId: started.organizationId, userId: started.userId, target: { kind: "package", productId: checkoutPackage(packageId).id }, form: f, submit: true });
+    return res.completed
+      ? redirect(ctx, `/checkout/${packageId}/review`, { kind: "success", text: "Website intake saved. Review your scope and price before paying." })
+      : redirect(ctx, `/checkout/${packageId}/intake`, { kind: "info", text: "Your details are saved. Finish the intake to continue." });
+  } catch (e) {
+    // The account and this browser's session exist now, so the visitor continues as the new customer.
+    if (e instanceof OnboardingError) return redirect(ctx, `/checkout/${packageId}/intake`, { kind: "error", text: e.errors.join(" ") });
     throw e;
   }
 }
@@ -951,8 +996,8 @@ async function checkoutPost(ctx: AppContext, packageId: string) {
   const pkg = checkoutPackage(packageId);
   const org = requireCustomerOrg(ctx);
   if (!can(ctx.actor!, "customer.billing", { organizationId: org.organizationId })) throw new HttpError(403, "Only an account administrator can make purchases for this organization.");
-  const unverified = requireVerifiedForPayment(ctx); // CREST-GAP-031
-  if (unverified) return unverified;
+  // Guest checkout (2026-11-13): a package can be bought before the email is confirmed (no account first). Stripe's
+  // hosted Checkout takes the payment; the verified payment emails the account-setup link, whose use confirms the email.
   // No order and no Stripe session before the website intake is complete.
   if (!(await completedOpenIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id }))) {
     return redirect(ctx, `/checkout/${pkg.id}/intake`, { kind: "error", text: INTAKE_REQUIRED });
@@ -1209,11 +1254,16 @@ export function register(r: Router): void {
 
   r.get("/checkout/maintenance/:planId", (ctx, p) => maintenanceCheckoutPage(ctx, p.planId, false));
   r.post("/checkout/maintenance/:planId", (ctx, p) => maintenanceCheckoutPage(ctx, p.planId, true));
-  r.get("/checkout/:packageId", (ctx, p) => checkoutEntry(ctx, p.packageId));
-  r.post("/checkout/:packageId", (ctx, p) => checkoutPost(ctx, p.packageId));
-  r.get("/checkout/:packageId/intake", (ctx, p) => checkoutIntakePage(ctx, p.packageId));
-  r.post("/checkout/:packageId/intake", (ctx, p) => checkoutIntakePost(ctx, p.packageId));
-  r.get("/checkout/:packageId/review", (ctx, p) => checkoutReviewPage(ctx, p.packageId));
+  // A Crestmont staff account (the Owner included) has no customer organization: clicking a package used to answer
+  // 403 "This account is not linked to a customer organization" (found live, 2026-11-13). Staff are taken to the
+  // Owner preview of the same package instead; customers and signed-out visitors use the real checkout.
+  const staffToPreview = (ctx: AppContext, packageId: string, step: "intake" | "review") =>
+    ctx.user?.isStaff ? redirect(ctx, `${PREVIEW_BASE}/${checkoutPackage(packageId).id}/${step}`, { kind: "info", text: "You are signed in as Crestmont staff, so this is the Owner preview of the checkout. Customers and signed-out visitors buy through the real checkout." }) : null;
+  r.get("/checkout/:packageId", (ctx, p) => staffToPreview(ctx, p.packageId, "intake") ?? checkoutEntry(ctx, p.packageId));
+  r.post("/checkout/:packageId", (ctx, p) => staffToPreview(ctx, p.packageId, "review") ?? checkoutPost(ctx, p.packageId));
+  r.get("/checkout/:packageId/intake", (ctx, p) => staffToPreview(ctx, p.packageId, "intake") ?? checkoutIntakePage(ctx, p.packageId));
+  r.post("/checkout/:packageId/intake", (ctx, p) => staffToPreview(ctx, p.packageId, "intake") ?? checkoutIntakePost(ctx, p.packageId));
+  r.get("/checkout/:packageId/review", (ctx, p) => staffToPreview(ctx, p.packageId, "review") ?? checkoutReviewPage(ctx, p.packageId));
   // Owner preview of the same pages (read-only; see requireOwnerCheckoutPreview).
   r.get(PREVIEW_BASE, (ctx) => checkoutPreviewIndex(ctx));
   r.get(`${PREVIEW_BASE}/:packageId/intake`, (ctx, p) => checkoutIntakePage(ctx, p.packageId, [], 200, true));

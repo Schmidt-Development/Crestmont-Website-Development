@@ -1,5 +1,6 @@
 // Applies verified Stripe events (PAY-003). Webhooks are the only source of payment truth:
 // browser redirects never mark anything paid. Every handler is idempotent.
+import { passwordlessAdmins, newAccountSetupToken, SETUP_LINK_HOURS } from "./guest-checkout.ts";
 import type { AppContext } from "../app/context.ts";
 import { completeActivationForSubscription, recordPaymentFailure, recordPaymentRecovered } from "./maintenance-lifecycle.ts";
 import { nowIso, newId } from "../lib/db.ts";
@@ -11,7 +12,7 @@ import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
 import { ensureInvoiceNumber, ensureReceipt, invoiceLabel, receiptLabel } from "./document-numbers.ts";
 import { sendInternalNotification, sendInternalTemplate } from "./internal-notify.ts";
-import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
+import { MAINTENANCE_PLANS, PACKAGES } from "../domain/catalog.ts";
 import { syncProjectBuildSafe } from "./builds.ts";
 import { invoiceSubscription, invoicePaymentIntent, invoiceCharge, invoiceLacksPaymentLink, subscriptionPeriodEnd, chargeLatestRefund, chargeLacksRefundList, type ChargeRefund } from "../domain/stripe-shapes.ts";
 import { notifyRefundIssued, DISPUTE_CLOSED } from "./refunds.ts";
@@ -441,6 +442,19 @@ export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" |
       data: { amountCents: inv.amount_cents, next: !projectId ? "billing" : intakeDone ? "project" : "onboarding", url: `${ctx.baseUrl}/portal${!projectId ? "/billing" : intakeDone ? `/projects/${projectId}` : `/projects/${projectId}/onboarding`}`,
         ...(invNo ? { invoiceLabel: invoiceLabel(invNo) } : {}),
         ...(pay && rc ? { receiptLabel: receiptLabel(rc.seq), receiptUrl: `${ctx.baseUrl}/portal/billing/receipts/${pay.id}` } : {}) } });
+  }
+  // Guest checkout (2026-11-13): a buyer who has never chosen a password gets a single-use link to set one, once per
+  // paid order invoice. The token is only created when this email has not been sent yet (webhook retries, repair sweep).
+  if (!simulated && !opts.noReceipt && inv.order_id && (inv.milestone_kind === "full" || inv.milestone_kind === "deposit_50")) {
+    const product = (await db.prepare(`SELECT product_id FROM orders WHERE id = ?`).bind(inv.order_id).first<{ product_id: string | null }>())?.product_id ?? null;
+    const packageName = product ? (PACKAGES as Record<string, { name: string }>)[product]?.name ?? product : "website";
+    for (const u of await passwordlessAdmins(db, inv.organization_id)) {
+      const key = `account-setup:${inv.id}:${u.id}`;
+      if (await db.prepare(`SELECT 1 FROM email_deliveries WHERE idempotency_key = ?`).bind(key).first()) continue;
+      const token = await newAccountSetupToken(db, u.id);
+      await sendMail(ctx, { template: "account_setup", to: u.email, idempotencyKey: key,
+        data: { name: u.display_name, packageName, setupUrl: `${ctx.baseUrl}/password/reset?token=${token}&setup=1`, validDays: SETUP_LINK_HOURS / 24 } });
+    }
   }
   return { projectId, provisioned };
 }

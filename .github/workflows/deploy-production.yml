@@ -277,16 +277,33 @@ jobs:
       # labelled probe customer walks every package to a live Stripe Checkout session without paying
       # (scripts/production-purchase-probe.ts). If live checkout does not work, the release is rolled back like any
       # failed check, so customers are never shown an open but broken checkout.
-      - name: Live purchase flow probe (release that opens live payments; nothing is paid)
+      # Every release with live payments: a labelled probe customer walks package → intake → review → Pay to a genuine
+      # live Stripe Checkout session for Starter, Business and Premium (nothing is paid; the sessions expire).
+      - name: Live purchase flow probe (every package to a live Stripe Checkout session; nothing is paid)
         id: purchase_probe
-        if: steps.before.outputs.checkout == 'closed'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           if ! grep -qx 'live=yes' flags.txt; then echo "Live payments stay closed; no purchase probe."; exit 0; fi
-          BASE="$PRODUCTION_URL" D1_ENV=production EXPECT_MODE=live node --no-warnings scripts/production-purchase-probe.ts starter,business,premium | tee -a "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/review"
+          BASE="$PRODUCTION_URL" D1_ENV=production EXPECT_MODE=live SAVE_REVIEW_DIR="$RUNNER_TEMP/review" node --no-warnings scripts/production-purchase-probe.ts starter,business,premium | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
+
+      # The purchase pages on the LIVE site at phone, tablet and desktop widths in a real browser (the 320px plan-card
+      # fix): the public guest intake as served, and each package's review page as the probe customer received it, with
+      # the live site's own stylesheets and scripts. Cosmetic: reported, never a rollback.
+      - name: Live layout of the purchase pages (320 px to desktop)
+        if: always() && steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          node scripts/live-layout-check.mjs "$PRODUCTION_URL" "$RUNNER_TEMP/review" | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=${PIPESTATUS[0]}; rm -rf "$RUNNER_TEMP/review"; exit "$rc"
 
       - name: Production data report (read-only; no personal data)
         if: always() && steps.deploy.outcome == 'success'
@@ -295,6 +312,60 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node --no-warnings scripts/production-data-report.ts | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Criterion 5 (2026-11-13): backups that need no approval. The production Worker writes a full dump of its database
+      # to its own private bucket every day (Cron Trigger, src/services/db-backup.ts). Here the deploy asks the new
+      # Worker for one now (one-time database challenge), downloads it, checks its sha256 against the manifest,
+      # rehearses it locally with foreign keys enforced, restores it into a throw-away D1 database, compares every
+      # table's row count, and deletes the scratch database. Production is only read. Nothing from the dump is printed
+      # (the repository is public): failures name the stage and an error code only. A failed drill is reported loudly
+      # but does not roll back a release that passed its checks.
+      - name: Automated backup — fresh Worker backup restored into an isolated scratch database
+        id: backup_drill
+        if: always() && steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SCRATCH: crestmont-backup-drill-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          work=$(mktemp -d)
+          created=no
+          cleanup() { [ "$created" = yes ] && { $WRANGLER d1 delete "$SCRATCH" --skip-confirmation > /dev/null 2>&1 || $WRANGLER d1 delete "$SCRATCH" -y > /dev/null 2>&1 || echo "::warning::Scratch database $SCRATCH could not be deleted automatically; delete it in the Cloudflare dashboard."; }; rm -rf "$work"; }
+          trap cleanup EXIT
+          fail() { code=$(sed -e 's/\x1b\[[0-9;]*m//g' "$work/err.log" 2>/dev/null | grep -oE 'code: ?[0-9]+|SQLITE_[A-Z_]+|HTTP [0-9]{3}' | head -1); echo "::error title=Backup restore drill failed::Stage: $1${code:+ ($code)}. The release itself is live and unaffected."; echo "**Backup restore drill: FAILED at $1${code:+ ($code)}.**" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          node --no-warnings scripts/ops-challenge.ts --purpose database_backup --out-sql "$work/c.sql" --out-nonce "$work/nonce" > /dev/null
+          echo "::add-mask::$(cat "$work/nonce")"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null 2> "$work/err.log" || fail "write challenge"
+          http=$(curl -s -o "$work/manifest.json" -w '%{http_code}' --max-time 120 -X POST -H 'content-type: application/json' --data "{\"challenge\":\"$(cat "$work/nonce")\"}" "$PRODUCTION_URL/api/ops/database-backup" || echo 000)
+          [ "$http" = "200" ] || { echo "HTTP $http" > "$work/err.log"; fail "Worker backup"; }
+          key=$(node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(!/^_backups\/daily\/\d{4}-\d{2}-\d{2}\.sql$/.test(m.key)) process.exit(1); console.log(m.key)' "$work/manifest.json") || fail "manifest"
+          $WRANGLER r2 object get "crestmont-files-production/$key" --file "$work/dump.sql" --remote > /dev/null 2> "$work/err.log" || fail "download from R2"
+          node -e 'const fs=require("fs"),c=require("crypto");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const d=fs.readFileSync(process.argv[2]);const h=c.createHash("sha256").update(d).digest("hex");if(h!==m.sha256||d.length!==m.bytes){console.error("sha256 or size differs from the manifest");process.exit(1)}fs.writeFileSync(process.argv[3],JSON.stringify([{results:Object.keys(m.tables).map(name=>({name}))}]))' "$work/manifest.json" "$work/dump.sql" "$work/tables.json" 2> "$work/err.log" || fail "sha256 check"
+          node --no-warnings scripts/restore-drill.ts export-counts "$work/dump.sql" > "$work/source.json" 2> "$work/err.log" || fail "count dump rows"
+          node --no-warnings scripts/restore-drill.ts sanitize "$work/dump.sql" "$work/import.sql" > /dev/null 2> "$work/err.log" || fail "prepare import"
+          node --no-warnings scripts/restore-drill.ts rehearse "$work/dump.sql" "$work/import.sql" "$work/reference.json" > "$work/rehearse.log" 2> "$work/err.log" || fail "local rehearsal"
+          node --no-warnings scripts/restore-drill.ts sql "$work/tables.json" > "$work/count.sql"
+          $WRANGLER d1 create "$SCRATCH" > /dev/null 2> "$work/err.log" || fail "create scratch database"
+          created=yes
+          $WRANGLER d1 execute "$SCRATCH" --remote --file "$work/import.sql" --yes > /dev/null 2> "$work/err.log" || fail "restore into scratch database"
+          i=0; files=""
+          while IFS= read -r q; do [ -n "$q" ] || continue
+            $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$q" > "$work/restored-$i.json" 2> "$work/err.log" || fail "count restored rows"
+            files="$files${files:+,}$work/restored-$i.json"; i=$((i+1))
+          done < "$work/count.sql"
+          $WRANGLER d1 execute "$SCRATCH" --remote --json --command "PRAGMA foreign_key_check" > "$work/fk.json" 2> "$work/err.log" || fail "foreign_key_check"
+          $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$(node --no-warnings scripts/restore-drill.ts objects-sql)" > "$work/objects.json" 2> "$work/err.log" || fail "schema objects"
+          content=""
+          while IFS=$'\t' read -r t q; do [ -n "$t" ] || continue
+            $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$q" > "$work/content-$t.json" 2> "$work/err.log" || fail "read restored $t"
+            content="$content${content:+,}$t=$work/content-$t.json"
+          done < <(node --no-warnings scripts/restore-drill.ts content-sql "$work/reference.json")
+          mkdir -p evidence
+          result=$(node --no-warnings scripts/restore-drill.ts compare "$work/source.json" "$files" --reference "$work/reference.json" --fk "$work/fk.json" --objects "$work/objects.json" --content "$content" \
+            --commit "$TARGET_COMMIT" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-backup-drill" --out evidence/backup-restore-drill.json 2> "$work/err.log") || { echo "$result" | cut -c1-400 >> "$GITHUB_STEP_SUMMARY"; fail "row-count comparison"; }
+          summary=$(node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`${m.key} (${m.bytes} bytes, sha256 ${m.sha256.slice(0,16)}…, ${m.totalRows} rows in ${Object.keys(m.tables).length} tables, written ${m.createdAt})`)' "$work/manifest.json")
+          echo "**Backup restore drill: PASSED.** Automated Worker backup $summary restored into the isolated database $SCRATCH: $result" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Running Worker's AI website generation matches the released configuration
         id: gate

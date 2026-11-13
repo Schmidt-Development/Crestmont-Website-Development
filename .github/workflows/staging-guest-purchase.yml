@@ -1,0 +1,85 @@
+name: Staging guest purchase (browser, Stripe test card)
+
+# Founder launch closeout (2026-11-13), criteria 2, 3, 4 and 8: a completely new visitor buys each package on STAGING
+# without an account — intake, agreement, required maintenance plan, Stripe TEST-mode Checkout paid with Stripe's
+# published test card — then the run verifies exactly one paid order and project, the plan on the order, the receipt,
+# account-setup and internal emails accepted by Resend (buyer = a Resend test inbox), the setup link, the customer
+# portal and the Owner's staff access (scripts/staging-guest-purchase.ts). Staging only; never a live card.
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Packages to buy (comma-separated)"
+        type: string
+        default: "starter,business,premium"
+
+permissions:
+  contents: read
+
+jobs:
+  purchase:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: staging
+    concurrency:
+      group: deploy-staging   # it applies access SQL and writes staging rows
+      cancel-in-progress: false
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+      STAGING_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+
+      - name: Resolve the staging D1 database id (same injection as deploy-staging.yml, CREST-GAP-065)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          id=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-staging");process.stdout.write(r?r.uuid:"")})')
+          [ -n "$id" ] || { echo "::error::The crestmont-staging D1 database was not found."; exit 1; }
+          node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-staging", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
+          grep -q "$id" wrangler.toml && echo "Staging D1: $id"
+
+      - name: Apply staging access (same epoch, no rotation, so the same derived passwords)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCESS_EPOCH: "3"
+          MFA_ENCRYPTION_KEY: ${{ secrets.STAGING_MFA_ENCRYPTION_KEY }}
+        run: node --no-warnings scripts/staging-access.ts --url "$STAGING_URL" --out access
+
+      - name: Buy each package as a new visitor and verify provisioning, emails, portal and staff access
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+          E2E_ACCOUNTS_FILE: access/demo-accounts.md
+          PACKAGES: ${{ inputs.packages }}
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          mkdir -p evidence
+          node --no-warnings scripts/staging-guest-purchase.ts "$PACKAGES" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Failure screenshots (staging fixtures only)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-purchase-failures
+          path: evidence/guest-purchase-*.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove the credential files
+        if: always()
+        run: rm -f access/private.json access/access.json access/demo-accounts.md access/README.md

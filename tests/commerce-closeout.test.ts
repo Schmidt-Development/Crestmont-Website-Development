@@ -179,34 +179,35 @@ test("[PAY-003] webhook livemode guard: events whose livemode differs from the e
 
 // ───────────── CREST-GAP-031: verified email before buying or paying ─────────────
 
-test("[AUTH-001] unverified customers cannot check out or pay (403, nothing created, resend offered); verified customers reach Stripe", async () => {
+test("[AUTH-001] a customer whose email is not confirmed yet can buy a package (guest checkout, 2026-11-13) but cannot pay invoices or start maintenance until confirmed", async () => {
   const t = await app();
   const cu = await createCustomer(t.db, "unverified@fixture.example");
   await t.db.prepare(`UPDATE users SET email_verified_at = NULL WHERE id = ?`).bind(cu.id).run();
   const c = t.client(); await c.login(cu.email);
   assert.equal((await c.get("/portal/billing")).status, 200, "browsing stays allowed");
   await completeIntake(c, "starter"); // intake before payment (Founder requirement)
+  // Package checkout no longer requires the confirmation first (the former 403): the payment email confirms it later.
   const res = await c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
-  assert.equal(res.status, 403);
-  const page = await res.text();
+  assert.equal(res.status, 303);
+  assert.match(res.headers.get("location")!, /^https:\/\/checkout\.stripe\.com\//);
+  assert.equal(t.fake.checkouts.length, 1);
+  const inv = await createPackageOrder(t.db, cu.organizationId, "business", cu.id);
+  const refused = await c.post(`/portal/billing/invoices/${inv.invoiceId}/pay`);
+  assert.equal(refused.status, 403);
+  const page = await refused.text();
   assert.match(page, /Confirm your email/);
   assert.match(page, /action="\/verify-email\/resend"/);
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM orders`), 0);
-  assert.equal(t.fake.checkouts.length, 0);
-  const inv = await createPackageOrder(t.db, cu.organizationId, "business", cu.id);
-  assert.equal((await c.post(`/portal/billing/invoices/${inv.invoiceId}/pay`)).status, 403);
-  assert.equal(t.fake.checkouts.length, 0, "no session for an unverified payer");
+  assert.equal(t.fake.checkouts.length, 1, "no session for an unverified invoice payer");
   // Entitlements are approved (CAT-006/BLK-010), so maintenance is no longer refused by that gate — an
   // unverified customer is now refused by the verification gate itself, which is the point of this test.
   assert.equal((await c.post("/checkout/maintenance/essential", { terms: "1" })).status, 403, "an unverified customer cannot buy maintenance either");
-  assert.equal(t.fake.checkouts.length, 0, "and no Stripe session was created for them");
+  assert.equal(t.fake.checkouts.length, 1, "and no Stripe session was created for them");
   assert.equal((await c.post("/verify-email/resend")).status, 303);
   assert.equal((await lastEmail(t.db, cu.email))?.template, "verification");
-  // Verified → redirected to the Stripe fixture URL.
+  // Verified → the invoice can be paid.
   await t.db.prepare(`UPDATE users SET email_verified_at = ? WHERE id = ?`).bind(nowIso(), cu.id).run();
-  const ok = await c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
-  assert.equal(ok.status, 303);
-  assert.match(ok.headers.get("location")!, /^https:\/\/checkout\.stripe\.com\//);
+  const ok = await c.post(`/portal/billing/invoices/${inv.invoiceId}/pay`);
+  assert.equal(ok.status, 303, "no longer refused (it continues to the intake this business order still needs)");
 });
 
 // ───────────── CREST-GAP-006 / 037 / 091 / 038: paid invoice follow-ups ─────────────

@@ -92,6 +92,8 @@ try {
     check(saved.status === 303 && (saved.headers.get("location") ?? "").includes(`/checkout/${id}/review`), `${id}: intake saves and continues to review`, `HTTP ${saved.status} → ${saved.headers.get("location")}`);
     const review = await b.follow(`/checkout/${id}/review`); const rh = await review.text();
     check(review.status === 200 && rh.includes(price), `${id}: review shows the server-side price ${price}`);
+    // The live review page's HTML for the phone-width layout check (scripts/live-layout-check.mjs); stays on the runner.
+    if (process.env.SAVE_REVIEW_DIR) writeFileSync(join(process.env.SAVE_REVIEW_DIR, `review-${id}.html`), rh.replace(/name="_csrf" value="[^"]*"/g, 'name="_csrf" value=""'), { mode: 0o600 });
     const plan = MINIMUM_PLAN_FOR_PACKAGE[id as keyof typeof MINIMUM_PLAN_FOR_PACKAGE];
     check(new RegExp(`name="maintenance_plan" value="${plan}"`).test(rh) && /data-testid="checkout-maintenance-plan"/.test(rh), `${id}: required maintenance plan offered (minimum ${plan})`);
     check(/name="terms"/.test(rh) && /Development Agreement/.test(rh) && /Pay \$/.test(rh) && !/checkout-payment-closed/.test(rh), `${id}: agreement and Pay button present (checkout open)`);

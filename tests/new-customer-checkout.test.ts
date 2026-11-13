@@ -8,10 +8,13 @@ import { createTestApp, lastEmail, TEST_PASSWORD } from "./support/app.ts";
 test("[AUTH-001] [PAY-001] a new customer keeps the chosen package through registration, email confirmation and sign-in, and arrives at its intake", async () => {
   const t = await createTestApp();
   const c = t.client();
+  // A signed-out visitor now starts the guest checkout; the intake offers "Sign in" for existing customers, and the
+  // register-first path below still keeps the package.
   const entry = await c.get("/checkout/business");
   assert.equal(entry.status, 303);
-  const login = entry.headers.get("location")!;
-  assert.equal(login, "/login?next=%2Fcheckout%2Fbusiness");
+  assert.equal(entry.headers.get("location"), "/checkout/business/intake");
+  assert.ok((await (await c.get("/checkout/business/intake")).text()).includes(`href="/login?next=%2Fcheckout%2Fbusiness"`));
+  const login = "/login?next=%2Fcheckout%2Fbusiness";
   const lp = await (await c.get(login)).text();
   assert.ok(lp.includes(`href="/register?next=%2Fcheckout%2Fbusiness"`), "Create an account keeps the package");
   const rp = await (await c.get("/register?next=%2Fcheckout%2Fbusiness")).text();

@@ -60,6 +60,9 @@ test("[AUTH-007] anonymous visitors are denied on every non-public route (redire
     if (kind === "signed" || kind === "webhook") ok = res.status === 401;
     else if (kind === "token") ok = res.status < 500; // the URL token is the capability; forged tokens are checked below
     else if (r.spec.api) ok = res.status === 401;
+    // Guest checkout: a signed-out visitor starts the purchase (entry → intake page; an empty intake submit is refused
+    // with 422 before anything is created). The no-state-change assertion below still applies.
+    else if (kind === "customer" && r.spec.access.guest) ok = r.method === "GET" ? res.status === 200 || (res.status === 303 && /^\/checkout\//.test(res.headers.get("location") ?? "")) : res.status === 422;
     else ok = toLogin(res);
     if (!ok) problems.push(`${r.key} → ${await describe(res)}`);
   }
@@ -126,7 +129,9 @@ test("[AUTH-007] customers are denied every /staff route; staff are denied custo
     }
     if (k.kind === "customer" && !k.staffToo) {
       const res = await call(w.staff.owner.c, r, pathFor(w, r, w.a));
-      if (res.status !== 403) problems.push(`staff owner: ${r.key} → ${await describe(res)}`);
+      // Package checkout sends staff to the Owner preview (no customer organization is ever used or created).
+      const ok = k.staffPreview ? res.status === 303 && /^\/staff\/checkout-preview\//.test(res.headers.get("location") ?? "") : res.status === 403;
+      if (!ok) problems.push(`staff owner: ${r.key} → ${await describe(res)}`);
     }
     if (k.kind === "customer" && k.admin && r.method === "POST") {
       const res = await call(w.a.member.c, r, pathFor(w, r, w.a));
