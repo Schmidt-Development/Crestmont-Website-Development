@@ -99,6 +99,14 @@ export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch 
     if (missing.length) return `no /checkout link for: ${missing.join(", ")}`;
     return /href="\/quote\?package=(starter|business)"/.test(b) ? "a standard package still links to the quote form" : null;
   });
+  // Owner, 2026-11-13: the four departmental mailboxes stay in their contexts; no personal Gmail on a public page.
+  await check("email", "public pages show support@ and legal@ and no personal Gmail address", true, async () => {
+    let all = "";
+    for (const path of ["/", "/pricing", "/contact", "/legal/privacy", "/legal/terms"]) { const r = await req("GET", path); all += await text(r); }
+    if (/@gmail\.com/i.test(all)) return "a Gmail address appears on a public page";
+    const missing = ["support", "legal"].filter((m) => !all.includes(`${m}@crestmontwebsitedevelopment.com`));
+    return missing.length ? `missing on the public pages: ${missing.map((m) => `${m}@`).join(", ")}` : null;
+  });
   await check("purchase", "custom projects keep the quote form (/quote?package=custom)", true, async () => {
     const r = await req("GET", "/quote?package=custom");
     await text(r);

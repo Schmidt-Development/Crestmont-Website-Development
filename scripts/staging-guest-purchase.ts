@@ -47,27 +47,58 @@ const run = randomBytes(3).toString("hex");
 const browser = await chromium.launch();
 const internalSince = new Date(Date.now() - 5_000).toISOString();
 
-async function payOnStripe(p: any, email: string, name: string, sessionUrl: string) {
+async function payOnStripe(p: any, email: string, name: string, sessionUrl: string, cardNo = "4242 4242 4242 4242"): Promise<"paid" | "declined"> {
   // Test mode is proven by the session Crestmont created (its redirect to Stripe), not by the address Stripe's page
   // ends up on, which Stripe may rewrite. Anything but a cs_test_ session is refused before a card is entered.
   if (!/^https:\/\/checkout\.stripe\.com\/.*cs_test_/.test(sessionUrl)) throw new Error("Crestmont did not create a Stripe TEST-mode session; refusing to enter a card");
   await p.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 60_000 });
-  const cardNumber = p.locator("#cardNumber");
-  const cardButton = p.locator('[data-testid="card-accordion-item-button"]').first();
-  await Promise.any([cardNumber.waitFor({ state: "visible", timeout: 30_000 }), cardButton.waitFor({ state: "attached", timeout: 30_000 })]).catch(() => undefined);
-  if (!(await cardNumber.isVisible()) && (await cardButton.count())) await cardButton.dispatchEvent("click");
-  await cardNumber.waitFor({ state: "visible", timeout: 30_000 });
-  await cardNumber.fill("4242 4242 4242 4242");
-  await p.locator("#cardExpiry").fill("12 / 34");
-  await p.locator("#cardCvc").fill("123");
-  if (await p.locator("#billingName").count()) await p.locator("#billingName").fill(name);
-  if (await p.locator("#billingPostalCode").isVisible().catch(() => false)) await p.locator("#billingPostalCode").fill("48933");
-  if (await p.locator("#email").isEditable().catch(() => false)) await p.locator("#email").fill(email);
+  await p.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => undefined);
+  // Stripe's hosted page changes layout over time: the card field may be on the page or inside a frame, and Card may
+  // first have to be chosen in a payment-method list. Look everywhere, by stable attributes (autocomplete cc-*).
+  const CARD = 'input[autocomplete="cc-number"], #cardNumber, input[name="cardnumber"], input[name="number"]';
+  const findCard = async () => { for (const f of p.frames()) { const l = f.locator(CARD).first(); if (await l.isVisible().catch(() => false)) return { f, l }; } return null; };
+  let card = await findCard();
+  for (let i = 0; !card && i < 20; i++) {
+    const choices = [p.locator('[data-testid="card-accordion-item-button"]').first(), p.getByRole("radio", { name: /^card$/i }).first(), p.getByRole("button", { name: /^card$/i }).first(),
+      p.locator('[data-testid*="card" i]').first(), p.getByText(/^card$/i).first()];
+    for (const c of choices) { if (await c.count().catch(() => 0)) { await c.click({ timeout: 3_000 }).catch(() => c.dispatchEvent("click").catch(() => undefined)); break; } }
+    await p.waitForTimeout(1_500);
+    card = await findCard();
+  }
+  if (!card) {
+    // What the page offers, for the next fix: field and button NAMES only (no values; a test page).
+    const shape = [];
+    for (const f of p.frames()) {
+      const d = await f.evaluate(() => ({
+        inputs: [...document.querySelectorAll("input,select")].slice(0, 30).map((e) => [e.id, (e as HTMLInputElement).name, e.getAttribute("autocomplete"), e.getAttribute("type")].filter(Boolean).join("/")),
+        buttons: [...document.querySelectorAll("button,[role=button],[role=radio]")].slice(0, 20).map((e) => (e.getAttribute("data-testid") || (e.textContent ?? "").trim()).slice(0, 40)),
+      })).catch(() => null);
+      if (d) shape.push(`${new URL(f.url()).host}${new URL(f.url()).pathname.slice(0, 24)} inputs[${d.inputs.join(", ")}] buttons[${d.buttons.join(" | ")}]`);
+    }
+    throw new Error(`no card number field on Stripe's page; page shape: ${shape.join(" ;; ").slice(0, 1500)}`);
+  }
+  const { f } = card;
+  const field = (sel: string) => f.locator(sel).first();
+  await card.l.fill(cardNo);
+  await field('input[autocomplete="cc-exp"], #cardExpiry, input[name="exp-date"], input[name="expiry"]').fill("12 / 34");
+  await field('input[autocomplete="cc-csc"], #cardCvc, input[name="cvc"]').fill("123");
+  const nameField = p.locator('#billingName, input[autocomplete="cc-name"]').first();
+  if (await nameField.isVisible().catch(() => false)) await nameField.fill(name);
+  const zip = p.locator('#billingPostalCode, input[autocomplete="postal-code"]').first();
+  if (await zip.isVisible().catch(() => false)) await zip.fill("48933");
+  const emailField = p.locator('#email, input[autocomplete="email"]').first();
+  if (await emailField.isEditable().catch(() => false) && !(await emailField.inputValue().catch(() => ""))) await emailField.fill(email);
   const link = p.locator("#enableStripePass");
   if ((await link.count()) && (await link.isChecked())) await link.dispatchEvent("click");
   if ((await link.count()) && (await link.isChecked())) await link.setChecked(false, { force: true });
-  await p.locator('[data-testid="hosted-payment-submit-button"], .SubmitButton').first().click();
+  await p.locator('[data-testid="hosted-payment-submit-button"], .SubmitButton, button[type="submit"]').first().click();
+  if (cardNo !== "4242 4242 4242 4242") {
+    // Stripe's published decline card: Checkout must refuse it and stay on its own page.
+    await p.getByText(/declined/i).first().waitFor({ state: "visible", timeout: 45_000 });
+    return "declined";
+  }
   await p.waitForURL((u: URL) => u.href.startsWith(BASE), { timeout: 90_000 });
+  return "paid";
 }
 
 async function fillForm(p: any, answers: Record<string, string>) {
@@ -178,9 +209,50 @@ try {
       // 6. Staff fulfilment access.
       if (projects[0]) { const r = await staff.goto(`${BASE}/staff/projects/${projects[0].id}`); const st = await staff.locator("main").innerText(); check(r?.status() === 200 && (st.includes(run) || st.includes(pkg.name)), `${id}: a Crestmont Owner opens the project for fulfilment`, `HTTP ${r?.status()}`); }
     } catch (e) {
-      check(false, `${id}: journey`, (e as Error).message.slice(0, 300));
+      check(false, `${id}: journey`, (e as Error).message.slice(0, 1800));
       await p.screenshot({ path: `evidence/guest-purchase-${id}-failure.png`, fullPage: true }).catch(() => undefined);
     } finally { await ctx.close(); }
+  }
+  // Returning customer: an email that already has an account is never taken over; the visitor is asked to sign in.
+  if (pkgs.includes("starter")) {
+    const ctx = await browser.newContext(); const p = await ctx.newPage();
+    try {
+      await p.goto(`${BASE}/checkout/business/intake`);
+      await fillForm(p, { business_name: `[Guest purchase ${run}] returning`, contact_name: "Guest Purchase Probe", contact_email: `delivered+guest-${run}-starter@resend.dev`, contact_phone: "(517) 555-0100", industry: "Automated check",
+        business_description: "Automated staging purchase check; not a real order.", goals: "Verify a returning customer.", target_audience: "None.", has_branding: "no", brand_style: "None", design_preferences: "None", pages: "Home",
+        content_source: "crestmont_draft", images_source: "licensed", domain_status: "need", domain_wishes: "none.example", hosting: "crestmont", special_instructions: "AUTOMATED STAGING CHECK." });
+      if (await p.locator(".cf-turnstile").count()) { const t = p.locator('[name="cf-turnstile-response"]').first(); const end = Date.now() + 30_000; while (!(await t.inputValue().catch(() => "")) && Date.now() < end) await p.waitForTimeout(500); }
+      const resp = p.waitForResponse((r: any) => r.request().method() === "POST" && new URL(r.url()).pathname === "/checkout/business/intake", { timeout: 30_000 });
+      await p.locator('form[data-testid="guest-intake"] button[type=submit]').click();
+      const r = await resp;
+      check(r.status() === 409 && /already has a Crestmont account/.test(await p.locator("main").innerText()), "returning customer: an existing account's email is asked to sign in, never taken over", `HTTP ${r.status()}`);
+    } catch (e) { check(false, "returning customer", (e as Error).message.slice(0, 400)); } finally { await ctx.close(); }
+  }
+  // Failed payment: Stripe's decline card is refused on Stripe's page; nothing is provisioned for that buyer.
+  {
+    const ctx = await browser.newContext(); const p = await ctx.newPage();
+    const email = `delivered+guest-${run}-declined@resend.dev`;
+    try {
+      await p.goto(`${BASE}/checkout/starter/intake`);
+      await fillForm(p, { business_name: `[Guest purchase ${run}] declined card`, contact_name: "Guest Purchase Probe", contact_email: email, contact_phone: "(517) 555-0100", industry: "Automated check",
+        business_description: "Automated staging purchase check; not a real order.", goals: "Verify a declined payment.", target_audience: "None.", has_branding: "no", brand_style: "None", design_preferences: "None", pages: "Home",
+        content_source: "crestmont_draft", images_source: "licensed", domain_status: "need", domain_wishes: "none.example", hosting: "crestmont", special_instructions: "AUTOMATED STAGING CHECK." });
+      if (await p.locator(".cf-turnstile").count()) { const t = p.locator('[name="cf-turnstile-response"]').first(); const end = Date.now() + 30_000; while (!(await t.inputValue().catch(() => "")) && Date.now() < end) await p.waitForTimeout(500); }
+      await Promise.all([p.waitForURL((u: URL) => u.pathname === "/checkout/starter/review", { timeout: 30_000 }), p.locator('form[data-testid="guest-intake"] button[type=submit]').click()]);
+      await p.locator('[name="maintenance_plan"][value="essential"]').check();
+      await p.locator('[name="terms"]').check();
+      const payResponse = p.waitForResponse((r: any) => r.request().method() === "POST" && new URL(r.url()).pathname === "/checkout/starter", { timeout: 30_000 });
+      await p.locator('button:has-text("Pay $")').click();
+      const sessionUrl = (await payResponse).headers()["location"] ?? "";
+      const outcome = await payOnStripe(p, email, "Guest Purchase Probe", sessionUrl, "4000 0000 0000 0002");
+      await sleep(15_000);
+      const u = d1(`SELECT id FROM users WHERE email = ${q(email)}`)[0];
+      const orders = u ? d1(`SELECT o.status FROM orders o JOIN memberships m ON m.organization_id = o.organization_id WHERE m.user_id = ${q(u.id)}`) : [];
+      const projects = u ? d1(`SELECT p.id FROM projects p JOIN memberships m ON m.organization_id = p.organization_id WHERE m.user_id = ${q(u.id)}`) : [];
+      const setups = d1(`SELECT id FROM email_deliveries WHERE to_email = ${q(email)} AND template = 'account_setup'`);
+      check(outcome === "declined" && orders.every((o) => o.status !== "paid") && projects.length === 0 && setups.length === 0,
+        "failed payment: Stripe declines the card, the order stays unpaid, no project and no account-setup email", JSON.stringify({ outcome, orders: orders.map((o) => o.status), projects: projects.length, setups: setups.length }));
+    } catch (e) { check(false, "failed payment", (e as Error).message.slice(0, 600)); } finally { await ctx.close(); }
   }
   const internal = d1(`SELECT status, provider_message_id AS pm FROM email_deliveries WHERE template = 'internal_alert' AND created_at >= ${q(internalSince)}`);
   check(internal.length >= 1 && internal.every((x) => x.pm), "internal new-order notices sent to the Crestmont operations mailbox and accepted by Resend", `${internal.length} notice(s)`);

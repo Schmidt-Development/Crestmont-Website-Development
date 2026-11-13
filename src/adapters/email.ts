@@ -6,6 +6,28 @@
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 
+/**
+ * Crestmont's departmental mailboxes (Owner, 2026-11-13 — locked; never consolidate). Every customer email is sent from
+ * support@ under the business name; Reply-To sends the customer's answer to the department the message is about:
+ * billing@ for invoices, payments, subscriptions and refunds, sales@ for quotes, proposals and sales follow-ups, support@
+ * for everything else. legal@ is the address agreements and policies name for legal notices (src/services/agreements.ts).
+ */
+export const MAILBOXES = {
+  support: "support@crestmontwebsitedevelopment.com",
+  sales: "sales@crestmontwebsitedevelopment.com",
+  billing: "billing@crestmontwebsitedevelopment.com",
+  legal: "legal@crestmontwebsitedevelopment.com",
+} as const;
+export const DEFAULT_EMAIL_FROM = `Crestmont Website Development <${MAILBOXES.support}>`;
+const BILLING_TEMPLATES = new Set(["receipt", "invoice", "failed_payment", "subscription_update", "refund_request", "refund_decision", "dispute_opened"]);
+const SALES_TEMPLATES = new Set(["quote_sent", "proposal_accepted", "sales_info", "lead_received", "consultation", "voice_followup"]);
+/** The Reply-To mailbox for a template (see MAILBOXES). */
+export function replyToFor(template: string): string {
+  if (BILLING_TEMPLATES.has(template)) return MAILBOXES.billing;
+  if (SALES_TEMPLATES.has(template)) return MAILBOXES.sales;
+  return MAILBOXES.support;
+}
+
 export interface EmailMessage { to: string; subject: string; html: string; text: string; template: string; idempotencyKey: string }
 export interface EmailResult { deliveryId: string; status: "queued" | "sent" | "failed" | "duplicate" | "suppressed"; provider: "resend" | "dev-outbox" }
 
@@ -125,7 +147,7 @@ export class ResendEmail implements EmailAdapter {
       const r = await this.fetchImpl("https://api.resend.com/emails", {
         method: "POST",
         headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json", "idempotency-key": msg.idempotencyKey },
-        body: JSON.stringify({ from: this.from, to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text,
+        body: JSON.stringify({ from: this.from, reply_to: replyToFor(msg.template), to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text,
           ...(this.environment ? { tags: [{ name: "environment", value: this.environment }] } : {}) }),
       });
       const body = (await r.json().catch(() => ({}))) as { id?: string; message?: string };

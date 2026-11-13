@@ -18,7 +18,9 @@ type Sent = { template: string; probe: "delivered" | "bounced"; deliveryId: stri
 const sentAll: Sent[] = [];
 for (let part = 0, parts = 1; part < parts; part++) {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  const body = JSON.stringify(nonce ? { challenge: nonce, part } : { runId, part });
+  // MAILBOXES=1: the four departmental mailboxes instead of the template matrix (one request).
+  const mailboxes = process.env.MAILBOXES === "1";
+  const body = JSON.stringify({ ...(nonce ? { challenge: nonce } : { runId }), ...(mailboxes ? { mailboxes: true } : { part }) });
   if (!nonce) headers["x-crestmont-signature"] = await signEvidence(secret, body);
   const res = await fetch(`${base}/api/ops/email-certification`, { method: "POST", headers, body, signal: AbortSignal.timeout(120_000) });
   const out = await res.json().catch(() => ({})) as { error?: string; sent?: Sent[]; parts?: number };
@@ -33,12 +35,12 @@ console.log(`Run ${runId} on ${envLabel}: ${out.sent.length} messages handed to 
 const source = process.env.D1_DATABASE ? d1Source(process.env.D1_DATABASE, process.env.D1_ENV ?? "production") : signedSource(base, secret);
 const states = await follow(out.sent.filter((s) => s.deliveryId).map((s) => ({ id: s.deliveryId, probe: s.probe })), source, { log: console.log });
 const ok = (probe: string, s?: { status: string; accepted: boolean }) => !!s && s.accepted && (probe === "bounced" ? s.status === "bounced" : s.status === "delivered");
-const lines = ["| Template | Probe | Resend accepted | Delivery result | Webhook events | Result |", "|---|---|---|---|---|---|",
+const lines = [process.env.MAILBOXES === "1" ? "| Mailbox | Probe | Resend accepted | Delivery result | Webhook events | Result |" : "| Template | Probe | Resend accepted | Delivery result | Webhook events | Result |", "|---|---|---|---|---|---|",
   ...out.sent.map((x) => { const s = states.get(x.deliveryId); const err = s?.error || x.error || ""; return `| ${x.template} | ${x.probe} | ${s?.accepted ? "yes" : "no"} | ${s?.status ?? x.status} | ${s?.events.join(" → ") || "none"} | ${ok(x.probe, s) ? "PASS" : `FAIL${err ? ` (${err.slice(0, 80).replace(/\|/g, "/")})` : ""}`} |`; })];
 const passed = out.sent.filter((x) => ok(x.probe, states.get(x.deliveryId))).length;
 const summary = `${passed}/${out.sent.length} email delivery checks passed on ${envLabel} (run ${runId})`;
 console.log(lines.join("\n"));
 console.log(`\n${summary}`);
-if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Email delivery certification — ${envLabel}\n\n${lines.join("\n")}\n\n${summary}\n`);
+if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ${process.env.MAILBOXES === "1" ? "Mailbox delivery check" : "Email delivery certification"} — ${envLabel}\n\n${lines.join("\n")}\n\n${summary}\n`);
 console.log(`::${passed === out.sent.length ? "notice" : "error"} title=Email delivery certification::${summary}`);
 process.exit(passed === out.sent.length ? 0 : 1);
