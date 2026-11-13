@@ -11,7 +11,8 @@ import { REVIEW_CHECKLIST } from "../src/routes/email-review.ts";
 const variants = EMAIL_TEMPLATES.flatMap((t) => (TEMPLATES[t] as TemplateDef<EmailTemplate>).samples.map((_, i) => [t, i] as const));
 const render = (t: EmailTemplate, i: number) => {
   const def = TEMPLATES[t] as TemplateDef<EmailTemplate>;
-  return renderTemplate(t, def.samples[i] as never, identityFrom({}), def.category === "marketing" ? "https://example.com/unsubscribe/preview" : undefined);
+  // Business settings as migrations leave them (0106 sets the public contact email to support@).
+  return renderTemplate(t, def.samples[i] as never, identityFrom({ "contact.email": "support@crestmontwebsitedevelopment.com" }), def.category === "marketing" ? "https://example.com/unsubscribe/preview" : undefined);
 };
 /** Internal record ids (prj_…, inv_…) and Stripe object ids (pi_…, cs_…) as they would appear in words a customer reads. */
 const INTERNAL_ID = /\b(prj|inv|ord|pay|usr|ses|mact|tkt|ld|ct|apt|scall|evt|aud|ntf|rcpt|pi|cs|ch|re|in|sub|cus|pm|seti|txn|dp|du)_[A-Za-z0-9]{3,}\b/;
