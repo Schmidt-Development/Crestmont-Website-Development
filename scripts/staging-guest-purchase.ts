@@ -102,8 +102,14 @@ async function payOnStripe(p: any, email: string, name: string, sessionUrl: stri
   await submit.click();
   if (cardNo !== "4242 4242 4242 4242") {
     // Stripe's published decline card: Checkout must refuse it and stay on its own page.
-    await p.getByText(/declined/i).first().waitFor({ state: "visible", timeout: 45_000 });
-    return "declined";
+    // The decline message appears inside Stripe's payment frame (or on the page): look in every frame.
+    const end = Date.now() + 60_000;
+    for (;;) {
+      for (const fr of [p.mainFrame(), ...p.frames()]) if (await fr.getByText(/declined/i).first().isVisible().catch(() => false)) return "declined";
+      if (p.url().startsWith(BASE)) return "paid"; // must never happen with the decline card
+      if (Date.now() > end) throw new Error("Stripe showed no decline message within 60s");
+      await p.waitForTimeout(1_000);
+    }
   }
   await p.waitForURL((u: URL) => u.href.startsWith(BASE), { timeout: 90_000 });
   return "paid";
