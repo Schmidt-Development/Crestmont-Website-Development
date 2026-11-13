@@ -59,9 +59,11 @@ async function payOnStripe(p: any, email: string, name: string, sessionUrl: stri
   const findCard = async () => { for (const f of p.frames()) { const l = f.locator(CARD).first(); if (await l.isVisible().catch(() => false)) return { f, l }; } return null; };
   let card = await findCard();
   for (let i = 0; !card && i < 20; i++) {
-    const choices = [p.locator('[data-testid="card-accordion-item-button"]').first(), p.getByRole("radio", { name: /^card$/i }).first(), p.getByRole("button", { name: /^card$/i }).first(),
-      p.locator('[data-testid*="card" i]').first(), p.getByText(/^card$/i).first()];
-    for (const c of choices) { if (await c.count().catch(() => 0)) { await c.click({ timeout: 3_000 }).catch(() => c.dispatchEvent("click").catch(() => undefined)); break; } }
+    // Stripe Checkout (2026) renders the Payment Element in a js.stripe.com frame: Card is an accordion button there.
+    for (const fr of [p.mainFrame(), ...p.frames()]) {
+      const c = fr.locator('[data-testid="card-accordion-item-button"], button, [role="button"], [role="radio"]').filter({ hasText: /^\s*Card/ }).first();
+      if (await c.count().catch(() => 0)) { await c.click({ timeout: 3_000 }).catch(() => c.dispatchEvent("click").catch(() => undefined)); break; }
+    }
     await p.waitForTimeout(1_500);
     card = await findCard();
   }
@@ -77,21 +79,27 @@ async function payOnStripe(p: any, email: string, name: string, sessionUrl: stri
     }
     throw new Error(`no card number field on Stripe's page; page shape: ${shape.join(" ;; ").slice(0, 1500)}`);
   }
-  const { f } = card;
-  const field = (sel: string) => f.locator(sel).first();
+  // A field by stable attributes, in whichever frame shows it (card frame first).
+  const visible = async (sel: string) => { for (const fr of [card!.f, p.mainFrame(), ...p.frames()]) { const l = fr.locator(sel).first(); if (await l.isVisible().catch(() => false)) return l; } return null; };
   await card.l.fill(cardNo);
-  await field('input[autocomplete="cc-exp"], #cardExpiry, input[name="exp-date"], input[name="expiry"]').fill("12 / 34");
-  await field('input[autocomplete="cc-csc"], #cardCvc, input[name="cvc"]').fill("123");
-  const nameField = p.locator('#billingName, input[autocomplete="cc-name"]').first();
-  if (await nameField.isVisible().catch(() => false)) await nameField.fill(name);
-  const zip = p.locator('#billingPostalCode, input[autocomplete="postal-code"]').first();
-  if (await zip.isVisible().catch(() => false)) await zip.fill("48933");
-  const emailField = p.locator('#email, input[autocomplete="email"]').first();
-  if (await emailField.isEditable().catch(() => false) && !(await emailField.inputValue().catch(() => ""))) await emailField.fill(email);
-  const link = p.locator("#enableStripePass");
-  if ((await link.count()) && (await link.isChecked())) await link.dispatchEvent("click");
-  if ((await link.count()) && (await link.isChecked())) await link.setChecked(false, { force: true });
-  await p.locator('[data-testid="hosted-payment-submit-button"], .SubmitButton, button[type="submit"]').first().click();
+  await (await visible('input[autocomplete="cc-exp"], #cardExpiry, input[name="exp-date"], input[name="expiry"]'))?.fill("12 / 34");
+  await (await visible('input[autocomplete="cc-csc"], #cardCvc, input[name="cvc"]'))?.fill("123");
+  const nameField = await visible('#billingName, input[autocomplete="cc-name"], input[name="name"][autocomplete*="name"]');
+  if (nameField && !(await nameField.inputValue().catch(() => ""))) await nameField.fill(name);
+  const zip = await visible('#billingPostalCode, input[autocomplete="postal-code"], input[name="postalCode"]');
+  if (zip) await zip.fill("48933");
+  const country = await visible('select[autocomplete="country"], select[name="country"]');
+  if (country) await country.selectOption("US").catch(() => undefined);
+  const emailField = await visible('#email, input[autocomplete="email"]');
+  if (emailField && await emailField.isEditable().catch(() => false) && !(await emailField.inputValue().catch(() => ""))) await emailField.fill(email);
+  // Never save the test card to Link (it would ask for a phone number).
+  for (const fr of [p.mainFrame(), ...p.frames()]) {
+    const link = fr.locator('#enableStripePass, input[name="enableStripePass"], input[type="checkbox"][name*="link" i]').first();
+    if ((await link.count().catch(() => 0)) && (await link.isChecked().catch(() => false))) await link.setChecked(false, { force: true }).catch(() => link.dispatchEvent("click").catch(() => undefined));
+  }
+  const submit = await visible('[data-testid="hosted-payment-submit-button"], [data-testid="payment-form-submit-button"], .SubmitButton');
+  if (!submit) throw new Error("no Pay button on Stripe's page");
+  await submit.click();
   if (cardNo !== "4242 4242 4242 4242") {
     // Stripe's published decline card: Checkout must refuse it and stay on its own page.
     await p.getByText(/declined/i).first().waitFor({ state: "visible", timeout: 45_000 });
