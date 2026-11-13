@@ -11,10 +11,12 @@
 // neither origin is never rewritten (the run refuses). The outbound (sales) workspace is never touched: this key cannot
 // even see it. No call is placed.
 //
-// Retell versioning: agent and LLM edits land on the draft; callers use the published version. The draft is published
-// only when it differs from the latest published version in nothing but these URLs (so nothing the Founder has not
-// published goes live); otherwise the run stops after saving the draft and says so. A number pinned to the old published
-// version is moved to the new one. Rollback: run again with the origins swapped.
+// Retell versioning (retell-sdk 6.2.20, verified 2026-11-13): published agent versions, and the LLM versions they use,
+// are immutable — PATCH on them answers 400 "Cannot update published LLM", which is how the 2026-11-13 run failed. So
+// the run starts a NEW draft from the latest published version (POST /create-agent-version {base_version}), which
+// copies the agent and its LLM; changes only the URLs on that draft (PATCH ?version=<draft>), reads it back, publishes
+// exactly that draft (POST /publish-agent-version {version}), and moves the number. Nothing unpublished goes live: the
+// new draft is the published version plus the URL change. An existing unpublished draft is left alone and reported.
 //
 //   node scripts/retell-route.ts --agent <id> --from <origin> --to <origin> [--apply]
 //   node scripts/retell-route.ts --check <origin>   the Worker there verifies this key's signature (a signed no-op
@@ -55,7 +57,7 @@ export function rerouteTools(tools: Obj[], from: string, to: string): { tools: O
   return { tools: next, changed, refuse };
 }
 
-const IGNORED_AGENT = new Set(["version", "is_published", "last_modification_timestamp", "webhook_url", "version_title", "base_version", "response_engine"]);
+const IGNORED_AGENT = new Set(["version", "is_published", "last_modification_timestamp", "webhook_url", "version_title", "version_description", "base_version", "response_engine"]);
 const IGNORED_LLM = new Set(["version", "is_published", "last_modification_timestamp", "general_tools"]);
 /** Field names that differ between two objects, ignoring version bookkeeping and the routed fields. */
 export function differences(a: Obj, b: Obj, ignored: Set<string>): string[] {
@@ -79,13 +81,22 @@ function api(key: string, f: typeof fetch = fetch): Api {
         let raw: unknown = null;
         try { raw = JSON.parse(text); } catch { /* not JSON */ }
         if ((r.status === 429 || r.status >= 500) && attempt < 2) { await new Promise((ok) => setTimeout(ok, 2000 * (attempt + 1))); continue; }
-        return { ok: r.status >= 200 && r.status < 300, status: r.status, json: obj(raw), raw, error: r.status >= 200 && r.status < 300 ? undefined : `HTTP ${r.status}` };
+        const ok = r.status >= 200 && r.status < 300;
+        return { ok, status: r.status, json: obj(raw), raw, error: ok ? undefined : `HTTP ${r.status}${retellMessage(raw, text)}` };
       } catch (e) {
         if (attempt < 2) continue;
         return { ok: false, status: null, json: {}, raw: null, error: (e as Error).name === "AbortError" ? "timed out" : "network error" };
       } finally { clearTimeout(timer); }
     }
   };
+}
+
+/** Retell's own explanation of a refusal (its error body), shortened; it names fields, never the key. */
+export function retellMessage(raw: unknown, text: string): string {
+  const o = obj(raw);
+  const m = str(o.message) ?? str(o.error_message) ?? str(o.error) ?? (Array.isArray(o.message) ? (o.message as unknown[]).join("; ") : null) ?? text;
+  const t = (m ?? "").replace(/\s+/g, " ").replace(/(key_|Bearer )[A-Za-z0-9_-]+/g, "$1…").trim().slice(0, 400);
+  return t ? `: ${t}` : "";
 }
 
 /** A list response: a bare array, or { items | data | versions }. */
@@ -109,127 +120,133 @@ export async function route(o: { key: string; agentId: string; from: string; to:
   const done = (status: RouteReport["status"], l?: string) => { if (l) say(l); return { status, lines }; };
   if (!ORIGIN.test(o.from) || !ORIGIN.test(o.to) || o.from === o.to) return done("refused", "--from and --to must be two different bare https origins");
   const call = api(o.key, o.fetch);
+  const A = encodeURIComponent(o.agentId);
+  const hookUrl = `${o.to}${PATHS.events}`, fnUrl = `${o.to}${PATHS.functions}`, inUrl = `${o.to}${PATHS.inbound}`;
 
-  // 1. Read everything first.
-  const agentR = await call("GET", `/get-agent/${encodeURIComponent(o.agentId)}`);
-  if (!agentR.ok) return done("failed", `could not read agent ${o.agentId}: ${agentR.error}${agentR.status === 401 ? " (key rejected: is this the inbound workspace key?)" : ""}`);
-  const agent = agentR.json;
-  const engine = obj(agent.response_engine);
-  const llmId = str(engine.llm_id);
-  if (str(engine.type) !== "retell-llm" || !llmId) return done("refused", "the agent is not a single-prompt Retell LLM agent; nothing was changed");
-  const llmR = await call("GET", `/get-retell-llm/${encodeURIComponent(llmId)}`);
-  if (!llmR.ok) return done("failed", `could not read LLM ${llmId}: ${llmR.error}`);
-  const llm = llmR.json;
+  // 1. Read: the latest agent, the latest PUBLISHED version (what callers use) and its LLM version, the numbers.
+  const latestR = await call("GET", `/get-agent/${A}`);
+  if (!latestR.ok) return done("failed", `could not read agent ${o.agentId}: ${latestR.error}${latestR.status === 401 ? " (key rejected: is this the inbound workspace key?)" : ""}`);
+  const latest = latestR.json;
+  const llmId = str(obj(latest.response_engine).llm_id);
+  if (str(obj(latest.response_engine).type) !== "retell-llm" || !llmId) return done("refused", "the agent is not a single-prompt Retell LLM agent; nothing was changed");
+  const L = encodeURIComponent(llmId);
+  const versionsR = await call("GET", `/list-agent-versions/${A}?limit=100`);
+  if (!versionsR.ok) return done("failed", `could not list agent versions: ${versionsR.error}`);
+  const versions = items(versionsR.raw).map(obj);
+  const pubV = versions.filter((v) => v.is_published === true).map((v) => num(v.version) ?? -1).sort((a, b) => b - a)[0] ?? (latest.is_published === true ? num(latest.version) : null);
+  if (pubV === null || pubV < 0) return done("refused", "the agent has no published version; publish it in Retell first (nothing was changed)");
+  const pubR = await call("GET", `/get-agent/${A}?version=${pubV}`);
+  if (!pubR.ok) return done("failed", `could not read published agent v${pubV}: ${pubR.error}`);
+  const pub = pubR.json;
+  const pubLlmV = num(obj(pub.response_engine).version);
+  const pubLlmR = await call("GET", `/get-retell-llm/${L}${pubLlmV !== null ? `?version=${pubLlmV}` : ""}`);
+  if (!pubLlmR.ok) return done("failed", `could not read the published LLM ${llmId}: ${pubLlmR.error}`);
+  const pubLlm = pubLlmR.json;
   const numsR = await call("GET", "/v2/list-phone-numbers?limit=100");
   const numsR2 = numsR.ok ? numsR : await call("GET", "/list-phone-numbers");
   if (!numsR2.ok) return done("failed", `could not list phone numbers: ${numsR2.error}`);
   const numbers = items(numsR2.raw).map(obj).filter((n) => arr(n.inbound_agents).some((a) => str(obj(a).agent_id) === o.agentId) || str(n.inbound_agent_id) === o.agentId);
-  say(`agent ${o.agentId} (${str(agent.agent_name) ?? "unnamed"}), version ${num(agent.version) ?? "?"} ${agent.is_published === true ? "published" : "draft"}; LLM ${llmId} v${num(llm.version) ?? "?"}`);
+  const latestV = num(latest.version);
+  say(`agent ${o.agentId} (${str(pub.agent_name) ?? "unnamed"}): published v${pubV} on LLM ${llmId} v${pubLlmV ?? "?"}; latest version v${latestV ?? "?"} ${latest.is_published === true ? "(published)" : "(unpublished draft)"}`);
   say(`numbers routing inbound calls to this agent: ${numbers.map((n) => last4(n.phone_number)).join(", ") || "none"}`);
   if (!numbers.length) return done("refused", "no phone number routes inbound calls to this agent; nothing was changed");
 
-  // 2. Plan.
-  const hook = reroute(str(agent.webhook_url), "events", o.from, o.to);
-  const tools = rerouteTools(arr(llm.general_tools).map(obj), o.from, o.to);
+  // 2. Plan against the PUBLISHED version.
+  const hook = reroute(str(pub.webhook_url), "events", o.from, o.to);
+  const tools = rerouteTools(arr(pubLlm.general_tools).map(obj), o.from, o.to);
   const numberPlans = numbers.map((n) => ({ n, r: reroute(str(n.inbound_webhook_url), "inbound", o.from, o.to) }));
   const refusals = [...("refuse" in hook ? [hook.refuse] : []), ...tools.refuse, ...numberPlans.flatMap((p) => ("refuse" in p.r ? [`number ${last4(p.n.phone_number)}: ${p.r.refuse}`] : []))];
   if (refusals.length) return done("refused", `refused: ${refusals.join("; ")}`);
   const hookChange = !("refuse" in hook) && hook.change;
-  say(`agent webhook_url: ${str(agent.webhook_url) ?? "(none)"} → ${hookChange ? `${o.to}${PATHS.events}` : "unchanged"}`);
-  say(`LLM tools: ${tools.changed.length ? `${tools.changed.length} url(s) → ${o.to}${PATHS.functions} (${tools.changed.join(", ")})` : "all already on the target"}`);
+  const customTools = arr(pubLlm.general_tools).map(obj).filter((t) => str(t.type) === "custom" && str(t.url) !== null);
+  say(`published agent webhook_url: ${str(pub.webhook_url) ?? "(none)"} → ${hookChange ? hookUrl : "unchanged"}`);
+  say(`published LLM tools: ${customTools.length} custom tool(s); ${tools.changed.length ? `${tools.changed.length} url(s) → ${fnUrl} (${tools.changed.join(", ")})` : "all already on the target"}`);
   for (const p of numberPlans) say(`number ${last4(p.n.phone_number)} inbound_webhook_url: ${str(p.n.inbound_webhook_url) ?? "(none)"} → ${"refuse" in p.r || !p.r.change ? "unchanged" : p.r.next}`);
-  const numberChanges = numberPlans.filter((p) => !("refuse" in p.r) && p.r.change);
-
-  // The published version is what callers hear: it also has to carry the target URLs.
-  const versionsR = await call("GET", `/list-agent-versions/${encodeURIComponent(o.agentId)}`);
-  const versions = versionsR.ok ? items(versionsR.raw).map(obj) : [];
-  const published = versions.filter((v) => v.is_published === true).sort((a, b) => (num(b.version) ?? 0) - (num(a.version) ?? 0))[0] ?? null;
-  const publishedRouted = published ? str(published.webhook_url) === `${o.to}${PATHS.events}` : false;
-  say(`latest published agent version: ${published ? `v${num(published.version)} (webhook ${str(published.webhook_url) ?? "(none)"})` : versionsR.ok ? "none" : `unknown (${versionsR.error})`}`);
-  if (!hookChange && !tools.changed.length && !numberChanges.length && publishedRouted) return done("already_routed", `everything already routes to ${o.to}`);
+  const otherDraft = latest.is_published !== true && latestV !== null && latestV > pubV;
+  if (otherDraft) say(`note: unpublished draft v${latestV} exists; it is left exactly as it is (not published, not edited)`);
+  const numbersPending = numberPlans.some((p) => !("refuse" in p.r) && p.r.change);
+  if (!hookChange && !tools.changed.length && !numbersPending) return done("already_routed", `everything callers use already routes to ${o.to}`);
   if (!o.apply) return done("would_route", "dry run: nothing was written");
 
-  // 3. Draft: tools, then the agent's webhook. Each is read back.
-  if (tools.changed.length) {
-    const up = await call("PATCH", `/update-retell-llm/${encodeURIComponent(llmId)}`, { general_tools: tools.tools });
-    if (!up.ok) return done("failed", `Retell refused the tool update (${up.error}); nothing else was changed`);
+  let newV: number | null = pubV;
+  if (hookChange || tools.changed.length) {
+    // 3. A new draft from the published version (copies the agent and its LLM).
+    const created = await call("POST", `/create-agent-version/${A}`, { base_version: pubV });
+    if (!created.ok) return done("failed", `Retell refused to create a draft from v${pubV} (${created.error}); nothing was changed`);
+    const draftV = num(created.json.version);
+    const draftLlmV = num(obj(created.json.response_engine).version);
+    if (draftV === null || created.json.is_published === true) return done("failed", `create-agent-version did not return a draft version; nothing else was changed`);
+    say(`draft v${draftV} created from published v${pubV} (LLM v${draftLlmV ?? "?"})`);
+    if (str(obj(created.json.response_engine).llm_id) !== llmId) return done("failed", `draft v${draftV} uses another LLM; stopped before any edit (delete draft v${draftV} in Retell)`);
+    const dLlmR = await call("GET", `/get-retell-llm/${L}${draftLlmV !== null ? `?version=${draftLlmV}` : ""}`);
+    if (!dLlmR.ok) return done("failed", `could not read the draft's LLM (${dLlmR.error}); draft v${draftV} left unpublished`);
+    const dLlm = dLlmR.json;
+    if (dLlm.is_published === true) return done("failed", `the draft's LLM v${draftLlmV} is a published version, which Retell cannot edit; draft v${draftV} left unpublished`);
+    if (str(dLlm.general_prompt) !== str(pubLlm.general_prompt) || toolsShape(dLlm.general_tools) !== toolsShape(pubLlm.general_tools) || differences(dLlm, pubLlm, IGNORED_LLM).length)
+      return done("failed", `draft v${draftV} is not an exact copy of published v${pubV}; stopped before any edit`);
+    // 4. Only the URLs: the tool list as Retell returned it for the draft, with url replaced on the custom tools.
+    if (tools.changed.length) {
+      const next = rerouteTools(arr(dLlm.general_tools).map(obj), o.from, o.to);
+      const up = await call("PATCH", `/update-retell-llm/${L}${draftLlmV !== null ? `?version=${draftLlmV}` : ""}`, { general_tools: next.tools });
+      if (!up.ok) return done("failed", `Retell refused the tool update on draft LLM v${draftLlmV} (${up.error}); draft v${draftV} left unpublished, callers unaffected`);
+    }
+    const llmAfterR = await call("GET", `/get-retell-llm/${L}${draftLlmV !== null ? `?version=${draftLlmV}` : ""}`);
+    if (!llmAfterR.ok) return done("failed", `tool update sent but the draft LLM could not be read back (${llmAfterR.error}); not published`);
+    const llmAfter = llmAfterR.json;
+    const lp: string[] = [];
+    if (str(llmAfter.general_prompt) !== str(pubLlm.general_prompt)) lp.push("the prompt changed");
+    if (toolsShape(llmAfter.general_tools) !== toolsShape(pubLlm.general_tools)) lp.push("a tool other than its url changed");
+    if (arr(llmAfter.general_tools).length !== arr(pubLlm.general_tools).length) lp.push("the number of tools changed");
+    if (arr(llmAfter.general_tools).map(obj).some((t) => str(t.type) === "custom" && str(t.url) !== null && str(t.url) !== fnUrl)) lp.push("a tool url is not on the target");
+    const otherLlm = differences(llmAfter, pubLlm, IGNORED_LLM);
+    if (otherLlm.length) lp.push(`other LLM settings changed: ${otherLlm.join(", ")}`);
+    if (lp.length) return done("failed", `draft LLM read-back mismatch: ${lp.join("; ")}; draft v${draftV} left unpublished, callers unaffected`);
+    say(`draft LLM read-back: prompt and all ${arr(llmAfter.general_tools).length} tools unchanged apart from ${tools.changed.length} url(s), now ${fnUrl}`);
+    if (hookChange) {
+      const up = await call("PATCH", `/update-agent/${A}?version=${draftV}`, { webhook_url: hookUrl });
+      if (!up.ok) return done("failed", `Retell refused the agent webhook update on draft v${draftV} (${up.error}); not published, callers unaffected`);
+    }
+    const agentAfterR = await call("GET", `/get-agent/${A}?version=${draftV}`);
+    if (!agentAfterR.ok) return done("failed", `draft agent v${draftV} could not be read back (${agentAfterR.error}); not published`);
+    const agentAfter = agentAfterR.json;
+    if (str(agentAfter.webhook_url) !== hookUrl) return done("failed", `draft agent read-back: webhook_url is ${str(agentAfter.webhook_url) ?? "(none)"}; not published`);
+    const otherAgent = differences(agentAfter, pub, IGNORED_AGENT);
+    if (otherAgent.length) return done("failed", `draft agent read-back: other settings differ from v${pubV}: ${otherAgent.join(", ")}; not published`);
+    if (str(obj(agentAfter.response_engine).llm_id) !== llmId) return done("failed", "draft agent read-back: the response engine changed; not published");
+    say(`draft agent read-back: webhook_url ${hookUrl}; every other setting equal to published v${pubV}`);
+    // 5. Publish exactly that draft, then read the published version back.
+    const pubDo = await call("POST", `/publish-agent-version/${A}`, { version: draftV, version_title: `Production routing (v${pubV} + production URLs)` });
+    if (!pubDo.ok) return done("failed", `Retell refused to publish draft v${draftV} (${pubDo.error}); callers still use v${pubV}`);
+    const liveR = await call("GET", `/get-agent/${A}?version=${draftV}`);
+    const live = liveR.json;
+    const liveLlmV = num(obj(live.response_engine).version);
+    const liveLlmR = await call("GET", `/get-retell-llm/${L}${liveLlmV !== null ? `?version=${liveLlmV}` : ""}`);
+    if (!liveR.ok || live.is_published !== true || str(live.webhook_url) !== hookUrl) return done("failed", `published, but v${draftV} does not read back as published with the target webhook: check in Retell`);
+    if (!liveLlmR.ok || arr(liveLlmR.json.general_tools).map(obj).some((t) => str(t.type) === "custom" && str(t.url) !== null && str(t.url) !== fnUrl)) return done("failed", `published v${draftV}, but its LLM tools do not all read back on the target: check in Retell`);
+    say(`published agent v${draftV} (LLM v${liveLlmV ?? "?"}): webhook ${hookUrl}; ${customTools.length} tool url(s) ${fnUrl} (read back)`);
+    newV = draftV;
   }
-  const llmAfter = await call("GET", `/get-retell-llm/${encodeURIComponent(llmId)}`);
-  if (!llmAfter.ok) return done("failed", `tool update sent but the LLM could not be read back (${llmAfter.error})`);
-  const lp: string[] = [];
-  if (str(llmAfter.json.general_prompt) !== str(llm.general_prompt)) lp.push("the prompt changed");
-  if (toolsShape(llmAfter.json.general_tools) !== toolsShape(llm.general_tools)) lp.push("a tool other than its url changed");
-  if (arr(llmAfter.json.general_tools).map(obj).some((t) => str(t.type) === "custom" && str(t.url) !== null && str(t.url) !== `${o.to}${PATHS.functions}`)) lp.push("a tool url is not on the target");
-  const otherLlm = differences(llmAfter.json, llm, IGNORED_LLM);
-  if (otherLlm.length) lp.push(`other LLM settings changed: ${otherLlm.join(", ")}`);
-  if (lp.length) return done("failed", `LLM read-back mismatch: ${lp.join("; ")}. Check the agent in Retell now.`);
-  say("LLM read-back: prompt and every tool unchanged apart from the url");
-  if (hookChange) {
-    const up = await call("PATCH", `/update-agent/${encodeURIComponent(o.agentId)}`, { webhook_url: `${o.to}${PATHS.events}` });
-    if (!up.ok) return done("failed", `Retell refused the agent webhook update (${up.error}); the tool urls were already updated on the draft — run again or roll back with the origins swapped`);
-  }
-  const agentAfterR = await call("GET", `/get-agent/${encodeURIComponent(o.agentId)}`);
-  if (!agentAfterR.ok) return done("failed", `agent update sent but could not be read back (${agentAfterR.error})`);
-  const agentAfter = agentAfterR.json;
-  const otherAgent = differences(agentAfter, agent, IGNORED_AGENT);
-  if (str(agentAfter.webhook_url) !== `${o.to}${PATHS.events}`) return done("failed", `agent read-back: webhook_url is ${str(agentAfter.webhook_url) ?? "(none)"}`);
-  if (otherAgent.length) return done("failed", `agent read-back: other settings changed: ${otherAgent.join(", ")}`);
-  say("agent read-back: webhook_url on the target, every other setting unchanged");
 
-  // 4. Publish, only when the draft differs from the published version in the routed URLs alone.
-  let publishedVersion = published ? num(published.version) : null;
-  if (!publishedRouted || agentAfter.is_published !== true) {
-    const blockers: string[] = [];
-    if (!published) blockers.push("there is no published version to compare with");
-    else {
-      const pubLlmVersion = num(obj(published.response_engine).version);
-      const pubLlm = await call("GET", `/get-retell-llm/${encodeURIComponent(llmId)}${pubLlmVersion !== null ? `?version=${pubLlmVersion}` : ""}`);
-      if (!pubLlm.ok) blockers.push(`the published LLM could not be read (${pubLlm.error})`);
-      else {
-        if (str(pubLlm.json.general_prompt) !== str(llmAfter.json.general_prompt)) blockers.push("the draft prompt differs from the published prompt");
-        if (toolsShape(pubLlm.json.general_tools) !== toolsShape(llmAfter.json.general_tools)) blockers.push("the draft tools differ from the published tools");
-        const d = differences(llmAfter.json, pubLlm.json, IGNORED_LLM);
-        if (d.length) blockers.push(`draft LLM settings differ: ${d.join(", ")}`);
-      }
-      const d = differences(agentAfter, published, IGNORED_AGENT);
-      if (d.length) blockers.push(`draft agent settings differ: ${d.join(", ")}`);
-    }
-    if (blockers.length) {
-      say(`not published automatically: ${blockers.join("; ")} — publishing would put unpublished edits live`);
-      return finishNumbers("draft_saved_not_published", null);
-    }
-    const pub = await call("POST", `/publish-agent/${encodeURIComponent(o.agentId)}`, {});
-    if (!pub.ok) { say(`publish-agent failed (${pub.error}): publish the agent in the Retell dashboard`); return finishNumbers("draft_saved_not_published", null); }
-    const vs = await call("GET", `/list-agent-versions/${encodeURIComponent(o.agentId)}`);
-    const newest = (vs.ok ? items(vs.raw).map(obj) : []).filter((v) => v.is_published === true).sort((a, b) => (num(b.version) ?? 0) - (num(a.version) ?? 0))[0];
-    if (!newest || str(newest.webhook_url) !== `${o.to}${PATHS.events}`) { say("published, but the newest published version does not show the target webhook: check in Retell"); return finishNumbers("failed", null); }
-    say(`published agent v${num(newest.version)}: callers now get the target URLs`);
-    const prev = publishedVersion;
-    publishedVersion = num(newest.version);
-    return finishNumbers("routed", prev);
+  // 6. Numbers last, so a call's first webhook reaches the target only once the agent's own traffic does. A number
+  //    pinned to an explicit older version is moved to the new one.
+  for (const p of numberPlans) {
+    const pins = arr(p.n.inbound_agents).map(obj);
+    const pinned = pins.some((a) => str(a.agent_id) === o.agentId && a.agent_version !== undefined && a.agent_version !== null && num(Number(a.agent_version)) !== null && Number(a.agent_version) !== newV);
+    const change = !("refuse" in p.r) && p.r.change;
+    if (!change && !pinned) continue;
+    const body: Obj = { inbound_webhook_url: inUrl };
+    if (pinned) body.inbound_agents = pins.map((a) => (str(a.agent_id) === o.agentId && num(Number(a.agent_version)) !== null ? { ...a, agent_version: newV } : a));
+    const P = encodeURIComponent(str(p.n.phone_number) ?? "");
+    const up = await call("PATCH", `/update-phone-number/${P}`, body);
+    if (!up.ok) return done("failed", `number ${last4(p.n.phone_number)}: Retell refused the update (${up.error}); the agent is already on ${o.to}`);
+    const back = await call("GET", `/get-phone-number/${P}`);
+    const b = back.ok ? back.json : obj(items((await call("GET", "/v2/list-phone-numbers?limit=100")).raw).map(obj).find((x) => str(x.phone_number) === str(p.n.phone_number)));
+    if (str(b.inbound_webhook_url) !== inUrl) return done("failed", `number ${last4(p.n.phone_number)}: read-back shows ${str(b.inbound_webhook_url) ?? "(none)"}`);
+    const binding = arr(b.inbound_agents).map(obj).find((a) => str(a.agent_id) === o.agentId);
+    say(`number ${last4(p.n.phone_number)}: inbound webhook ${inUrl}; agent ${o.agentId} ${binding?.agent_version !== undefined && binding?.agent_version !== null ? `pinned to v${String(binding.agent_version)}` : "on its latest published version"} (read back)`);
   }
-  return finishNumbers("routed", null);
-
-  // 5. Numbers last, so the first webhook of a call reaches the target only once the agent's own traffic does.
-  async function finishNumbers(status: RouteReport["status"], oldVersion: number | null): Promise<RouteReport> {
-    if (status !== "routed") { say("phone numbers left unchanged until the agent version callers use carries the target URLs"); return { status, lines }; }
-    for (const p of numberPlans) {
-      const pins = arr(p.n.inbound_agents).map(obj);
-      const repin = oldVersion !== null && publishedVersion !== null && pins.some((a) => str(a.agent_id) === o.agentId && num(a.agent_version) === oldVersion);
-      const change = !("refuse" in p.r) && p.r.change;
-      if (!change && !repin) continue;
-      const body: Obj = { inbound_webhook_url: `${o.to}${PATHS.inbound}` };
-      if (repin) body.inbound_agents = pins.map((a) => (str(a.agent_id) === o.agentId && num(a.agent_version) === oldVersion ? { ...a, agent_version: publishedVersion } : a));
-      const up = await call("PATCH", `/update-phone-number/${encodeURIComponent(str(p.n.phone_number) ?? "")}`, body);
-      if (!up.ok) { say(`number ${last4(p.n.phone_number)}: Retell refused the update (${up.error})`); return { status: "failed", lines }; }
-      const back = await call("GET", `/get-phone-number/${encodeURIComponent(str(p.n.phone_number) ?? "")}`);
-      const b = back.ok ? back.json : obj(items((await call("GET", "/v2/list-phone-numbers?limit=100")).raw).map(obj).find((x) => str(x.phone_number) === str(p.n.phone_number)));
-      if (str(b.inbound_webhook_url) !== `${o.to}${PATHS.inbound}`) { say(`number ${last4(p.n.phone_number)}: read-back shows ${str(b.inbound_webhook_url) ?? "(none)"}`); return { status: "failed", lines }; }
-      say(`number ${last4(p.n.phone_number)}: inbound webhook on the target${repin ? `, now on agent v${publishedVersion}` : ""} (read back)`);
-    }
-    say(`routed: the receptionist's inbound calls, call events and function calls go to ${o.to}`);
-    return { status, lines };
-  }
+  say(`routed: the receptionist's inbound calls, call events and function calls go to ${o.to}`);
+  return { status: "routed", lines };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
