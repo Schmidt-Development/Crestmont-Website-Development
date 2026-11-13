@@ -47,9 +47,11 @@ const run = randomBytes(3).toString("hex");
 const browser = await chromium.launch();
 const internalSince = new Date(Date.now() - 5_000).toISOString();
 
-async function payOnStripe(p: any, email: string, name: string) {
+async function payOnStripe(p: any, email: string, name: string, sessionUrl: string) {
+  // Test mode is proven by the session Crestmont created (its redirect to Stripe), not by the address Stripe's page
+  // ends up on, which Stripe may rewrite. Anything but a cs_test_ session is refused before a card is entered.
+  if (!/^https:\/\/checkout\.stripe\.com\/.*cs_test_/.test(sessionUrl)) throw new Error("Crestmont did not create a Stripe TEST-mode session; refusing to enter a card");
   await p.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 60_000 });
-  if (!/\/c\/pay\/cs_test_/.test(p.url())) throw new Error("not a Stripe TEST-mode session; refusing to enter a card");
   const cardNumber = p.locator("#cardNumber");
   const cardButton = p.locator('[data-testid="card-accordion-item-button"]').first();
   await Promise.any([cardNumber.waitFor({ state: "visible", timeout: 30_000 }), cardButton.waitFor({ state: "attached", timeout: 30_000 })]).catch(() => undefined);
@@ -124,8 +126,11 @@ try {
       // 2. Agreement + required maintenance plan → Stripe test Checkout, paid with the test card.
       await p.locator(`[name="maintenance_plan"][value="${plan}"]`).check();
       await p.locator('[name="terms"]').check();
+      const payResponse = p.waitForResponse((r: any) => r.request().method() === "POST" && new URL(r.url()).pathname === `/checkout/${id}`, { timeout: 30_000 });
       await p.locator('button:has-text("Pay $")').click();
-      await payOnStripe(p, email, "Guest Purchase Probe");
+      const sessionUrl = (await payResponse).headers()["location"] ?? "";
+      check(/cs_test_/.test(sessionUrl), `${id}: Pay creates a Stripe TEST-mode Checkout session`, sessionUrl ? `${new URL(sessionUrl).host} ${(/cs_test_[A-Za-z0-9]{0,6}/.exec(sessionUrl) ?? ["?"])[0]}…` : "no redirect");
+      await payOnStripe(p, email, "Guest Purchase Probe", sessionUrl);
       check(true, `${id}: Stripe TEST Checkout paid with the published test card and returned to Crestmont`);
       // 3. Provisioning, exactly once.
       const user = d1(`SELECT id FROM users WHERE email = ${q(email)}`)[0];
