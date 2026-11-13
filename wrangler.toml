@@ -45,7 +45,8 @@ workers_dev = true            # staging is served at crestmont-platform-staging.
 # Turnstile: Cloudflare's documented always-pass TEST keys (public values, not secrets). Now that staging is public,
 # replace them with real staging keys (TURNSTILE_SITE_KEY var + TURNSTILE_SECRET secret) so forms get a bot challenge.
 # PORTFOLIO_DEMO_ORIGINS: the ONLY origins staging may frame (isolated portfolio demo Workers; docs/frontend/PORTFOLIO.md).
-# Consolidated from the crestmont-platform-frontend-preview Worker (being retired; see docs/CONSOLIDATION.md). Production deliberately has none (posters only).
+# Consolidated from the crestmont-platform-frontend-preview Worker (being retired; see docs/CONSOLIDATION.md). Production frames the same four isolated demos since 2026-11-13 (Owner: restore the interactive portfolio); each
+# demo is recorded on production only after deploy-production.yml verifies it from the runner.
 # APP_URL: the staging Worker's own workers.dev address (same host as STAGING_URL's default in the staging workflows).
 # Scheduled jobs have no incoming request, so without it retried Stripe events and other cron emails would link to
 # https://scheduled.invalid, and the Stripe integration probe would look for a webhook at "/api/webhooks/stripe".
@@ -93,7 +94,7 @@ routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true },
 # Stripe checkout are open. The deploy (deploy-production.yml) refuses to release this unless the running Worker's
 # read-only probe verifies the live Stripe key, a charge-enabled account and the webhook endpoint with every handled
 # event (scripts/stripe-live-gate.ts); the post-deploy smoke test then checks that a new visitor reaches every package.
-vars = { ENVIRONMENT = "production", EMAIL_FROM = "Crestmont Website Development <support@crestmontwebsitedevelopment.com>", APP_URL = "https://crestmontwebsitedevelopment.com", HSTS_MAX_AGE = "300", AI_BUILD_AUTOMATION = "off", PUBLIC_LAUNCH = "open", PAYMENTS_LIVE_AUTHORIZED = "yes" }
+vars = { ENVIRONMENT = "production", PORTFOLIO_DEMO_ORIGINS = "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev https://glassly-portfolio-demo.partners-df4.workers.dev https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev", EMAIL_FROM = "Crestmont Website Development <support@crestmontwebsitedevelopment.com>", APP_URL = "https://crestmontwebsitedevelopment.com", HSTS_MAX_AGE = "300", AI_BUILD_AUTOMATION = "off", PUBLIC_LAUNCH = "open", PAYMENTS_LIVE_AUTHORIZED = "yes" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "c667f1a9-0802-4c52-a0e1-b512219a6eea", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
 triggers = { crons = ["* * * * *", "*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts

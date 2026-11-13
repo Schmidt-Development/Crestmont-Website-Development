@@ -258,6 +258,32 @@ jobs:
           done
           echo "::warning::$PRODUCTION_URL/api/health did not return 200 within 6 minutes; the checks below decide."
 
+      # Interactive portfolio (Owner, 2026-11-13). The four isolated portfolio-demo Workers (their own synthetic data,
+      # simulated payments, captured email; docs/frontend/PORTFOLIO.md) are recorded on production's portfolio rows
+      # only when the runner sees each answer /__demo/info with "demo":true and name this site in frame-ancestors.
+      # Only the demo fields of non-archived rows whose demo link is empty or this demo change. A demo that does not
+      # verify keeps its screenshot.
+      - name: Portfolio demos — verify each isolated demo and record it on production
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          origins=$(node -e 'const t=require("fs").readFileSync("wrangler.toml","utf8");const s=t.indexOf("[env.production]");const b=t.slice(s,t.indexOf("\n[env.",s+1)>0?t.indexOf("\n[env.",s+1):undefined);process.stdout.write((/PORTFOLIO_DEMO_ORIGINS = "([^"]*)"/.exec(b)||[])[1]||"")')
+          verified=""
+          for slug_url in $(node --no-warnings -e 'import("./src/content/portfolio-projects.ts").then(m=>console.log(m.PORTFOLIO_PROJECTS.map(p=>p.slug+"|"+p.demoUrl).join("\n")))'); do
+            slug=${slug_url%%|*}; url=${slug_url#*|}; demo=${url%/}
+            info=$(curl -s --max-time 15 "$demo/__demo/info" || true)
+            fa=$(curl -s --max-time 15 -D - -o /dev/null "$demo/" | tr -d '\r' | grep -i '^content-security-policy:' | grep -o "frame-ancestors[^;]*" || true)
+            if echo "$info" | grep -q '"demo":true' && echo " $fa " | grep -qF " $PRODUCTION_URL"; then verified="$verified,$slug"; echo "- $slug: isolated demo verified for production ($demo)" | tee -a "$GITHUB_STEP_SUMMARY"
+            else echo "- $slug: NOT embeddable on production (demo info or frame-ancestors) — screenshot kept" | tee -a "$GITHUB_STEP_SUMMARY"; fi
+          done
+          [ -n "$verified" ] || { echo "::warning title=Portfolio demos::No demo verified; production keeps screenshots."; exit 1; }
+          node --no-warnings scripts/portfolio-demo-sql.ts --origins "$origins" --verified "${verified#,}" > "$RUNNER_TEMP/demos.sql"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$RUNNER_TEMP/demos.sql" --yes > /dev/null
+          echo "Recorded demos: ${verified#,}" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Post-deploy production checks (LAUNCH-003)
         id: checks
         run: >
@@ -304,6 +330,19 @@ jobs:
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
           node scripts/live-layout-check.mjs "$PRODUCTION_URL" "$RUNNER_TEMP/review" | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}; rm -rf "$RUNNER_TEMP/review"; exit "$rc"
+
+      # The live portfolio in a real browser: every project shows its interactive demo (not the screenshot), scrolls
+      # inside the frame, navigates, resets and switches devices, on desktop and phone. Reported; never a rollback.
+      - name: Live interactive portfolio (desktop and phone, real browser)
+        if: always() && steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+        run: |
+          [ -f .pw/node_modules/playwright/index.mjs ] || { npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null && .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null; }
+          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 4 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
 
       - name: Production data report (read-only; no personal data)
         if: always() && steps.deploy.outcome == 'success'
