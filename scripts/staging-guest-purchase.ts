@@ -112,7 +112,12 @@ try {
         business_description: "Automated staging purchase check; not a real order.", existing_website: "", goals: "Verify the purchase flow end to end.", target_audience: "None (automated check).",
         has_branding: "no", brand_style: "None", design_preferences: "None", pages: "Home", content_source: "crestmont_draft", images_source: "licensed", domain_status: "need",
         domain_wishes: "none.example", hosting: "crestmont", special_instructions: "AUTOMATED STAGING CHECK — not a real order." });
-      if (await p.locator(".cf-turnstile").count()) await p.waitForFunction(() => !!(document.querySelector('[name="cf-turnstile-response"]') as HTMLInputElement | null)?.value, null, { timeout: 30_000 });
+      // The site's CSP forbids eval (correctly), so wait for the Turnstile token by polling the field, not waitForFunction.
+      if (await p.locator(".cf-turnstile").count()) {
+        const token = p.locator('[name="cf-turnstile-response"]').first();
+        const end = Date.now() + 30_000;
+        while (!(await token.inputValue().catch(() => ""))) { if (Date.now() > end) throw new Error("the Turnstile test widget produced no token within 30s"); await p.waitForTimeout(500); }
+      }
       await Promise.all([p.waitForURL((u: URL) => u.pathname === `/checkout/${id}/review`, { timeout: 30_000 }), p.locator('form[data-testid="guest-intake"] button[type=submit]').click()]);
       const reviewText = await p.locator("main").innerText();
       check(reviewText.includes(price), `${id}: the review shows the server-side price ${price}`);
