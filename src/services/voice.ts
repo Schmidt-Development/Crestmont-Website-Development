@@ -560,8 +560,17 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       const h = hoursStatus(c, now);
       // These are STAFFED hours (people, live transfer). The AI receptionist sells and books 24/7 whatever they say.
       if (!h.configured) return { configured: false, open_now: false, staff_available_now: false, ai_available: true, hours: h.summary, message: "Staffed hours aren't published yet. You are available around the clock: keep helping the caller with anything they need." };
-      return { configured: true, open_now: h.open, staff_available_now: h.open, ai_available: true, hours: h.summary, next_open: h.nextOpenAt && h.timezone ? new Intl.DateTimeFormat("en-US", { timeZone: h.timezone, weekday: "long", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(h.nextOpenAt)) : null,
-        message: h.open ? "Human staff are available now." : "Human staff are not in right now; you are available around the clock and can help with everything except a live transfer." };
+      // A person is "available now" only when a live transfer can actually reach one (Owner, 2026-11-13: never promise
+      // 24/7 human support). Without a configured transfer, the hours describe nothing a caller can use, so they are not
+      // read out: the AI answers 24/7 and a team member follows up by callback.
+      const live = transferAvailability(c, now);
+      const liveConfigured = live.reason !== "not_configured";
+      return { configured: true, open_now: h.open, staff_available_now: live.available, ai_available: true, ai_hours: "24/7", live_transfer_configured: liveConfigured,
+        hours: liveConfigured ? h.summary : null,
+        next_open: liveConfigured && h.nextOpenAt && h.timezone ? new Intl.DateTimeFormat("en-US", { timeZone: h.timezone, weekday: "long", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(h.nextOpenAt)) : null,
+        message: live.available
+          ? "A team member may be available for a live transfer now. You, the AI receptionist, are available 24/7."
+          : "You, the AI receptionist, are available 24/7 and can help with everything. No team member can take a live call right now: offer a booked callback time or a callback request. Never promise an immediate callback or that people are available around the clock." };
     }
     case "check_transfer_availability": {
       parse(fnSchemas.check_transfer_availability, rawArgs ?? {});
@@ -709,7 +718,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       // The reference is deliberately NOT returned: it is only in the email, so check_payment_status proves the caller can read that inbox.
       return { link_sent: out.email_sent, ...out, package: pkg.name, price,
         message: out.email_sent
-          ? `I've emailed a secure link to buy the ${pkg.name} package. It opens our website, where you sign in, review the agreements and pay through Stripe. I never take card details by phone.`
+          ? `I've emailed a secure link to buy the ${pkg.name} package. It opens a short project intake form on our website, then the agreements, the required maintenance plan and secure payment through Stripe. No account is needed first. I never take card details by phone.`
           : "I couldn't send an email to that address. I can ask a team member to follow up instead." };
     }
     case "check_payment_status": {
@@ -919,7 +928,7 @@ OBJECTIONS
 If price is a concern, explain what each package includes (get_packages_pricing) and match scope to budget. If they want to think, offer prices by email, save details with crm_upsert_lead and offer a callback. Never pressure the caller.
 
 BUYING A PACKAGE
-Only Starter, Business or Premium. Confirm the package, name and email (spell the email back), then call create_checkout_session once. Explain that the email has a secure link to our website, where they sign in or create an account, review the agreements and pay through Stripe. Never take, repeat or write down card numbers, bank details or passwords; if a caller starts reading card details, stop them politely and explain payment happens only through the secure link. If link_sent is false, apologise and offer request_callback.
+Only Starter, Business or Premium. Confirm the package, name and email (spell the email back), then call create_checkout_session once. Explain that the email has a secure link: our project intake, the agreements, then payment through Stripe. No account is needed first. Never take, repeat or write down card numbers, bank details or passwords; if a caller starts reading card details, stop them politely and explain payment happens only through the secure link. If link_sent is false, apologise and offer request_callback.
 To check a payment, ask for the checkout reference from that email and the email address it went to, then call check_payment_status and read back only its message. If not verified, say you couldn't match those details without hinting which was wrong, and offer a callback. After a locked answer, don't try again on this call.
 
 CALLBACKS
