@@ -72,6 +72,15 @@ jobs:
           [ -n "$mx" ] || { echo "::error title=No MX record on $d::Nothing can receive mail at support@, sales@, billing@ or legal@ until the domain has MX records for a mail host."; exit 1; }
           dig +short TXT "resend._domainkey.$d" @1.1.1.1 | grep -q 'p=' || echo "::warning title=No Resend DKIM record::resend._domainkey.$d has no DKIM key."
           dig +short TXT "_dmarc.$d" @1.1.1.1 | grep -qi 'v=DMARC1' || echo "::warning title=No DMARC record::_dmarc.$d is missing."
+      - name: Cloudflare Email Routing for support@, sales@, billing@ and legal@ (read-only; destinations never printed)
+        if: inputs.scope == 'mailboxes'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node scripts/email-routing-check.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
       - name: Send every template to Resend's test inboxes and follow each delivery (staging)
         if: inputs.target == 'staging'
         env:
