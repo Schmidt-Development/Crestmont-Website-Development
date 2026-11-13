@@ -22,6 +22,7 @@ import { totpCode } from "../src/lib/auth-crypto.ts";
 const BASE = (process.env.E2E_BASE_URL ?? "").replace(/\/$/, "");
 if (!/^https:\/\/crestmont-platform-staging\.[a-z0-9-]+\.workers\.dev$/.test(BASE)) { console.error("E2E_BASE_URL must be the staging workers.dev origin (this script never runs against production)"); process.exit(2); }
 const pkgs = (process.argv[2] ?? "starter,business,premium").split(",").map((s) => s.trim()).filter(Boolean);
+if (pkgs.some((id) => !/^[a-z]+$/.test(id) || !Object.hasOwn(PACKAGES, id))) { console.error(`unknown package in ${pkgs.join(",")}`); process.exit(2); }
 const pwModule = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const { chromium } = pwModule.chromium ? pwModule : pwModule.default;
 const [cmd, ...wbase] = (process.env.WRANGLER ?? "npx --yes wrangler@4.149.0").split(" ").filter(Boolean);
@@ -112,7 +113,7 @@ try {
         has_branding: "no", brand_style: "None", design_preferences: "None", pages: "Home", content_source: "crestmont_draft", images_source: "licensed", domain_status: "need",
         domain_wishes: "none.example", hosting: "crestmont", special_instructions: "AUTOMATED STAGING CHECK — not a real order." });
       if (await p.locator(".cf-turnstile").count()) await p.waitForFunction(() => !!(document.querySelector('[name="cf-turnstile-response"]') as HTMLInputElement | null)?.value, null, { timeout: 30_000 });
-      await Promise.all([p.waitForURL(new RegExp(`/checkout/${id}/review`), { timeout: 30_000 }), p.locator('form[data-testid="guest-intake"] button[type=submit]').click()]);
+      await Promise.all([p.waitForURL((u: URL) => u.pathname === `/checkout/${id}/review`, { timeout: 30_000 }), p.locator('form[data-testid="guest-intake"] button[type=submit]').click()]);
       const reviewText = await p.locator("main").innerText();
       check(reviewText.includes(price), `${id}: the review shows the server-side price ${price}`);
       // 2. Agreement + required maintenance plan → Stripe test Checkout, paid with the test card.
