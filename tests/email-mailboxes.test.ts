@@ -53,3 +53,16 @@ test("[EMAIL-003] the mailbox check sends one labelled message to each of the fo
   assert.equal(new Set(sent.map((m) => m.idempotencyKey)).size, 4);
   assert.deepEqual(out.sent.map((s) => s.template), ["mailbox:support", "mailbox:sales", "mailbox:billing", "mailbox:legal"]);
 });
+
+test("[EMAIL-003] migration 0106: a personal Gmail public contact email becomes support@ on /contact and the footer", async () => {
+  const t = await createTestApp();
+  const at = new Date().toISOString();
+  await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('contact.email', 'someone.personal@gmail.com', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(at).run();
+  await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('security.contact_email', 'someone.personal@gmail.com', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(at).run();
+  assert.match(await (await t.client().get("/contact")).text(), /@gmail\.com/, "fixture: the bad value shows before the migration");
+  t.db.raw.exec(readFileSync("migrations/0106_public_support_email.sql", "utf8"));
+  const page = await (await t.client().get("/contact")).text();
+  assert.doesNotMatch(page, /@gmail\.com/);
+  assert.match(page, /support@crestmontwebsitedevelopment\.com/);
+  assert.equal((await t.db.prepare(`SELECT value FROM business_settings WHERE key = 'security.contact_email'`).first<{ value: string }>())!.value, MAILBOXES.support);
+});

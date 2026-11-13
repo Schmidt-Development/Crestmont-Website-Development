@@ -134,11 +134,36 @@ if (!SKIP_SIMULATION && llmId) {
   ];
   const slotList = (outputs.schedule_consultation as Obj)?.slots ?? [];
   const bookMock = { tool_name: "schedule_consultation", input_match_rule: { type: "any" }, output: JSON.stringify(slotList.length ? { step: "availability", ...(outputs.schedule_consultation as Obj) } : outputs.schedule_consultation) };
+  // Time-of-day callers (Owner, 2026-11-13): the worst case for every hour — staff hours Mon–Fri 8 AM–5 PM, staff NOT in,
+  // no live transfer — with the production hours-tool answer for that state. The AI must still help fully.
+  const hoursVars = (now: string) => ({ current_time: now, receptionist_mode: "full", business_open_now: "false", business_hours_configured: "true",
+    business_hours: "Monday to Friday, 8 AM to 5 PM Eastern (human staff)", transfer_available: "false", scheduling_available: "false" });
+  const afterHoursMocks = [...okMocks.filter((m) => m.tool_name !== "get_business_hours"), mock("get_business_hours", { configured: true, open_now: false, staff_available_now: false, ai_available: true, ai_hours: "24/7", live_transfer_configured: false, hours: null, next_open: null,
+    message: "You, the AI receptionist, are available 24/7 and can help with everything. No team member can take a live call right now: offer a booked callback time or a callback request. Never promise an immediate callback or that people are available around the clock." })];
+  const TIME_METRICS = ["The agent never says Crestmont is closed, unavailable or not taking calls, and never tells the caller to leave a message or call back later because of the time.",
+    "The agent answers the question about the Business package (price $2,499 and what it includes) and offers a way to get started now (checkout link, lead details or a callback).",
+    "The agent does not describe human staff hours as the company's opening hours and does not promise an immediate human callback."];
   const cases = [
     { name: "pricing and maintenance", user: "You run a small bakery and are calling Crestmont to ask what each website package costs, what is included, and whether you also need a monthly maintenance plan. Ask about every package, then thank the agent and end the call. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
       metrics: ["The agent states the package prices exactly as the pricing tool returned them: Starter $999, Business $2,499 and Premium from $4,999.", "The agent explains that a maintenance plan is part of buying a package and describes at least one maintenance plan accurately.", "The agent does not invent prices, discounts or packages that the pricing tool did not return."], mocks: okMocks },
-    { name: "3 a.m. caller", user: "It is 3 a.m. on a Sunday. You ask whether Crestmont is open right now and whether a person can call you back immediately. Then ask to start a Business website. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
-      metrics: ["The agent says it can help right now (the AI receptionist is available 24/7) and keeps helping instead of saying Crestmont is closed.", "The agent does not promise that a human will call back immediately and does not claim human staff work 24/7."], mocks: okMocks },
+    { name: "2 AM weekday", vars: hoursVars("Tuesday, November 17, 2026 at 2:00 AM Eastern Time"),
+      user: "It is 2 a.m. on a Tuesday. You ask whether Crestmont is open right now, then ask what the Business package costs and includes, and ask to get started. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
+      metrics: TIME_METRICS, mocks: afterHoursMocks },
+    { name: "8 AM weekday", vars: hoursVars("Monday, November 16, 2026 at 8:00 AM Eastern Time"),
+      user: "It is 8 a.m. on a Monday. You ask whether Crestmont is open right now, then ask what the Business package costs and includes, and ask to get started. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
+      metrics: TIME_METRICS, mocks: afterHoursMocks },
+    { name: "6 PM weekday", vars: hoursVars("Friday, November 20, 2026 at 6:00 PM Eastern Time"),
+      user: "It is 6 p.m. on a Friday. You ask whether Crestmont is open right now, then ask what the Business package costs and includes, and ask to get started. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
+      metrics: TIME_METRICS, mocks: afterHoursMocks },
+    { name: "midnight", vars: hoursVars("Saturday, November 21, 2026 at 12:00 AM Eastern Time"),
+      user: "It is midnight on a Friday night. You ask whether Crestmont is open right now, then ask what the Business package costs and includes, and ask to get started. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
+      metrics: TIME_METRICS, mocks: afterHoursMocks },
+    { name: "weekend", vars: hoursVars("Sunday, November 22, 2026 at 3:00 PM Eastern Time"),
+      user: "It is a Sunday afternoon. You ask whether Crestmont is open right now, then ask what the Business package costs and includes, and ask to get started. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
+      metrics: TIME_METRICS, mocks: afterHoursMocks },
+    { name: "holiday", vars: hoursVars("Friday, December 25, 2026 at 10:00 AM Eastern Time"),
+      user: "It is Christmas Day. You ask whether Crestmont is open right now, then ask what the Business package costs and includes, and ask to get started. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
+      metrics: TIME_METRICS, mocks: afterHoursMocks },
     { name: "buyer", user: "You want to buy the Business package today. Your name is Jordan Test, phone 517-555-0100, email jordan@example.com, business Jordan's Bakery. Answer the agent's questions and accept a checkout link. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
       metrics: ["The agent collects the caller's name, phone or email and business name.", "The agent records the enquiry (crm_upsert_lead, or create_checkout_session, which records it too).", "The agent sends the secure checkout link for the Business package with create_checkout_session and tells the caller what the link opens (the project intake, agreements and payment), without asking them to create an account first."], mocks: okMocks },
     { name: "callback", user: "You would like someone to call you back about a Premium website. Ask for a callback time and pick the first time the agent offers. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
@@ -150,7 +175,7 @@ if (!SKIP_SIMULATION && llmId) {
   const defs: string[] = [];
   try {
     for (const c of cases) {
-      const r = await retell("POST", "/create-test-case-definition", { name: `[Crestmont launch check ${run}] ${c.name}`, response_engine: engine, user_prompt: c.user, metrics: c.metrics, tool_mocks: c.mocks, llm_model: "gpt-4.1-mini" });
+      const r = await retell("POST", "/create-test-case-definition", { name: `[Crestmont launch check ${run}] ${c.name}`, response_engine: engine, user_prompt: c.user, metrics: c.metrics, tool_mocks: c.mocks, llm_model: "gpt-4.1-mini", ...((c as { vars?: Record<string, string> }).vars ? { dynamic_variables: (c as { vars?: Record<string, string> }).vars } : {}) });
       if (!check(r.status < 300 && !!r.json?.test_case_definition_id, `simulation "${c.name}" defined`, r.status < 300 ? "" : `HTTP ${r.status}: ${JSON.stringify(r.json).slice(0, 200)}`)) continue;
       defs.push(r.json.test_case_definition_id);
     }
