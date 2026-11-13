@@ -747,3 +747,26 @@ test("[VOICE-004] booking references are uniform over the 32-symbol alphabet (no
   const expected = 24_000 / 32;
   for (const n of counts.values()) assert.ok(Math.abs(n - expected) < expected * 0.25, `symbol frequency ${n} is near uniform (${expected})`);
 });
+
+test("[VOICE-003] Owner 2026-11-13: hours set around the clock with no live transfer never tell the agent a person is available; the checkout link needs no account", async () => {
+  const t = await app({}, MON_9AM);
+  const allDay = configured();
+  for (const d of ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const) allDay.hours[d] = [{ open: "00:00", close: "23:59" }];
+  await saveVoiceConfig(t.db, t.owner.id, { ...allDay, transfer: { ...allDay.transfer, enabled: false } });
+  await t.post("/api/webhooks/retell", { event: "call_started", call: phoneCall("c_247") });
+  const h = (await t.post("/api/webhooks/retell/functions", fn("c_247", "get_business_hours", {}))).json;
+  assert.equal(h.ai_available, true);
+  assert.equal(h.ai_hours, "24/7");
+  assert.equal(h.staff_available_now, false, "no live transfer: nobody is 'available now'");
+  assert.equal(h.hours, null, "staffed hours are not read out when no person can take the call");
+  assert.match(h.message, /available 24\/7/);
+  assert.match(h.message, /Never promise an immediate callback/);
+  assert.doesNotMatch(JSON.stringify(h), /Human staff are available now/);
+  const { TEMPLATES, renderTemplate, identityFrom } = await import("../src/services/mailer.ts");
+  for (const tpl of ["voice_followup", "sales_info"] as const) {
+    for (const sample of (TEMPLATES[tpl] as { samples: unknown[] }).samples) {
+      const r = renderTemplate(tpl, sample as never, identityFrom({}), "https://crestmont.test/unsubscribe/preview");
+      assert.doesNotMatch(r.text, /sign in or create an account/i, `${tpl}: guest checkout needs no account`);
+    }
+  }
+});

@@ -522,7 +522,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
             "Prices are fixed and paid upfront for standard packages. We do not offer discounts by phone and never guarantee rankings or launch dates.", notMe],
           cta: { label: "Compare packages", url: d.pricingUrl } };
         case "checkout_link": return { subject: `Your secure link for the ${d.packageName} package`, heading: `${d.packageName} package — secure checkout`,
-          paragraphs: [hello, `The ${d.packageName} package is ${d.price}, paid upfront.`, "The link takes you to Crestmont's checkout. You will sign in or create an account with this email address, review and accept the Development Agreement, and pay on Stripe's secure page. We never take card details by phone or email.",
+          paragraphs: [hello, `The ${d.packageName} package is ${d.price}, paid upfront.`, "The link takes you to Crestmont's checkout: a short project intake form, then the Development Agreement, the required maintenance plan and payment on Stripe's secure page. No account is needed first; after payment we email you a link to set up your account. We never take card details by phone or email.",
             `This link expires on ${d.expires}. Nothing is charged until you complete payment on Stripe.`, notMe],
           cta: { label: "Continue to secure checkout", url: d.url } };
         case "follow_up": return { subject: "Following up from your Crestmont call", heading: "Thanks for your time",
@@ -736,7 +736,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
         subject: `Your secure link to buy the ${d.packageName} package`, heading: `${d.packageName} website package`,
         paragraphs: [`Hello ${d.name}, here is the secure link you asked for on your call with Crestmont Website Development.`,
           `Package: ${d.packageName}, ${d.price}, paid 100% upfront. Any sales tax is shown before you pay.`,
-          "The link opens our website. You will sign in or create an account, confirm your email address and review the agreements before paying through Stripe's secure checkout. We never take card details by phone or email.",
+          "The link opens our website: a short project intake form, then the agreements, the required maintenance plan and payment through Stripe's secure checkout. No account is needed first; after payment we email you a link to set up your account. We never take card details by phone or email.",
           `Your checkout reference is ${d.reference}. If you call us to check whether your payment went through, we will ask for this reference and this email address.`, notMe],
         cta: { label: "Continue to secure checkout", url: d.url },
       };

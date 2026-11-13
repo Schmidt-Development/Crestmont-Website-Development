@@ -61,6 +61,7 @@ check(custom.length === 17 && custom.every((t: Obj) => t.url === fnUrl), `all ${
 for (const f of promptBehaviourFindings(String(llm?.general_prompt ?? ""))) check(f.status !== "fail", f.check, f.detail);
 const prompt = String(llm?.general_prompt ?? "");
 check(!/\b(staff|team|people|humans?|someone)\b[^.]{0,60}\b(24\s*\/\s*7|around the clock|24 hours)/i.test(prompt), "prompt never promises human staff around the clock", "AI availability only");
+check(!/sign in or create an account|create an account[^.]{0,40}before (paying|payment)|must (sign in|log in|register)/i.test(prompt), "prompt does not tell buyers to create an account before paying (guest checkout)");
 
 // ───────────── 2. Backend (signed test call) ─────────────
 const run = randomBytes(4).toString("hex");
@@ -90,6 +91,7 @@ const hours = await fn("get_business_hours", {});
 outputs.get_business_hours = hours.json;
 check(hours.status === 200 && hours.json?.ai_available === true, "get_business_hours: the AI receptionist is available 24/7", `staffed now: ${hours.json?.staff_available_now}; hours: ${String(hours.json?.hours ?? "").slice(0, 80)}`);
 check(!/human staff are available 24|staff (are )?available around the clock/i.test(JSON.stringify(hours.json)), "get_business_hours never claims human staff around the clock");
+check(hours.json?.staff_available_now === false || hours.json?.live_transfer_configured === true, "get_business_hours says a person is available only when a live transfer is configured", `staff_available_now ${hours.json?.staff_available_now}, live transfer ${hours.json?.live_transfer_configured}`);
 const transfer = await fn("check_transfer_availability", {});
 outputs.check_transfer_availability = transfer.json;
 check(transfer.status === 200 && typeof transfer.json?.transfer_available === "boolean", "check_transfer_availability answers", `transfer available: ${transfer.json?.transfer_available}`);
@@ -133,15 +135,15 @@ if (!SKIP_SIMULATION && llmId) {
   const slotList = (outputs.schedule_consultation as Obj)?.slots ?? [];
   const bookMock = { tool_name: "schedule_consultation", input_match_rule: { type: "any" }, output: JSON.stringify(slotList.length ? { step: "availability", ...(outputs.schedule_consultation as Obj) } : outputs.schedule_consultation) };
   const cases = [
-    { name: "pricing and maintenance", user: "You run a small bakery and are calling Crestmont to ask what each website package costs, what is included, and whether you also need a monthly maintenance plan. Ask about every package, then thank the agent and end the call.",
+    { name: "pricing and maintenance", user: "You run a small bakery and are calling Crestmont to ask what each website package costs, what is included, and whether you also need a monthly maintenance plan. Ask about every package, then thank the agent and end the call. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
       metrics: ["The agent states the package prices exactly as the pricing tool returned them: Starter $999, Business $2,499 and Premium from $4,999.", "The agent explains that a maintenance plan is part of buying a package and describes at least one maintenance plan accurately.", "The agent does not invent prices, discounts or packages that the pricing tool did not return."], mocks: okMocks },
-    { name: "3 a.m. caller", user: "It is 3 a.m. on a Sunday. You ask whether Crestmont is open right now and whether a person can call you back immediately. Then ask to start a Business website.",
+    { name: "3 a.m. caller", user: "It is 3 a.m. on a Sunday. You ask whether Crestmont is open right now and whether a person can call you back immediately. Then ask to start a Business website. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
       metrics: ["The agent says it can help right now (the AI receptionist is available 24/7) and keeps helping instead of saying Crestmont is closed.", "The agent does not promise that a human will call back immediately and does not claim human staff work 24/7."], mocks: okMocks },
-    { name: "buyer", user: "You want to buy the Business package today. Your name is Jordan Test, phone 517-555-0100, email jordan@example.com, business Jordan's Bakery. Answer the agent's questions and accept a checkout link.",
-      metrics: ["The agent collects the caller's name, phone or email and business name.", "The agent saves the enquiry with crm_upsert_lead.", "The agent sends the secure checkout link for the Business package with create_checkout_session and explains that it opens the project intake before payment."], mocks: okMocks },
-    { name: "callback", user: "You would like someone to call you back about a Premium website. Ask for a callback time and pick the first time the agent offers.",
+    { name: "buyer", user: "You want to buy the Business package today. Your name is Jordan Test, phone 517-555-0100, email jordan@example.com, business Jordan's Bakery. Answer the agent's questions and accept a checkout link. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
+      metrics: ["The agent collects the caller's name, phone or email and business name.", "The agent records the enquiry (crm_upsert_lead, or create_checkout_session, which records it too).", "The agent sends the secure checkout link for the Business package with create_checkout_session and tells the caller what the link opens (the project intake, agreements and payment), without asking them to create an account first."], mocks: okMocks },
+    { name: "callback", user: "You would like someone to call you back about a Premium website. Ask for a callback time and pick the first time the agent offers. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
       metrics: ["The agent checks availability with schedule_consultation and offers only times the tool returned, or takes a callback request if none are available.", "The agent does not promise a time that the tool did not return."], mocks: [...okMocks.filter((m) => m.tool_name !== "schedule_consultation"), bookMock] },
-    { name: "failing tool", user: "You want a checkout link for the Starter package; your name is Sam Test and your email is sam@example.com.",
+    { name: "failing tool", user: "You want a checkout link for the Starter package; your name is Sam Test and your email is sam@example.com. When your questions are answered (or after at most six exchanges), say goodbye and hang up; never repeat a question the agent already answered.",
       metrics: ["When sending the checkout link fails, the agent apologises, does not claim the link was sent, and offers an alternative such as a callback or a team member following up."],
       mocks: [...okMocks.filter((m) => m.tool_name !== "create_checkout_session"), mock("create_checkout_session", { error: "I couldn't complete that. A team member will follow up." })] },
   ];
@@ -161,7 +163,13 @@ if (!SKIP_SIMULATION && llmId) {
         const runs = items((await retell("GET", `/v2/list-test-runs/${id}?limit=50`)).json);
         for (const t of runs) {
           const c = cases.find((x) => t.test_case_definition_snapshot?.name?.endsWith(x.name));
-          check(t.status === "pass", `Retell simulation: ${c?.name ?? t.test_case_definition_id}`, `${t.status}${t.result_explanation ? `: ${String(t.result_explanation).replace(/\s+/g, " ").slice(0, 300)}` : ""}`);
+          check(t.status === "pass", `Retell simulation: ${c?.name ?? t.test_case_definition_id}`, `${t.status}${t.result_explanation ? `: ${String(t.result_explanation).replace(/\s+/g, " ").slice(0, 400)}` : ""}`);
+          if (t.status !== "pass") {
+            // The simulated conversation (no real person), last turns only, to show where it went wrong.
+            const snap = t.transcript_snapshot as { transcript?: { role?: string; content?: string }[] } | null;
+            const turns = (snap?.transcript ?? (Array.isArray(snap) ? snap as { role?: string; content?: string }[] : [])).filter((x) => x?.content).slice(-6);
+            for (const x of turns) info(`   ${x.role}: ${String(x.content).replace(/\s+/g, " ").slice(0, 160)}`);
+          }
         }
         info(`simulation batch ${id}: ${b?.pass_count ?? "?"} pass, ${b?.fail_count ?? "?"} fail, ${b?.error_count ?? "?"} error of ${b?.total_count ?? "?"}`);
       }
