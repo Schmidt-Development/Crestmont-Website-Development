@@ -8,6 +8,7 @@
 // endpoint (email-certification.yml). Real application events and their content are certified by the staging journeys.
 import type { AppContext } from "../app/context.ts";
 import { renderTemplate, identityFrom, EMAIL_TEMPLATES, TEMPLATES, type EmailTemplate, type TemplateDef } from "./mailer.ts";
+import { MAILBOXES } from "../adapters/email.ts";
 
 export const CERT_RUN_ID = /^[a-z0-9-]{4,40}$/;
 
@@ -39,4 +40,26 @@ export async function sendCertificationBatch(ctx: AppContext, runId: string, par
     await pause(600); // Resend's default API rate limit is 2 requests a second
   }
   return { sent, part, parts };
+}
+
+/**
+ * Mailbox delivery check (Owner, 2026-11-13): one short, clearly labelled message to EACH of Crestmont's own four
+ * departmental mailboxes (support@, sales@, billing@, legal@) through this environment's real Resend sender. Resend's
+ * webhook then reports, per address, whether the receiving mail server accepted it ("delivered") or refused it
+ * ("bounced": the mailbox or its MX does not exist). One working mailbox never stands in for the others.
+ */
+export async function sendMailboxChecks(ctx: AppContext, runId: string, pause = (ms: number) => new Promise((r) => setTimeout(r, ms))): Promise<{ sent: CertSend[]; part: number; parts: number }> {
+  if (!CERT_RUN_ID.test(runId)) throw new Error("runId must be 4-40 lowercase letters, digits or hyphens");
+  const sent: CertSend[] = [];
+  for (const [name, address] of Object.entries(MAILBOXES)) {
+    const text = `This is an automated delivery check of the ${address} mailbox (run ${runId}). It confirms that mail sent by the Crestmont platform reaches this mailbox. No action is needed.`;
+    try {
+      const res = await ctx.email.send({ to: address, subject: `[Mailbox check] ${name}@ receives mail (run ${runId})`, html: `<p>${text}</p>`, text, template: "internal_alert", idempotencyKey: `mailbox-check:${runId}:${name}` });
+      sent.push({ template: `mailbox:${name}`, probe: "delivered", deliveryId: res.deliveryId, status: res.status });
+    } catch (e) {
+      sent.push({ template: `mailbox:${name}`, probe: "delivered", deliveryId: "", status: "error", error: (e as Error).message.slice(0, 300) });
+    }
+    await pause(600);
+  }
+  return { sent, part: 0, parts: 1 };
 }

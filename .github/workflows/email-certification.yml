@@ -14,6 +14,11 @@ on:
         type: choice
         options: [staging, production]
         default: staging
+      scope:
+        description: "templates: every template to Resend's test inboxes; mailboxes: one check message to each of support@, sales@, billing@ and legal@ plus the domain's mail DNS"
+        type: choice
+        options: [templates, mailboxes]
+        default: templates
 
 permissions:
   contents: read
@@ -50,12 +55,30 @@ jobs:
           echo "::add-mask::$(cat "$RUNNER_TEMP/ops/nonce")"
           $WRANGLER d1 execute crestmont-production --remote --env production --file "$RUNNER_TEMP/ops/challenge.sql" --yes > /dev/null
           rm -f "$RUNNER_TEMP/ops/challenge.sql"
+      - name: Mail DNS of the domain (receiving MX, SPF, DKIM, DMARC; public records)
+        if: inputs.scope == 'mailboxes'
+        run: |
+          d=crestmontwebsitedevelopment.com
+          {
+            echo "### Mail DNS for $d"
+            echo '```'
+            for q in "MX $d" "TXT $d" "TXT resend._domainkey.$d" "MX send.$d" "TXT send.$d" "TXT _dmarc.$d"; do
+              set -- $q
+              echo "$1 $2:"; dig +short "$1" "$2" @1.1.1.1 | sed 's/^/  /' || true
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          mx=$(dig +short MX "$d" @1.1.1.1)
+          [ -n "$mx" ] || { echo "::error title=No MX record on $d::Nothing can receive mail at support@, sales@, billing@ or legal@ until the domain has MX records for a mail host."; exit 1; }
+          dig +short TXT "resend._domainkey.$d" @1.1.1.1 | grep -q 'p=' || echo "::warning title=No Resend DKIM record::resend._domainkey.$d has no DKIM key."
+          dig +short TXT "_dmarc.$d" @1.1.1.1 | grep -qi 'v=DMARC1' || echo "::warning title=No DMARC record::_dmarc.$d is missing."
       - name: Send every template to Resend's test inboxes and follow each delivery (staging)
         if: inputs.target == 'staging'
         env:
           BASE: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
           EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
           ENVIRONMENT_LABEL: staging
+          MAILBOXES: ${{ inputs.scope == 'mailboxes' && '1' || '' }}
         run: node --no-warnings scripts/email-certification.ts
       - name: Send every template to Resend's test inboxes and follow each delivery (production)
         if: inputs.target == 'production'
@@ -67,6 +90,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ENVIRONMENT_LABEL: production
+          MAILBOXES: ${{ inputs.scope == 'mailboxes' && '1' || '' }}
         run: node --no-warnings scripts/email-certification.ts
       - name: Recent Worker errors on the certification endpoint (on failure; messages only)
         if: failure()

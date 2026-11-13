@@ -14,7 +14,8 @@ import { requireStaff } from "../app/app.ts";
 import { isOwner } from "../domain/authz.ts";
 import { renderTemplate, identityFrom, EMAIL_TEMPLATES, TEMPLATES, type EmailTemplate, type TemplateDef, type Audience } from "../services/mailer.ts";
 
-export const DEFAULT_FROM = "Crestmont <support@crestmontwebsitedevelopment.com>";
+import { DEFAULT_EMAIL_FROM, replyToFor } from "../adapters/email.ts";
+export const DEFAULT_FROM = DEFAULT_EMAIL_FROM;
 
 /** The Founder's twelve notification types, mapped to the templates that actually carry them. */
 export const REVIEW_CHECKLIST: { topic: string; templates: EmailTemplate[]; note?: string }[] = [
@@ -59,7 +60,7 @@ function templateCard(ctx: AppContext, t: EmailTemplate, from: string): SafeHtml
   return html`<section class="card stack" id="tpl-${t}" data-template="${t}">
 <h3 class="card__title">${label(t)} <span class="faint" style="font-size:.8rem">(${t})</span></h3>
 <p class="muted">${def.description}</p>
-<dl class="dl"><dt>Sender</dt><dd><code>${from}</code></dd><dt>Recipient</dt><dd>${AUDIENCE[def.audience]}</dd>
+<dl class="dl"><dt>Sender</dt><dd><code>${from}</code></dd><dt>Reply-To</dt><dd><code>${replyToFor(t)}</code></dd><dt>Recipient</dt><dd>${AUDIENCE[def.audience]}</dd>
 <dt>Kind</dt><dd>${def.category === "transactional" ? "Transactional (no unsubscribe link)" : "Marketing (with unsubscribe link)"}</dd><dt>Variants</dt><dd>${def.samples.length}</dd></dl>
 ${def.samples.map((s, i) => {
     const m = renderPreview(ctx, t, i)!;

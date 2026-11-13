@@ -1,0 +1,49 @@
+name: Production receptionist check
+
+# Owner, 2026-11-13 (launch priority 2): verifies the LIVE AI receptionist without placing a call, contacting anyone or
+# charging anything (scripts/receptionist-check.ts): the number, the published agent version and all 17 tools on
+# production; the prompt's 24/7 behaviour; a Retell-signed TEST call through every production function the receptionist
+# uses (recorded as a test call, lead and checkout link to a Resend test inbox); and Retell's own simulation tests of
+# the published LLM with mocked tools (pricing and maintenance, a 3 a.m. caller, a buyer, a callback, a failing tool).
+# The outbound sales workspace is never touched: this key cannot see it.
+on:
+  workflow_dispatch:
+    inputs:
+      simulation:
+        description: "Also run Retell's simulation tests of the published agent"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: receptionist-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Verify the production receptionist (no call placed, nothing charged)
+        env:
+          RETELL_INBOUND_API_KEY: ${{ secrets.RETELL_INBOUND_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PROD: ${{ vars.PRODUCTION_URL }}
+          AGENT: agent_b6ed20f033422649ecf1aedd38
+          SKIP_SIMULATION: ${{ inputs.simulation && '0' || '1' }}
+        run: |
+          node --no-warnings scripts/receptionist-check.ts | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"

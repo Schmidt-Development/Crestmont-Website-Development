@@ -7,7 +7,7 @@ import { Router } from "../lib/router.ts";
 import { HttpError, assertCsrf, cookie, hostCookieName, hstsValue, htmlResponse, isSecure, jsonResponse, parseCookies, readHostCookie, redirect } from "./http.ts";
 import { randomToken } from "../lib/auth-crypto.ts";
 import { loadSession } from "../services/auth.ts";
-import { OutboxEmail, ResendEmail, recipientPolicy } from "../adapters/email.ts";
+import { OutboxEmail, ResendEmail, recipientPolicy, DEFAULT_EMAIL_FROM } from "../adapters/email.ts";
 import { R2Storage, type R2BucketLike } from "../adapters/storage.ts";
 import { NoPayments, StripePayments } from "../adapters/payments.ts";
 import { paymentsMode, commerceBlock } from "../domain/payments-mode.ts";
@@ -38,7 +38,7 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
   const ctx: AppContext = {
     req, url, env, db: env.DB,
     email: env.overrides?.email ?? (env.RESEND_API_KEY && env.ENVIRONMENT !== "development"
-      ? new ResendEmail(env.DB, env.RESEND_API_KEY, env.EMAIL_FROM ?? "Crestmont <support@crestmontwebsitedevelopment.com>", undefined, recipientPolicy(env), env.ENVIRONMENT)
+      ? new ResendEmail(env.DB, env.RESEND_API_KEY, env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM, undefined, recipientPolicy(env), env.ENVIRONMENT)
       : new OutboxEmail(env.DB)),
     storage: env.overrides?.storage !== undefined ? env.overrides.storage : env.FILES ? new R2Storage(env.FILES as R2BucketLike) : null,
     // CREST-GAP-007/008: the environment decides the Stripe mode (production: live only, behind the Founder flag).

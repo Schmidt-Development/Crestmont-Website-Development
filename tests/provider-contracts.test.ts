@@ -74,7 +74,7 @@ test("[EMAIL-003] Resend contract (simulated): POST /emails with bearer key and 
   assert.equal(c.url, "https://api.resend.com/emails");
   assert.equal(c.headers.authorization, "Bearer re_test_SECRETKEY123456");
   assert.equal(c.headers["idempotency-key"], "verify:usr_1:abc");
-  assert.deepEqual(JSON.parse(c.body), { from: "Crestmont <support@crestmontwebsitedevelopment.com>", to: ["dana@harbor.example"], subject: "Confirm your email", html: "<p>Hi</p>", text: "Hi" });
+  assert.deepEqual(JSON.parse(c.body), { from: "Crestmont <support@crestmontwebsitedevelopment.com>", reply_to: "support@crestmontwebsitedevelopment.com", to: ["dana@harbor.example"], subject: "Confirm your email", html: "<p>Hi</p>", text: "Hi" });
   assert.equal((await t.db.prepare(`SELECT provider_message_id FROM email_deliveries WHERE id = ?`).bind(ok.deliveryId).first<{ provider_message_id: string }>())!.provider_message_id, "re_msg_1");
   // The same idempotency key is never sent twice.
   assert.equal((await mail.send(msg)).status, "duplicate");
