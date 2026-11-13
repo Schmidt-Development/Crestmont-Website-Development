@@ -9,7 +9,7 @@
 import type { AppContext } from "../app/context.ts";
 import { hashToken } from "../lib/auth-crypto.ts";
 
-export const OPS_CHALLENGE_PURPOSES = ["owner_invitation", "email_certification", "integration_probe"] as const;
+export const OPS_CHALLENGE_PURPOSES = ["owner_invitation", "email_certification", "integration_probe", "database_backup"] as const;
 export type OpsChallengePurpose = (typeof OPS_CHALLENGE_PURPOSES)[number];
 export const challengeKey = (purpose: OpsChallengePurpose) => `ops.challenge.${purpose}`;
 export const MAX_CHALLENGE_MINUTES = 15;

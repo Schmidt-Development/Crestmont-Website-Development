@@ -24,9 +24,10 @@ import { runAutoPromotion } from "../services/research-promote.ts";
 import { runSalesOpt } from "../services/sales-opt/monitor.ts";
 import { processSalesQueue } from "../services/sales-outbound.ts";
 import { runSuspensionSweep } from "../services/maintenance-lifecycle.ts";
+import { runDatabaseBackup } from "../services/db-backup.ts";
 
 export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
-  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound" | "sales_outbound" | "sales_opt" | "research_promote" | "ops_alerts" | "hosting_suspension";
+  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound" | "sales_outbound" | "sales_opt" | "research_promote" | "ops_alerts" | "hosting_suspension" | "db_backup";
 
 /**
  * Cron expression → jobs. Must match [triggers] crons in wrangler.toml. ops_alerts runs last so it sees this run's
@@ -45,7 +46,7 @@ export type JobName = "requirements" | "stripe_reconcile" | "support_escalation"
 export const SCHEDULE: Record<string, JobName[]> = {
   "* * * * *": ["research_promote"],
   "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "ops_alerts"],
-  "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention", "hosting_suspension"],
+  "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention", "hosting_suspension", "db_backup"],
 };
 
 export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string, { ok: boolean; detail: string }>> {
@@ -110,6 +111,8 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         case "ops_alerts": { const r = await runOpsAlerts(ctx); detail = `${r.raised} new of ${r.checked} alert items; ${r.emailed} emails to ${r.recipients} owner(s)${r.categories.length ? ` (${r.categories.join(", ")})` : ""}`; break; }
         // Clarifications 1–2: pre-suspension reminders and eligibility notices; never suspends or deletes anything itself.
         case "hosting_suspension": { const r = await runSuspensionSweep(ctx, ctx.now()); detail = `${r.reminded} reminders sent, ${r.eligible} eligible for an Owner suspension decision`; break; }
+        // Criterion 5 (2026-11-13): the Worker's own daily database dump to its private bucket. No GitHub run, no approval.
+        case "db_backup": { if (!ctx.storage || ctx.storage.kind !== "r2") { detail = "skipped: no R2 bucket bound"; break; } const m = await runDatabaseBackup({ db: ctx.db, storage: ctx.storage, now: env.overrides?.now }); detail = `${m.key}: ${m.totalRows} rows in ${Object.keys(m.tables).length} tables, ${m.bytes} bytes, sha256 ${m.sha256.slice(0, 12)}`; break; }
         case "retention": detail = (await runRetention({ db: ctx.db, storage: ctx.storage })).map((r) => `${r.category}:${r.mode === "skipped" ? "off" : r.affected}`).join(", "); break;
       }
       results[job] = { ok: true, detail };

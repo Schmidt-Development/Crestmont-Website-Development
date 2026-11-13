@@ -123,6 +123,21 @@ export async function httpSmoke(base: string, fetcher: Fetcher, expectPrelaunch 
         return r.status === 200 || (r.status >= 300 && r.status < 400) ? null : `HTTP ${r.status}`;
       });
     }
+    // Guest checkout (2026-11-13): a visitor with no account goes straight from the package to its intake form — no
+    // sign-in page, no 403 — and the form carries the bot check. (Submitting it needs a human Turnstile pass.)
+    for (const id of ["starter", "business", "premium"]) {
+      await check("launch", `a new visitor without an account opens the ${id} intake directly (guest checkout)`, true, async () => {
+        const e = await req("GET", `/checkout/${id}`);
+        await text(e);
+        const loc = e.headers.get("location") ?? "";
+        if (e.status !== 303 || !loc.endsWith(`/checkout/${id}/intake`)) return `GET /checkout/${id}: HTTP ${e.status} → ${loc || "no redirect"}`;
+        const r = await req("GET", `/checkout/${id}/intake`);
+        const b = await text(r);
+        if (r.status !== 200) return `intake HTTP ${r.status}`;
+        if (!/data-testid="guest-intake"/.test(b)) return "intake is not the guest form";
+        return /class="cf-turnstile[^"]*" data-sitekey="[^"]+"/.test(b) ? null : "guest intake has no Turnstile widget";
+      });
+    }
   }
 
   // ── Customer access stays closed before the public launch ──
