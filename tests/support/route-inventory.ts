@@ -38,7 +38,9 @@ export type Access =
   | { kind: "token"; note: string }
   | { kind: "authflow" }
   | { kind: "session" }
-  | { kind: "customer"; admin?: true; staffToo?: true }
+  /** guest: a signed-out visitor may use it (guest checkout, 2026-11-13). staffPreview: staff are sent to the Owner
+   *  checkout preview instead of a 403. */
+  | { kind: "customer"; admin?: true; staffToo?: true; guest?: true; staffPreview?: true }
   | { kind: "staff"; roles: readonly StaffRole[] }
   | { kind: "signed"; header: string; staffRead?: true }
   | { kind: "webhook"; header: string };
@@ -67,7 +69,7 @@ const pub: RouteSpec = { access: { kind: "public" } };
 const token = (note: string, params?: RouteSpec["params"], audit?: AuditClass): RouteSpec => ({ access: { kind: "token", note }, params, audit });
 const flow = (audit?: AuditClass): RouteSpec => ({ access: { kind: "authflow" }, audit });
 const session = (audit?: AuditClass, params?: RouteSpec["params"]): RouteSpec => ({ access: { kind: "session" }, audit, params });
-const cust = (params?: RouteSpec["params"], audit?: AuditClass, opts: { admin?: true; staffToo?: true } = {}): RouteSpec => ({ access: { kind: "customer", ...opts }, params, audit });
+const cust = (params?: RouteSpec["params"], audit?: AuditClass, opts: { admin?: true; staffToo?: true; guest?: true; staffPreview?: true } = {}): RouteSpec => ({ access: { kind: "customer", ...opts }, params, audit });
 const staff = (roles: readonly StaffRole[], params?: RouteSpec["params"], audit?: AuditClass): RouteSpec => ({ access: { kind: "staff", roles }, params, audit });
 const signed = (header: string, opts: { staffRead?: true } = {}): RouteSpec => ({ access: { kind: "signed", header, ...opts }, api: true });
 const hook = (header: string): RouteSpec => ({ access: { kind: "webhook", header }, api: true });
@@ -338,11 +340,11 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /q/:token/accept": { access: { kind: "customer", admin: true }, params: { token: "quoteToken" }, audit: act("quote.accepted") },
   "GET /checkout/maintenance/:planId": cust({ planId: "plan" }),
   "POST /checkout/maintenance/:planId": cust({ planId: "plan" }, act("checkout.subscription_started"), { admin: true }),
-  "GET /checkout/:packageId": cust({ packageId: "package" }),
-  "POST /checkout/:packageId": cust({ packageId: "package" }, act("checkout.started"), { admin: true }),
-  "GET /checkout/:packageId/intake": cust({ packageId: "package" }),
-  "POST /checkout/:packageId/intake": cust({ packageId: "package" }, act("purchase_intake.draft_saved")),
-  "GET /checkout/:packageId/review": cust({ packageId: "package" }),
+  "GET /checkout/:packageId": cust({ packageId: "package" }, undefined, { guest: true, staffPreview: true }),
+  "POST /checkout/:packageId": cust({ packageId: "package" }, act("checkout.started"), { admin: true, staffPreview: true }),
+  "GET /checkout/:packageId/intake": cust({ packageId: "package" }, undefined, { guest: true, staffPreview: true }),
+  "POST /checkout/:packageId/intake": cust({ packageId: "package" }, act("purchase_intake.draft_saved"), { guest: true, staffPreview: true }),
+  "GET /checkout/:packageId/review": cust({ packageId: "package" }, undefined, { staffPreview: true }),
 
   // ── Delivery: my work, conversations, projects, tasks (src/routes/projects.ts) ──
   "GET /staff": staff(STAFF_ROLES),

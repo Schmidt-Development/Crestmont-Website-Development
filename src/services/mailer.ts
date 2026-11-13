@@ -34,7 +34,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "founder_appointment", "voice_escalation", "email_change_confirm", "voice_followup", "sales_info", "internal_alert"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "account_setup", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "founder_appointment", "voice_escalation", "email_change_confirm", "voice_followup", "sales_info", "internal_alert"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -113,6 +113,8 @@ export interface TemplateData {
   /** Owner alert raised by the scheduled ops_alerts job (src/services/monitoring.ts#runOpsAlerts). */
   critical_incident: { summary: string; occurredAt: string; url: string };
   password_reset: { resetUrl: string };
+  /** Guest checkout (2026-11-13): after a verified payment, the buyer chooses a password for the account created at checkout. */
+  account_setup: { name: string; packageName: string; setupUrl: string; validDays: number };
   staff_invitation: { inviterName: string; roleLabel: string; acceptUrl: string };
   quote_sent: { contactName: string; totalCents: number; validUntil: string | null; proposalUrl: string };
   lead_received: { name: string; kind: "quote" | "contact" };
@@ -557,6 +559,18 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       cta: { label: "Choose a new password", url: d.resetUrl },
     }),
     samples: [{ resetUrl: "https://example.com/password/reset?token=preview" }],
+  },
+  account_setup: {
+    name: "account_setup", category: "transactional", audience: "customer",
+    description: "Guest checkout: after a verified payment, the link to choose a password for the buyer's new Crestmont account.",
+    render: (d) => ({
+      subject: "Set up your Crestmont account", heading: "Your project account is ready",
+      paragraphs: [`Hi ${d.name}, thank you for ordering the ${d.packageName} website package. Your payment is confirmed and your project has been created.`,
+        `Choose a password to finish setting up your account. You will use it to follow your project, upload files and approve your website. This link works once and expires in ${d.validDays} days.`,
+        "If you did not place this order, you can ignore this email and contact us."],
+      cta: { label: "Set your password", url: d.setupUrl },
+    }),
+    samples: [{ name: "Morgan", packageName: "Business", setupUrl: "https://example.com/password/reset?token=preview&setup=1", validDays: 7 }],
   },
   staff_invitation: {
     name: "staff_invitation", category: "transactional", audience: "staff",

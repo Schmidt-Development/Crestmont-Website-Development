@@ -408,10 +408,10 @@ test("[PAY-001] checkout without Stripe configured explains it and creates no or
   assert.equal((await c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" })).status, 409);
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) n FROM orders`)).n, 0);
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) n FROM invoices`)).n, 0);
-  // Signed-out visitors are sent to sign in.
+  // Signed-out visitors start the guest checkout (no account first, 2026-11-13).
   const anon = await t.client().get("/checkout/starter");
   assert.equal(anon.status, 303);
-  assert.match(anon.headers.get("location")!, /^\/login\?next=%2Fcheckout%2Fstarter/);
+  assert.equal(anon.headers.get("location"), "/checkout/starter/intake");
   assert.equal((await c.get("/checkout/platinum")).status, 404);
 });
 
@@ -438,9 +438,12 @@ test("[CAT-007] package checkout ignores client-supplied prices and redirects to
   // A forged webhook amount that does not match the invoice is rejected (stays open).
   await postWebhook(t.client(), { id: "evt_forged", type: "checkout.session.completed", created: Math.floor(Date.now() / 1000), data: { object: { id: "cs_test_fake_1", mode: "payment", payment_status: "paid", amount_total: 100, payment_intent: "pi_forged", metadata: co.metadata } } });
   assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM invoices WHERE id = ?`, inv.id)).status, "open");
-  // Staff cannot use customer checkout.
+  // Staff cannot use customer checkout: they are sent to the Owner preview, and nothing is ordered.
   const owner = await staffClient(t, "owner");
-  assert.equal((await owner.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" })).status, 403);
+  const staffPost = await owner.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
+  assert.equal(staffPost.status, 303);
+  assert.match(staffPost.headers.get("location")!, /^\/staff\/checkout-preview\/starter\//);
+  assert.equal(t.fake.checkouts.length, 1, "no second Stripe session");
 });
 
 test("[CAT-006] maintenance subscriptions are refused until the Founder approves entitlements; the approved path uses subscription mode", async () => {

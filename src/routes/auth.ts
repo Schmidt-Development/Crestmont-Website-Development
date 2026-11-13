@@ -208,9 +208,9 @@ export function register(r: Router) {
         try { await sendMail(ctx, { template: "security_notification", to: resetUser.email, idempotencyKey: `reset-done:${resetUserId}:${str(f, "token").slice(0, 16)}`, data: { event: "password_reset_completed" } }); }
         catch (e) { console.error(JSON.stringify({ level: "warn", msg: "reset notice email failed", error: (e as Error).message })); }
       }
-      return redirect(ctx, "/login", { kind: "success", text: "Password updated. Sign in with your new password." });
+      return redirect(ctx, "/login", { kind: "success", text: str(f, "setup") === "1" ? "Your account is set up. Sign in to see your project." : "Password updated. Sign in with your new password." });
     } catch (e) {
-      if (e instanceof auth.AuthError) return resetPage(ctx, [e.message], str(f, "token"));
+      if (e instanceof auth.AuthError) return resetPage(ctx, [e.message], str(f, "token"), str(f, "setup") === "1");
       throw e;
     }
   });
@@ -309,9 +309,11 @@ function forgotPage(ctx: AppContext, errors: string[] = [], status?: number) {
 }
 
 
-function resetPage(ctx: AppContext, errors: string[] = [], token = ctx.url.searchParams.get("token") ?? "") {
-  return htmlResponse(ctx, authLayout(ctx, { title: "Choose a new password" }, html`<h1 style="font-size:2rem">Choose a new password</h1>${formErrors(errors)}
-<form method="post" action="/password/reset">${csrf(ctx)}<input type="hidden" name="token" value="${token}">${input({ name: "password", label: "New password", type: "password", autocomplete: "new-password", required: true, hint: "At least 12 characters." })}<div class="form-actions">${button("Update password")}</div></form>`), errors.length ? 400 : 200);
+function resetPage(ctx: AppContext, errors: string[] = [], token = ctx.url.searchParams.get("token") ?? "", setup = ctx.url.searchParams.get("setup") === "1") {
+  // setup=1: the account-setup link a guest buyer receives after paying (same single-use token, friendlier words).
+  const title = setup ? "Set your password" : "Choose a new password";
+  return htmlResponse(ctx, authLayout(ctx, { title }, html`<h1 style="font-size:2rem">${title}</h1>${setup ? html`<p class="muted">Finish setting up your Crestmont account. You will use this password to follow your project and approve your website.</p>` : ""}${formErrors(errors)}
+<form method="post" action="/password/reset">${csrf(ctx)}<input type="hidden" name="token" value="${token}">${setup ? html`<input type="hidden" name="setup" value="1">` : ""}${input({ name: "password", label: setup ? "Password" : "New password", type: "password", autocomplete: "new-password", required: true, hint: "At least 12 characters." })}<div class="form-actions">${button(setup ? "Set password" : "Update password")}</div></form>`), errors.length ? 400 : 200);
 }
 
 /** The signed-in user id that may accept an invitation: only a session that has completed MFA (when enabled). */
