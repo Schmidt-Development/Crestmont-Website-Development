@@ -1,10 +1,13 @@
-// Transactional email (EMAIL-001..003). Two adapters:
-//  - ResendEmail: real delivery through the Resend API (requires RESEND_API_KEY + verified domain).
+// Transactional email (EMAIL-001..003). Adapters:
+//  - ResendEmail: real delivery through the Resend API (requires RESEND_API_KEY + verified domain). The default.
+//  - SesEmail: real delivery through Amazon SES (src/adapters/ses.ts), only when EMAIL_PROVIDER = "ses" and every
+//    SES_* sending variable is set. Same delivery log, suppression, recipient policy and retry as Resend.
 //  - OutboxEmail: development only; renders and stores the message so flows can be exercised and
 //    inspected. Outbox rows are status 'queued' with provider 'dev-outbox' and are never reported
 //    as sent or delivered.
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
+import { PermanentSendError, SES_BUSINESS_SLUG, emailProvider, sesConfig, sesSend, type SesConfig, type SesEnv } from "./ses.ts";
 
 /**
  * Crestmont's departmental mailboxes (Owner, 2026-11-13 — locked; never consolidate). Every customer email is sent from
@@ -29,10 +32,11 @@ export function replyToFor(template: string): string {
 }
 
 export interface EmailMessage { to: string; subject: string; html: string; text: string; template: string; idempotencyKey: string }
-export interface EmailResult { deliveryId: string; status: "queued" | "sent" | "failed" | "duplicate" | "suppressed"; provider: "resend" | "dev-outbox" }
+export type SendingProvider = "resend" | "ses";
+export interface EmailResult { deliveryId: string; status: "queued" | "sent" | "failed" | "duplicate" | "suppressed"; provider: SendingProvider | "dev-outbox" }
 
 export interface EmailAdapter {
-  readonly kind: "resend" | "dev-outbox";
+  readonly kind: SendingProvider | "dev-outbox";
   send(msg: EmailMessage): Promise<EmailResult>;
 }
 
@@ -49,7 +53,7 @@ async function suppressionReason(db: Db, to: string): Promise<string | null> {
   } catch { return null; } // legacy databases without migration 0012
 }
 
-async function insertDelivery(db: Db, msg: EmailMessage, provider: "resend" | "dev-outbox"): Promise<{ id: string; suppressed: boolean } | null> {
+async function insertDelivery(db: Db, msg: EmailMessage, provider: SendingProvider | "dev-outbox"): Promise<{ id: string; suppressed: boolean } | null> {
   const id = newId("em");
   const at = nowIso();
   const suppressed = await suppressionReason(db, msg.to);
@@ -67,6 +71,7 @@ export class OutboxEmail implements EmailAdapter {
   readonly kind = "dev-outbox" as const;
   private db: Db;
   constructor(db: Db) { this.db = db; }
+  protected get dbRef(): Db { return this.db; }
   async send(msg: EmailMessage): Promise<EmailResult> {
     const d = await insertDelivery(this.db, msg, "dev-outbox");
     if (!d) return { deliveryId: "", status: "duplicate", provider: this.kind };
@@ -105,10 +110,10 @@ export function recipientPolicy(env: { ENVIRONMENT: string; EMAIL_RECIPIENT_ALLO
 }
 
 export class ResendEmail implements EmailAdapter {
-  readonly kind = "resend" as const;
-  private db: Db; private apiKey: string; private from: string; private fetchImpl: typeof fetch;
+  readonly kind: SendingProvider = "resend";
+  protected db: Db; private apiKey: string; protected from: string; protected fetchImpl: typeof fetch;
   private blocked: (to: string) => string | null;
-  private environment: string | null;
+  protected environment: string | null;
   /**
    * `environment` is sent as the Resend tag `environment=<staging|production>`. Resend webhooks are configured per
    * account, so one environment's endpoint can receive the other's events; the receiver ignores events whose tag
@@ -126,7 +131,7 @@ export class ResendEmail implements EmailAdapter {
       await this.db.prepare(`UPDATE email_deliveries SET last_error = COALESCE(last_error, ?) WHERE id = ?`).bind(reason, o.id).run();
       return { deliveryId: o.id, status: o.suppressed ? "suppressed" : "queued", provider: "dev-outbox" };
     }
-    const d = await insertDelivery(this.db, msg, "resend");
+    const d = await insertDelivery(this.db, msg, this.kind);
     if (!d) return { deliveryId: "", status: "duplicate", provider: this.kind };
     if (d.suppressed) return { deliveryId: d.id, status: "suppressed", provider: this.kind };
     return this.attempt(d.id, msg);
@@ -144,21 +149,85 @@ export class ResendEmail implements EmailAdapter {
       return { deliveryId: id, status: "suppressed", provider: this.kind };
     }
     try {
-      const r = await this.fetchImpl("https://api.resend.com/emails", {
-        method: "POST",
-        headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json", "idempotency-key": msg.idempotencyKey },
-        body: JSON.stringify({ from: this.from, reply_to: replyToFor(msg.template), to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text,
-          ...(this.environment ? { tags: [{ name: "environment", value: this.environment }] } : {}) }),
-      });
-      const body = (await r.json().catch(() => ({}))) as { id?: string; message?: string };
-      if (!r.ok) throw new Error(`Resend ${r.status}: ${body.message ?? "error"}`);
+      const messageId = await this.transmit(msg);
       await this.db.prepare(`UPDATE email_deliveries SET status='sent', provider_message_id=?, attempts=attempts+1, updated_at=? WHERE id=?`)
-        .bind(body.id ?? null, nowIso(), id).run();
+        .bind(messageId, nowIso(), id).run();
       return { deliveryId: id, status: "sent", provider: this.kind };
     } catch (e) {
-      await this.db.prepare(`UPDATE email_deliveries SET status=CASE WHEN attempts+1>=5 THEN 'failed' ELSE 'queued' END, attempts=attempts+1, last_error=?, updated_at=? WHERE id=?`)
-        .bind((e as Error).message.slice(0, 1000), nowIso(), id).run();
+      // A permanent provider refusal (SES 4xx) fails at once; anything else stays queued for the retry job (5 attempts).
+      await this.db.prepare(`UPDATE email_deliveries SET status=CASE WHEN ? OR attempts+1>=5 THEN 'failed' ELSE 'queued' END, attempts=attempts+1, last_error=?, updated_at=? WHERE id=?`)
+        .bind(e instanceof PermanentSendError ? 1 : 0, (e as Error).message.slice(0, 1000), nowIso(), id).run();
       return { deliveryId: id, status: "failed", provider: this.kind };
     }
   }
+  /** One provider call; returns the provider's message id. Throws on failure (PermanentSendError = do not retry). */
+  protected async transmit(msg: EmailMessage): Promise<string | null> {
+    const r = await this.fetchImpl("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json", "idempotency-key": msg.idempotencyKey },
+      body: JSON.stringify({ from: this.from, reply_to: replyToFor(msg.template), to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text,
+        ...(this.environment ? { tags: [{ name: "environment", value: this.environment }] } : {}) }),
+    });
+    const body = (await r.json().catch(() => ({}))) as { id?: string; message?: string };
+    if (!r.ok) throw new Error(`Resend ${r.status}: ${body.message ?? "error"}`);
+    return body.id ?? null;
+  }
+}
+
+/**
+ * Amazon SES. Shares the Resend adapter's delivery log, suppression checks, recipient policy (EMAIL_RECIPIENT_ALLOWLIST
+ * on staging) and retry; only the provider call differs. Tags: business=crestmont, category=<template> and, like the
+ * Resend tag, environment=<staging|production> so the SNS webhook can ignore the other environment's events.
+ * SES has no idempotency key: the delivery row's idempotency_key (claimed before sending) is what prevents a second send.
+ */
+export class SesEmail extends ResendEmail {
+  override readonly kind: SendingProvider = "ses";
+  private ses: SesConfig;
+  constructor(db: Db, ses: SesConfig, from: string, fetchImpl: typeof fetch = fetch, blocked: (to: string) => string | null = () => null, environment: string | null = null) {
+    super(db, "", from, fetchImpl, blocked, environment);
+    this.ses = ses;
+  }
+  protected override async transmit(msg: EmailMessage): Promise<string | null> {
+    return sesSend(this.ses, {
+      from: this.from, to: [msg.to], replyTo: [replyToFor(msg.template)], subject: msg.subject, html: msg.html, text: msg.text,
+      tags: { business: SES_BUSINESS_SLUG, category: msg.template, ...(this.environment ? { environment: this.environment } : {}) },
+    }, this.fetchImpl);
+  }
+}
+
+/**
+ * EMAIL_PROVIDER = "ses" without every SES_* sending variable: a configuration error. Handled like a missing
+ * RESEND_API_KEY (the message is kept in the outbox, never sent), never silently sent through Resend instead; the
+ * delivery row says why and the Worker log carries a clear error.
+ */
+export class SesMisconfiguredEmail extends OutboxEmail {
+  readonly missing: string[];
+  constructor(db: Db, missing: string[]) { super(db); this.missing = missing; }
+  get error() { return `Not sent: EMAIL_PROVIDER is "ses" but ${this.missing.join(", ")} ${this.missing.length === 1 ? "is" : "are"} not set (email configuration error).`; }
+  override async send(msg: EmailMessage): Promise<EmailResult> {
+    console.error(`[email] configuration error: ${this.error}`);
+    const r = await super.send(msg);
+    if (r.deliveryId) await this.dbRef.prepare(`UPDATE email_deliveries SET last_error = COALESCE(last_error, ?) WHERE id = ?`).bind(this.error, r.deliveryId).run();
+    return r;
+  }
+}
+
+export interface EmailEnv extends SesEnv {
+  DB: Db; ENVIRONMENT: string; RESEND_API_KEY?: string; EMAIL_FROM?: string; EMAIL_PROVIDER?: string;
+  EMAIL_RECIPIENT_ALLOWLIST?: string; INTERNAL_NOTIFY_EMAIL?: string;
+}
+
+/**
+ * The adapter for this environment. Development always uses the outbox. EMAIL_PROVIDER = "ses" selects SES (or the
+ * configuration-error outbox when SES variables are missing); anything else keeps Resend exactly as before.
+ */
+export function createEmailAdapter(env: EmailEnv): EmailAdapter {
+  if (env.ENVIRONMENT !== "development" && emailProvider(env) === "ses") {
+    const c = sesConfig(env);
+    if (!c.ok) return new SesMisconfiguredEmail(env.DB, c.missing);
+    return new SesEmail(env.DB, c.config, env.SES_FROM?.trim() || env.EMAIL_FROM || DEFAULT_EMAIL_FROM, undefined, recipientPolicy(env), env.ENVIRONMENT);
+  }
+  return env.RESEND_API_KEY && env.ENVIRONMENT !== "development"
+    ? new ResendEmail(env.DB, env.RESEND_API_KEY, env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM, undefined, recipientPolicy(env), env.ENVIRONMENT)
+    : new OutboxEmail(env.DB);
 }

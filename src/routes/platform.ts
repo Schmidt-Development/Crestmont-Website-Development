@@ -625,10 +625,11 @@ ${pagination(ctx, page, rows.length > limit)}`;
     const d = await ctx.db.prepare(`SELECT d.*, m.provider, m.subject, m.text_body FROM email_deliveries d LEFT JOIN email_messages m ON m.delivery_id = d.id WHERE d.id = ?`).bind(p.id)
       .first<{ id: string; template: string; to_email: string; status: string; attempts: number; last_error: string | null; provider_message_id: string | null; created_at: string; updated_at: string; provider: string | null; subject: string | null; text_body: string | null }>();
     if (!d) throw new HttpError(404, "Delivery not found");
-    const canRetry = d.provider === "resend" && ["failed", "queued"].includes(d.status) && ctx.email instanceof ResendEmail;
+    // SesEmail extends ResendEmail: a row is retried only by the adapter of the provider that queued it.
+    const canRetry = (d.provider === "resend" || d.provider === "ses") && d.provider === ctx.email.kind && ["failed", "queued"].includes(d.status) && ctx.email instanceof ResendEmail;
     const body = html`${pageHead(d.subject ?? label(d.template), linkButton("Back to log", "/staff/email", "ghost", "sm"), "Email delivery")}
 ${dl([["Template", label(d.template)], ["To", d.to_email], ["Provider", d.provider ?? "—"], ["Status", d.provider === "dev-outbox" ? badge("queued", "Dev outbox (not sent)") : badge(d.status)], ["Attempts", d.attempts], ["Provider message id", d.provider_message_id], ["Last error", d.last_error], ["Created", formatDateTime(d.created_at)], ["Updated", formatDateTime(d.updated_at)]])}
-${d.provider === "resend" && ["failed", "queued"].includes(d.status) ? (canRetry ? html`<p>${actionForm(ctx, `/staff/email/${d.id}/retry`, "Retry delivery", { variant: "primary" })}</p>` : alert("warn", "Retry is unavailable: Resend is not configured in this environment.")) : ""}
+${(d.provider === "resend" || d.provider === "ses") && ["failed", "queued"].includes(d.status) ? (canRetry ? html`<p>${actionForm(ctx, `/staff/email/${d.id}/retry`, "Retry delivery", { variant: "primary" })}</p>` : alert("warn", d.provider === "ses" ? "Retry is unavailable: SES is not the active email provider in this environment." : "Retry is unavailable: Resend is not configured in this environment.")) : ""}
 <section class="section--tight"><h2>Text body</h2>${d.text_body ? html`<pre class="code-block">${bodyForStaff(ctx, d.to_email, d.text_body)}</pre><p><a class="btn btn--ghost btn--sm" href="/staff/email/${d.id}/html">Download HTML version</a></p>` : emptyState("No stored content", "The rendered body was not stored for this delivery.")}</section>`;
     return staffPage(ctx, "Email delivery", body);
   });
@@ -644,7 +645,8 @@ ${d.provider === "resend" && ["failed", "queued"].includes(d.status) ? (canRetry
     const row = await ctx.db.prepare(`SELECT d.id, d.status, d.template, d.to_email, d.idempotency_key, m.provider, m.subject, m.html_body, m.text_body FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.id = ?`).bind(p.id)
       .first<{ id: string; status: string; template: string; to_email: string; idempotency_key: string; provider: string; subject: string; html_body: string; text_body: string }>();
     if (!row) throw new HttpError(404, "Delivery not found");
-    if (row.provider !== "resend" || !(ctx.email instanceof ResendEmail)) return redirect(ctx, `/staff/email/${p.id}`, { kind: "error", text: "Resend is not configured in this environment; nothing was retried." });
+    if (row.provider === "ses" && !(ctx.email instanceof ResendEmail && ctx.email.kind === "ses")) return redirect(ctx, `/staff/email/${p.id}`, { kind: "error", text: "SES is not the active email provider in this environment; nothing was retried." });
+    if ((row.provider !== "resend" && row.provider !== "ses") || !(ctx.email instanceof ResendEmail) || ctx.email.kind !== row.provider) return redirect(ctx, `/staff/email/${p.id}`, { kind: "error", text: "Resend is not configured in this environment; nothing was retried." });
     if (!["failed", "queued"].includes(row.status)) return redirect(ctx, `/staff/email/${p.id}`, { kind: "error", text: "Only failed or queued deliveries can be retried." });
     const res = await ctx.email.attempt(row.id, { to: row.to_email, subject: row.subject, html: row.html_body, text: row.text_body, template: row.template, idempotencyKey: row.idempotency_key });
     await audit(ctx.db, { actorUserId: ctx.user!.id, action: "email.retried", subjectType: "email_delivery", subjectId: row.id, details: { result: res.status } });
@@ -754,7 +756,8 @@ ${alert("info", html`<strong>Alerting: email to the Owners, no paging.</strong> 
 <div class="grid grid-2">
 <section class="card"><h2 class="card__title">Dependencies</h2><p>${badge("active", "0 runtime dependencies")}</p><p class="muted">The platform has zero runtime npm dependencies (package.json declares none); it uses Web APIs and Node/Workers built-ins only. Development tooling (TypeScript, @types/node) is installed in CI only. Automated dependency and code scanning (npm audit, CodeQL) runs in CI, which is currently blocked (BLK-013).</p></section>
 <section class="card"><h2 class="card__title">Secrets (${label(ctx.env.ENVIRONMENT)})</h2><p class="faint">Names only. Values are never displayed or logged.</p>
-${table(integ.secretPresence(ctx.env), [{ header: "Secret", cell: (s) => html`<code>${s.name}</code>` }, { header: "Status", cell: (s) => yesNo(s.present) }])}</section></div>
+${table(integ.secretPresence(ctx.env), [{ header: "Secret", cell: (s) => html`<code>${s.name}</code>` }, { header: "Status", cell: (s) => yesNo(s.present) }])}
+${((ep) => html`<p class="faint" data-email-provider="${ep.provider}">Email provider: <strong>${ep.provider === "ses" ? "Amazon SES" : "Resend"}</strong> (EMAIL_PROVIDER). Amazon SES settings: ${ep.vars.map((v) => html`<code>${v.name}</code> ${v.present ? "set" : "MISSING"}`).reduce((a, b) => html`${a}, ${b}`)}.</p>`)(integ.emailProviderPresence(ctx.env))}</section></div>
 <section class="section--tight"><h2>Open security findings</h2>${table(findings, [
   { header: "Finding", cell: (f) => f.title },
   { header: "Severity", cell: (f) => badge(f.severity === "critical" || f.severity === "high" ? "failing" : f.severity === "medium" ? "warn" : "", label(f.severity)) },

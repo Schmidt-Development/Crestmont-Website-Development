@@ -40,6 +40,7 @@ Create at the chosen mail host (its own MX records on the root domain): `support
 | API key | Resend → API Keys → *Sending access*, restricted to the domain → `wrangler secret put RESEND_API_KEY --env staging` | a **separate** key → `--env production` |
 | Webhook | Resend → Webhooks → `https://<staging host>/api/webhooks/resend`, events `email.sent`, `email.delivered`, `email.bounced`, `email.complained`, `email.delivery_delayed`, `email.failed`, `email.suppressed` → signing secret → `RESEND_WEBHOOK_SECRET` | same with the production host and its own secret |
 | Recipients | `EMAIL_RECIPIENT_ALLOWLIST` (default `@crestmontwebsitedevelopment.com`) — staging mails nobody else | unrestricted |
+| Amazon SES (optional, `EMAIL_PROVIDER = "ses"`) | secrets `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY`; vars `SES_REGION`, `SES_CONFIGURATION_SET`, `SES_SNS_TOPIC_ARN` (in `wrangler.toml`); SNS subscription `https://<staging host>/api/webhooks/ses` | same with the production host (see DEPLOYMENT.md §4) |
 
 ## 5. Verify
 

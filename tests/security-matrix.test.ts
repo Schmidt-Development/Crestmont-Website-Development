@@ -57,7 +57,8 @@ test("[AUTH-007] anonymous visitors are denied on every non-public route (redire
     const res = await call(anon, r, path);
     checked++;
     let ok: boolean;
-    if (kind === "signed" || kind === "webhook") ok = res.status === 401;
+    if (kind === "webhook" && r.spec.access.kind === "webhook" && r.spec.access.denyStatus) ok = res.status === r.spec.access.denyStatus;
+    else if (kind === "signed" || kind === "webhook") ok = res.status === 401;
     else if (kind === "token") ok = res.status < 500; // the URL token is the capability; forged tokens are checked below
     else if (r.spec.api) ok = res.status === 401;
     // Guest checkout: a signed-out visitor starts the purchase (entry → intake page; an empty intake submit is refused

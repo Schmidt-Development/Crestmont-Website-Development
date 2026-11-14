@@ -183,6 +183,104 @@ export async function handleResendEvent(db: Db, svixId: string, raw: string, env
   return { duplicate: false, outcome, suppressed };
 }
 
+// ───────────── Amazon SES events (SNS → /api/webhooks/ses; src/adapters/ses.ts verifies the SNS signature) ─────────────
+//
+// Same delivery-status model, suppression list and exactly-once table as Resend. The SNS MessageId is the idempotency
+// key, stored as "sns:<MessageId>" in email_webhook_events.svix_id; type is "ses.<eventType>". Matched by SES
+// mail.messageId = email_deliveries.provider_message_id.
+//   Send → sent; Delivery → delivered; Bounce (Permanent) → bounced + hard_bounce suppression; Bounce (other) → failed;
+//   Complaint → complaint suppression (status unchanged); Reject / RenderingFailure → failed; DeliveryDelay → note only.
+// Environment isolation mirrors Resend: SesEmail tags every send environment=<ENVIRONMENT> (eventIsForeign).
+
+export const SES_HANDLED_EVENTS = ["Send", "Delivery", "Bounce", "Complaint", "Reject", "DeliveryDelay", "RenderingFailure"] as const;
+
+const addresses = (list: unknown, key: string): string[] =>
+  (Array.isArray(list) ? list : []).map((x) => s(obj(x), key)).filter((x): x is string => !!x).slice(0, 50);
+
+/** SES mail.tags is { name: [values] }; reduce it to the { environment } shape eventIsForeign reads. */
+function sesTags(mail: Obj): Record<string, unknown> {
+  const t = obj(mail.tags);
+  const env = Array.isArray(t.environment) && typeof t.environment[0] === "string" ? t.environment[0] : undefined;
+  return env === undefined ? {} : { tags: { environment: env } };
+}
+
+/** The configuration set an SES event was sent through (mail.tags["ses:configuration-set"][0]). */
+export function sesConfigurationSet(event: Obj): string | null {
+  const t = obj(obj(event.mail).tags)["ses:configuration-set"];
+  return Array.isArray(t) && typeof t[0] === "string" ? t[0] : null;
+}
+
+/** Handles one verified SES event (the parsed SNS Message), exactly once per SNS MessageId. */
+export async function handleSesEvent(db: Db, snsMessageId: string, event: Obj, environment?: string): Promise<EventOutcome> {
+  const key = `sns:${snsMessageId}`.slice(0, 200);
+  const type = s(event, "eventType") ?? s(event, "notificationType") ?? "unknown";
+  const label = `ses.${type}`.slice(0, 60);
+  const mail = obj(event.mail);
+  // The event's detail object: bounce, complaint, delivery, send, reject, deliveryDelay; RenderingFailure uses "failure".
+  const sub = obj(event[type === "RenderingFailure" ? "failure" : type.charAt(0).toLowerCase() + type.slice(1)]);
+  const at0 = s(sub, "timestamp") ?? s(mail, "timestamp");
+  if (eventIsForeign(sesTags(mail), environment)) {
+    const claim = await db.prepare(`INSERT INTO email_webhook_events (svix_id, type, provider_message_id, delivery_id, recipient, outcome, event_created_at, received_at)
+        VALUES (?,?,NULL,NULL,NULL,'ignored',?,?) ON CONFLICT(svix_id) DO NOTHING`).bind(key, label, at0, nowIso()).run();
+    return { duplicate: claim.meta.changes !== 1, outcome: "ignored" };
+  }
+  const messageId = s(mail, "messageId");
+  const recipients = type === "Bounce" ? addresses(sub.bouncedRecipients, "emailAddress")
+    : type === "Complaint" ? addresses(sub.complainedRecipients, "emailAddress")
+    : (Array.isArray(mail.destination) ? mail.destination : []).filter((x): x is string => typeof x === "string").slice(0, 50);
+  const delivery = messageId ? await db.prepare(`SELECT id, status, to_email FROM email_deliveries WHERE provider_message_id = ?`).bind(messageId).first<{ id: string; status: string; to_email: string }>() : null;
+  const handled = (SES_HANDLED_EVENTS as readonly string[]).includes(type);
+  const outcome: EventOutcome["outcome"] = !handled ? "ignored" : delivery || type === "Bounce" || type === "Complaint" ? "applied" : "unmatched";
+  const claim = await db.prepare(`INSERT INTO email_webhook_events (svix_id, type, provider_message_id, delivery_id, recipient, outcome, event_created_at, received_at)
+      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(svix_id) DO NOTHING`)
+    .bind(key, label, messageId, delivery?.id ?? null, (delivery?.to_email ?? recipients[0] ?? null), outcome, at0, nowIso()).run();
+  if (claim.meta.changes !== 1) {
+    const prev = await db.prepare(`SELECT outcome FROM email_webhook_events WHERE svix_id = ?`).bind(key).first<{ outcome: EventOutcome["outcome"] }>();
+    return { duplicate: true, outcome: prev?.outcome ?? "ignored" };
+  }
+  if (!handled) return { duplicate: false, outcome };
+
+  const at = nowIso();
+  const setStatus = async (to: string, onlyFrom: string[], note?: string | null) => {
+    if (!delivery) return;
+    await db.prepare(`UPDATE email_deliveries SET status = ?, last_error = COALESCE(?, last_error), updated_at = ? WHERE id = ? AND status IN (${onlyFrom.map(() => "?").join(",")})`)
+      .bind(to, note ?? null, at, delivery.id, ...onlyFrom).run();
+  };
+  const suppressed: string[] = [];
+  const targets = delivery ? [delivery.to_email] : recipients;
+  let detail: string | null = null;
+  switch (type) {
+    case "Send": await setStatus("sent", ["queued", "failed"]); break;
+    case "Delivery": await setStatus("delivered", ["queued", "sent", "failed"]); break;
+    case "DeliveryDelay":
+      detail = `Delivery delayed by the recipient's mail server (temporary${s(sub, "delayType") ? `: ${s(sub, "delayType")}` : ""}); SES keeps retrying.`;
+      if (delivery) await db.prepare(`UPDATE email_deliveries SET last_error = ?, updated_at = ? WHERE id = ? AND status IN ('queued','sent')`).bind(detail, at, delivery.id).run();
+      break;
+    case "Reject": detail = `SES rejected the message${s(sub, "reason") ? `: ${s(sub, "reason")}` : ""}`; await setStatus("failed", ["queued", "sent"], detail); break;
+    case "RenderingFailure": detail = `SES could not render the message${s(sub, "errorMessage") ? `: ${(s(sub, "errorMessage") ?? "").slice(0, 300)}` : ""}`; await setStatus("failed", ["queued", "sent"], detail); break;
+    case "Bounce": {
+      const bounced = (Array.isArray(sub.bouncedRecipients) ? sub.bouncedRecipients : []).map(obj);
+      const diag = s(bounced[0] ?? {}, "diagnosticCode") ?? "";
+      const permanent = s(sub, "bounceType") === "Permanent";
+      detail = `Bounce ${s(sub, "bounceType") ?? "unknown"}${s(sub, "bounceSubType") ? `/${s(sub, "bounceSubType")}` : ""}: ${diag.slice(0, 300)}`;
+      if (permanent) {
+        await setStatus("bounced", ["queued", "sent", "delivered", "failed"], detail);
+        for (const t of targets) if (await addSuppression(db, t, "hard_bounce", detail, key)) suppressed.push(t.toLowerCase());
+      } else {
+        await setStatus("failed", ["queued", "sent"], detail);
+      }
+      break;
+    }
+    case "Complaint":
+      detail = "Recipient marked the message as spam.";
+      if (delivery) await db.prepare(`UPDATE email_deliveries SET last_error = ?, updated_at = ? WHERE id = ?`).bind(detail, at, delivery.id).run();
+      for (const t of targets) if (await addSuppression(db, t, "complaint", detail, key)) suppressed.push(t.toLowerCase());
+      break;
+  }
+  if (detail) await db.prepare(`UPDATE email_webhook_events SET detail = ? WHERE svix_id = ?`).bind(detail.slice(0, 500), key).run();
+  return { duplicate: false, outcome, suppressed };
+}
+
 export interface SuppressionRow { id: string; email: string; reason: string; detail: string | null; created_at: string; removed_at: string | null; removed_by_name: string | null; removal_note: string | null }
 
 export async function listSuppressions(db: Db, f: { includeRemoved: boolean; q?: string; limit: number; offset: number }): Promise<SuppressionRow[]> {

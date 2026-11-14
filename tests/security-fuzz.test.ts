@@ -192,6 +192,8 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/webhooks/retell/inbound": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
     "POST /api/webhooks/retell/outbound/functions": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
     "POST /api/webhooks/resend": async (b) => signSvix(SECRETS.resend, `msg_${Math.random().toString(16).slice(2)}`, b),
+    // SNS signs inside the body, so no header makes an arbitrary body valid: every variant must be a JSON 403 (never 5xx).
+    "POST /api/webhooks/ses": async () => ({ "x-amz-sns-message-type": "Notification" }),
     "POST /api/leads": async () => ({}),
     // The website assistant accepts same-origin JSON only; the Origin header is its "signature".
     "POST /api/assistant": async () => ({ origin: "http://crestmont.test" }),
@@ -220,6 +222,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     // Unsigned: rejected before parsing (lead capture is the one public JSON endpoint).
     const unsigned = await anon.request("POST", r.pattern, { body: bodies.hostile, headers: { "content-type": "application/json" } });
     if (r.key === "POST /api/assistant") { if (unsigned.status !== 403) problems.push(`${r.key} without Origin → ${unsigned.status}`); }
+    else if (r.key === "POST /api/webhooks/ses") { if (unsigned.status !== 403) problems.push(`${r.key} unsigned → ${unsigned.status}`); }
     else if (r.key !== "POST /api/leads" && unsigned.status !== 401) problems.push(`${r.key} unsigned → ${unsigned.status}`);
     for (const [variant, body] of Object.entries(bodies)) {
       const e0 = appErrors(w.db);

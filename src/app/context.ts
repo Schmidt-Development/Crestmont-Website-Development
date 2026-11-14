@@ -23,6 +23,18 @@ export interface Env {
   TURNSTILE_SITE_KEY?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
+  /** Email provider: "ses" selects Amazon SES (all SES_* sending variables required); missing/empty/other = Resend. */
+  EMAIL_PROVIDER?: string;
+  /** Amazon SES (src/adapters/ses.ts). Secrets: SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY (per-business IAM sender). */
+  SES_ACCESS_KEY_ID?: string;
+  SES_SECRET_ACCESS_KEY?: string;
+  /** Non-secret SES settings (wrangler.toml vars): region us-east-2, configuration set crestmontwebsitedevelopment. */
+  SES_REGION?: string;
+  SES_CONFIGURATION_SET?: string;
+  /** Optional sender for SES; defaults to EMAIL_FROM. */
+  SES_FROM?: string;
+  /** The shared SES event topic; /api/webhooks/ses accepts only SNS messages from this TopicArn. */
+  SES_SNS_TOPIC_ARN?: string;
   /** Production only: "open" once the Founder authorizes the public launch; anything else keeps customer sign-up, enquiries and checkout closed (src/app/prelaunch.ts). */
   PUBLIC_LAUNCH?: string;
   /** Cloudflare Workers AI binding (wrangler.toml `ai = { binding = "AI" }`), used only by the website assistant. */

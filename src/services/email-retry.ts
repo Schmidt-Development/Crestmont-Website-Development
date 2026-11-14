@@ -1,4 +1,5 @@
-// Automatic retry of queued Resend deliveries (CREST-GAP-035, EMAIL-003).
+// Automatic retry of queued Resend deliveries (CREST-GAP-035, EMAIL-003). With EMAIL_PROVIDER = "ses" the same job
+// retries queued SES deliveries (m.provider = 'ses') through the SES adapter; each provider only retries its own rows.
 //
 // A send that failed transiently stays 'queued' with attempts incremented (src/adapters/email.ts); after 5 attempts it
 // becomes 'failed'. The scheduled job retries queued Resend messages with exponential backoff (5, 10, 20, 40 minutes
@@ -17,18 +18,19 @@ export function backoffMs(attempts: number): number {
   return BASE_BACKOFF_MS * 2 ** Math.max(0, attempts - 1);
 }
 
-type Retrier = { kind: "resend"; attempt(id: string, msg: EmailMessage): Promise<EmailResult> };
+type Retrier = { kind: "resend" | "ses"; attempt(id: string, msg: EmailMessage): Promise<EmailResult> };
 
 export async function retryQueuedEmails(ctx: Pick<AppContext, "db" | "email" | "now">): Promise<{ retried: number; sent: number; stuck: number; detail: string }> {
   const db = ctx.db;
   const now = ctx.now().getTime();
   const email = ctx.email as unknown as Partial<Retrier>;
   let retried = 0, sent = 0;
-  if (email.kind === "resend" && typeof email.attempt === "function") {
+  const sending = email.kind === "resend" || email.kind === "ses";
+  if (sending && typeof email.attempt === "function") {
     const rows = (await db.prepare(`SELECT d.id, d.template, d.to_email, d.idempotency_key, d.attempts, d.updated_at, m.subject, m.html_body, m.text_body
         FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id
-        WHERE d.status = 'queued' AND m.provider = 'resend' AND d.attempts < ? AND d.updated_at <= ? ORDER BY d.updated_at LIMIT 50`)
-      .bind(MAX_EMAIL_ATTEMPTS, new Date(now - BASE_BACKOFF_MS).toISOString())
+        WHERE d.status = 'queued' AND m.provider = ? AND d.attempts < ? AND d.updated_at <= ? ORDER BY d.updated_at LIMIT 50`)
+      .bind(email.kind, MAX_EMAIL_ATTEMPTS, new Date(now - BASE_BACKOFF_MS).toISOString())
       .all<{ id: string; template: string; to_email: string; idempotency_key: string; attempts: number; updated_at: string; subject: string; html_body: string; text_body: string }>()).results;
     for (const r of rows) {
       if (Date.parse(r.updated_at) + backoffMs(r.attempts) > now) continue;
@@ -37,7 +39,7 @@ export async function retryQueuedEmails(ctx: Pick<AppContext, "db" | "email" | "
       if (res.status === "sent") sent++;
     }
   }
-  const stuck = (await db.prepare(`SELECT COUNT(*) AS n FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.status = 'queued' AND m.provider = 'resend' AND d.updated_at < ?`)
+  const stuck = (await db.prepare(`SELECT COUNT(*) AS n FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.status = 'queued' AND m.provider IN ('resend','ses') AND d.updated_at < ?`)
     .bind(new Date(now - STUCK_AFTER_MS).toISOString()).first<{ n: number }>())?.n ?? 0;
   if (stuck > 0) {
     const day = new Date(now).toISOString().slice(0, 10);
@@ -48,6 +50,6 @@ export async function retryQueuedEmails(ctx: Pick<AppContext, "db" | "email" | "
         .bind(newId("ntf"), o.user_id, day, `${stuck} email${stuck === 1 ? " is" : "s are"} still queued more than an hour after the last delivery attempt. Review Email operations.`, nowIso(), o.user_id, day).run();
     }
   }
-  const mode = email.kind === "resend" ? `${retried} queued deliveries retried, ${sent} sent` : "retry skipped: Resend is not configured (outbox only)";
+  const mode = email.kind === "resend" ? `${retried} queued deliveries retried, ${sent} sent` : email.kind === "ses" ? `${retried} queued SES deliveries retried, ${sent} sent` : "retry skipped: Resend is not configured (outbox only)";
   return { retried, sent, stuck, detail: `${mode}; ${stuck} stuck (queued > 1 h)` };
 }

@@ -43,7 +43,8 @@ export type Access =
   | { kind: "customer"; admin?: true; staffToo?: true; guest?: true; staffPreview?: true }
   | { kind: "staff"; roles: readonly StaffRole[] }
   | { kind: "signed"; header: string; staffRead?: true }
-  | { kind: "webhook"; header: string };
+  /** denyStatus: the status an unauthenticated request gets when it is not 401 (SNS-signed SES events answer 403). */
+  | { kind: "webhook"; header: string; denyStatus?: 403 };
 
 export type AuditClass = { action: string } | { exempt: string } | { blocked: string };
 
@@ -72,7 +73,7 @@ const session = (audit?: AuditClass, params?: RouteSpec["params"]): RouteSpec =>
 const cust = (params?: RouteSpec["params"], audit?: AuditClass, opts: { admin?: true; staffToo?: true; guest?: true; staffPreview?: true } = {}): RouteSpec => ({ access: { kind: "customer", ...opts }, params, audit });
 const staff = (roles: readonly StaffRole[], params?: RouteSpec["params"], audit?: AuditClass): RouteSpec => ({ access: { kind: "staff", roles }, params, audit });
 const signed = (header: string, opts: { staffRead?: true } = {}): RouteSpec => ({ access: { kind: "signed", header, ...opts }, api: true });
-const hook = (header: string): RouteSpec => ({ access: { kind: "webhook", header }, api: true });
+const hook = (header: string, denyStatus?: 403): RouteSpec => ({ access: { kind: "webhook", header, ...(denyStatus ? { denyStatus } : {}) }, api: true });
 const act = (action: string): AuditClass => ({ action });
 const exempt = (why: string): AuditClass => ({ exempt: why });
 const blocked = (why: string): AuditClass => ({ blocked: why });
@@ -109,6 +110,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/webhooks/retell/inbound": hook("x-retell-signature"),
   "POST /api/webhooks/retell/outbound/functions": hook("x-retell-signature"),
   "POST /api/webhooks/resend": hook("svix-signature"),
+  "POST /api/webhooks/ses": hook("x-amz-sns-message-type", 403), // SNS signature is in the body; any failure is 403
   "POST /api/readiness/deployments": signed("x-crestmont-signature"),
   "POST /api/readiness/release-candidates": signed("x-crestmont-signature"),
   "POST /api/ops/owner-invitation": signed("x-crestmont-signature"),

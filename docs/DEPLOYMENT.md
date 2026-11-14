@@ -70,6 +70,19 @@ Payments mode per environment (`src/domain/payments-mode.ts`, CREST-GAP-007/008)
 | `RESEND_WEBHOOK_SECRET` | the signing secret of the **staging** webhook endpoint | the signing secret of the **production** webhook endpoint | Resend/Svix `whsec_…`, shown on each endpoint in Resend → Webhooks. Receiver: `POST /api/webhooks/resend`. |
 
 Non-secret email vars (set in `wrangler.toml` `vars` or as plain-text variables): `EMAIL_FROM` (default `Crestmont <support@crestmontwebsitedevelopment.com>`), and on staging `EMAIL_RECIPIENT_ALLOWLIST` (comma-separated addresses and/or `@domain` entries; default `@crestmontwebsitedevelopment.com`). Without `RESEND_API_KEY` every message stays in the outbox (never sent).
+
+**Amazon SES (optional second provider, `src/adapters/ses.ts`).** Resend stays the provider unless the plain var `EMAIL_PROVIDER = "ses"` is set; a missing, empty or any other value means Resend, and nothing ever falls over to SES on its own. With `EMAIL_PROVIDER = "ses"` every SES sending variable below must be set, otherwise every message is held in the outbox with a configuration error in its delivery row and the Worker log (it is never sent through Resend instead). SES uses the same delivery log, suppression list, staging `EMAIL_RECIPIENT_ALLOWLIST`, retry job and staff retry as Resend; tags `business=crestmont`, `category=<template>`, `environment=<env>`.
+
+| Variable | Secret? | Value |
+|---|---|---|
+| `SES_ACCESS_KEY_ID` | yes (`wrangler secret put`) | the Crestmont IAM sender key (per business) |
+| `SES_SECRET_ACCESS_KEY` | yes (`wrangler secret put`) | its secret |
+| `SES_REGION` | no (`wrangler.toml` vars) | `us-east-2` |
+| `SES_CONFIGURATION_SET` | no (`wrangler.toml` vars) | `crestmontwebsitedevelopment` |
+| `SES_FROM` | no, optional | sender for SES; defaults to `EMAIL_FROM` |
+| `SES_SNS_TOPIC_ARN` | no (`wrangler.toml` vars) | `arn:aws:sns:us-east-2:675006621465:ses-events` |
+
+SES events arrive through SNS at `POST /api/webhooks/ses` (subscribe each environment's `https://<host>/api/webhooks/ses` to the topic with a filter policy on the configuration set). The receiver verifies the SNS signature (SignatureVersion 1 and 2, certificate only from `https://sns.<region>.amazonaws.com/*.pem`), requires `TopicArn = SES_SNS_TOPIC_ARN`, confirms the subscription itself, ignores events of other configuration sets (other businesses on the shared topic) and of the other environment, and applies Send / Delivery / Bounce / Complaint / Reject / DeliveryDelay / RenderingFailure to the same delivery statuses and suppressions as the Resend webhook. Anything unauthenticated gets 403. `/staff/security` shows the active provider and each SES variable as set/MISSING.
 | `TURNSTILE_SECRET`, `TURNSTILE_SITE_KEY` | required (public forms, `/register` and `/password/forgot` fail closed without them) | required | Cloudflare Turnstile widget per hostname. Staging uses Cloudflare's always-pass test keys in `wrangler.toml`. |
 | `MFA_ENCRYPTION_KEY` | **required** (set manually; not derived by the deploy workflow) | **required**, different value | `openssl rand -base64 32` (exactly 32 bytes). AES-GCM key for TOTP secrets at rest. Without it, two-factor *enrolment* is refused on staging/production (existing users keep signing in). Never rotate in place (RUNBOOK §4). |
 | `FOUNDER_EMAIL` | optional (unset: demo `@crestmont-preview.test` Owners are still refused) | **required before launch** | The Founder's sign-in address. When set, only that account can record a production launch approval, and `GET /api/readiness/release-authorization` refuses any other approver ("approver is not the Founder", CREST-GAP-020). Set with `wrangler secret put FOUNDER_EMAIL --env production` (a personal address is not committed to this public repository). |

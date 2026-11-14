@@ -3,6 +3,7 @@
 //  POST /api/webhooks/retell/functions  Retell custom-function calls → voice service functions
 //  POST /api/webhooks/retell/inbound    Retell inbound-call webhook (per phone number): number binding, env stamp, dynamic variables
 //  POST /api/webhooks/resend            Resend (Svix-signed) delivery events → delivery status + suppressions
+//  POST /api/webhooks/ses               Amazon SES events via SNS (SNS-signed) → the same delivery status + suppressions
 //  GET  /staff/email-suppressions       suppression list (settings.operational); POST …/:id/remove
 //  GET  /staff/finance/reconciliation   Stripe reconciliation findings, payouts + cost-import ledger (finance.read; src/routes/reconciliation.ts)
 // Reviewing a finding is a finance.read action: it records a note only and changes no money state.
@@ -18,6 +19,7 @@ import { readBody } from "./api.ts";
 import { handleVoiceEvent, VOICE_FUNCTIONS } from "../services/voice.ts";
 import { translateRetellEvent, translateRetellFunction, translateRetellInbound, RetellAuthError, RetellPayloadError, type Translated, type RetellCtx } from "../adapters/retell.ts";
 import * as mail from "../services/email-events.ts";
+import { SnsAuthError, defaultCertFetcher, snsUrlOk, verifySnsMessage } from "../adapters/ses.ts";
 import { registerReconciliation } from "./reconciliation.ts";
 import { verifyRetellWorkspace, type RetellWorkspace } from "../adapters/retell-workspaces.ts";
 import { ingestSalesEvent } from "../services/sales-opt/ingest.ts";
@@ -91,6 +93,50 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
 }
 
 
+/**
+ * Amazon SES events (EMAIL-003), delivered by SNS. Every failure to authenticate is a 403: no SNS message-type header,
+ * SES_SNS_TOPIC_ARN / SES_CONFIGURATION_SET unset (fails closed), a signature that does not verify against an SNS
+ * certificate, or a TopicArn other than SES_SNS_TOPIC_ARN. SubscriptionConfirmation: the SubscribeURL (sns host only) is
+ * visited after those checks. Notification: events from another configuration set (another business on the shared
+ * topic) or another environment are acknowledged and change nothing; 5xx only when storage fails, so SNS retries.
+ */
+async function sesWebhook(ctx: AppContext): Promise<Response> {
+  const deny = (error: string) => jsonResponse(ctx, 403, { error });
+  const header = ctx.req.headers.get("x-amz-sns-message-type");
+  if (!header) return deny("Missing x-amz-sns-message-type header");
+  const topic = ctx.env.SES_SNS_TOPIC_ARN?.trim(), configSet = ctx.env.SES_CONFIGURATION_SET?.trim();
+  if (!topic || !configSet) return deny("SES webhook not configured (SES_SNS_TOPIC_ARN / SES_CONFIGURATION_SET)");
+  const raw = await readBody(ctx.req);
+  const f = ctx.env.overrides?.fetch ?? fetch; // test seam: certificate and SubscribeURL requests
+  let msg: Awaited<ReturnType<typeof verifySnsMessage>>;
+  try { msg = await verifySnsMessage(raw, defaultCertFetcher(f)); } catch (e) {
+    if (e instanceof SnsAuthError) return deny(`SNS signature rejected: ${e.message}`);
+    throw e;
+  }
+  if (msg.TopicArn !== topic) return deny("Unexpected TopicArn");
+  if (msg.Type !== header) return deny("x-amz-sns-message-type does not match the message");
+  if (msg.Type === "SubscriptionConfirmation") {
+    if (!snsUrlOk(msg.SubscribeURL)) return deny("SubscribeURL is not an SNS URL");
+    const res = await f(msg.SubscribeURL!, { redirect: "manual" }).catch(() => null);
+    if (!res || !res.ok) return jsonResponse(ctx, 502, { error: "Could not confirm the SNS subscription; SNS will resend the confirmation." });
+    await audit(ctx.db, { actorKind: "webhook", action: "email.ses_subscription_confirmed", subjectType: "webhook", subjectId: "ses", details: { topic } });
+    return jsonResponse(ctx, 200, { received: true, confirmed: true });
+  }
+  if (msg.Type !== "Notification") return jsonResponse(ctx, 200, { received: true, outcome: "ignored" });
+  let event: Record<string, unknown>;
+  try { event = JSON.parse(msg.Message) as Record<string, unknown>; } catch { return jsonResponse(ctx, 200, { received: true, outcome: "ignored" }); }
+  if (!event || typeof event !== "object" || Array.isArray(event)) return jsonResponse(ctx, 200, { received: true, outcome: "ignored" });
+  // Business routing guard: one shared topic for every business; only this configuration set's events are ours.
+  if (mail.sesConfigurationSet(event) !== configSet) return jsonResponse(ctx, 200, { received: true, outcome: "ignored" });
+  try {
+    const out = await mail.handleSesEvent(ctx.db, msg.MessageId, event, ctx.env.ENVIRONMENT);
+    return jsonResponse(ctx, 200, { received: true, ...out });
+  } catch (e) {
+    console.error(`[ses-webhook] storage error: ${(e as Error).message}`);
+    return jsonResponse(ctx, 500, { error: "Temporary storage error; SNS will retry." });
+  }
+}
+
 /** Appointment hook for the agents: emails the internal mailbox about booked, moved and cancelled appointments on both
  *  calendars and about Founder callback requests (src/services/appointment-notifications.ts). */
 export function appointmentDeps(ctx: AppContext, mail: MailerCtx) {
@@ -114,6 +160,8 @@ export function register(r: Router): void {
     const out = await mail.handleResendEvent(ctx.db, svixId, raw, ctx.env.ENVIRONMENT);
     return jsonResponse(ctx, 200, { received: true, ...out });
   });
+
+  r.post("/api/webhooks/ses", (ctx) => sesWebhook(ctx));
 
   // ── Email suppressions (EMAIL-003) ──
   const suppressionsPage = async (ctx: AppContext, errors: string[] = [], status = 200) => {

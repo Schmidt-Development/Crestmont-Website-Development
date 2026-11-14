@@ -5,6 +5,7 @@
 // a short SHA-256 fingerprint, used to notice when a key changes so stale verification is dropped.
 import { retellKey, keysAmbiguous } from "../adapters/retell-workspaces.ts";
 import { STRIPE_API_VERSION, SUPPORTED_WEBHOOK_API_VERSIONS } from "../adapters/payments.ts";
+import { SES_VARS, emailProvider } from "../adapters/ses.ts";
 import { paymentsMode, keyMode } from "../domain/payments-mode.ts";
 import { STRIPE_WEBHOOK_EVENTS } from "../domain/stripe-events.ts";
 import type { Db } from "../lib/db.ts";
@@ -195,7 +196,7 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
       // environment ("ignored" = another environment's mail) is proof the webhook path works end to end. This row used
       // to stay "unverified" forever while the Resend row counted the very deliveries these events confirmed.
       const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
-      const ev = await d.db.prepare(`SELECT COUNT(*) AS n, MAX(received_at) AS last FROM email_webhook_events WHERE outcome <> 'ignored' AND received_at >= ?`).bind(since)
+      const ev = await d.db.prepare(`SELECT COUNT(*) AS n, MAX(received_at) AS last FROM email_webhook_events WHERE outcome <> 'ignored' AND received_at >= ? AND svix_id NOT LIKE 'sns:%'`).bind(since)
         .first<{ n: number; last: string | null }>().catch(() => null);
       const fpw = `${await fp(e.RESEND_WEBHOOK_SECRET)}:${ev?.n ?? 0}`;
       if (ev && ev.n > 0) return { status: "verified", detail: `Svix signing secret set; ${ev.n} signed Resend delivery event(s) received for this environment in the last 30 days (latest ${ev.last}). Bounces and complaints are recorded.`, fingerprint: fpw, probe: false };
@@ -435,7 +436,14 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
 
 /** Environment variable names the platform reads as secrets. Values are never displayed. */
 export const SECRET_NAMES = ["EVIDENCE_INGEST_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "RESEND_API_KEY", "ANTHROPIC_API_KEY",
-  "GITHUB_TOKEN", "TURNSTILE_SECRET", "VOICE_WEBHOOK_SECRET", "RETELL_INBOUND_API_KEY", "RETELL_OUTBOUND_API_KEY", "RESEND_WEBHOOK_SECRET", "MFA_ENCRYPTION_KEY"] as const;
+  "GITHUB_TOKEN", "TURNSTILE_SECRET", "VOICE_WEBHOOK_SECRET", "RETELL_INBOUND_API_KEY", "RETELL_OUTBOUND_API_KEY", "RESEND_WEBHOOK_SECRET", "MFA_ENCRYPTION_KEY",
+  "SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY"] as const;
+
+/** Active email provider and every SES variable as set / MISSING (names only, never values). */
+export function emailProviderPresence(env: Env): { provider: "resend" | "ses"; vars: { name: string; present: boolean }[] } {
+  const e = env as unknown as Record<string, unknown>;
+  return { provider: emailProvider(env), vars: SES_VARS.map((name) => ({ name, present: typeof e[name] === "string" && (e[name] as string).trim().length > 0 })) };
+}
 
 export function secretPresence(env: Env): { name: string; present: boolean }[] {
   const e = env as unknown as Record<string, unknown>;
