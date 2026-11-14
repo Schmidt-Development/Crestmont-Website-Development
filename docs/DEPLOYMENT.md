@@ -78,9 +78,9 @@ Non-secret email vars (set in `wrangler.toml` `vars` or as plain-text variables)
 | `SES_ACCESS_KEY_ID` | yes (`wrangler secret put`) | the Crestmont IAM sender key (per business) |
 | `SES_SECRET_ACCESS_KEY` | yes (`wrangler secret put`) | its secret |
 | `SES_REGION` | no (`wrangler.toml` vars) | `us-east-2` |
-| `SES_CONFIGURATION_SET` | no (`wrangler.toml` vars) | `crestmontwebsitedevelopment` |
+| `SES_CONFIGURATION_SET` | no (`wrangler.toml` vars) | `enterprise-crestmontwebsitedevelopment` |
 | `SES_FROM` | no, optional | sender for SES; defaults to `EMAIL_FROM` |
-| `SES_SNS_TOPIC_ARN` | no (`wrangler.toml` vars) | `arn:aws:sns:us-east-2:675006621465:ses-events` |
+| `SES_SNS_TOPIC_ARN` | no (`wrangler.toml` vars) | `arn:aws:sns:us-east-2:675006621465:enterprise-ses-events` |
 
 SES events arrive through SNS at `POST /api/webhooks/ses` (subscribe each environment's `https://<host>/api/webhooks/ses` to the topic with a filter policy on the configuration set). The receiver verifies the SNS signature (SignatureVersion 1 and 2, certificate only from `https://sns.<region>.amazonaws.com/*.pem`), requires `TopicArn = SES_SNS_TOPIC_ARN`, confirms the subscription itself, ignores events of other configuration sets (other businesses on the shared topic) and of the other environment, and applies Send / Delivery / Bounce / Complaint / Reject / DeliveryDelay / RenderingFailure to the same delivery statuses and suppressions as the Resend webhook. Anything unauthenticated gets 403. `/staff/security` shows the active provider and each SES variable as set/MISSING.
 | `TURNSTILE_SECRET`, `TURNSTILE_SITE_KEY` | required (public forms, `/register` and `/password/forgot` fail closed without them) | required | Cloudflare Turnstile widget per hostname. Staging uses Cloudflare's always-pass test keys in `wrangler.toml`. |

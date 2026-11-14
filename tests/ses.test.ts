@@ -13,7 +13,7 @@ import type { Env } from "../src/app/context.ts";
 
 const CFG: SesConfig = { accessKeyId: "AKIDEXAMPLE", secretAccessKey: "test-secret-not-real", region: "us-east-2", configurationSet: "crestmontwebsitedevelopment" };
 const SES_VARS = { SES_ACCESS_KEY_ID: CFG.accessKeyId, SES_SECRET_ACCESS_KEY: CFG.secretAccessKey, SES_REGION: CFG.region, SES_CONFIGURATION_SET: CFG.configurationSet };
-const TOPIC = "arn:aws:sns:us-east-2:675006621465:ses-events";
+const TOPIC = "arn:aws:sns:us-east-2:675006621465:enterprise-ses-events";
 const msg = (to: string, template = "verification", key = `k-${to}-${Math.random()}`) => ({ to, subject: "Subject", html: "<p>x</p>", text: "x", template, idempotencyKey: key });
 
 type Call = { url: string; init: RequestInit };
