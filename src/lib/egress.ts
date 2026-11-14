@@ -14,6 +14,16 @@ export const EGRESS_HOSTS: readonly string[] = [
 ];
 
 /**
+ * Amazon SES (EMAIL_PROVIDER = "ses"): the SES v2 API is regional (email.<SES_REGION>.amazonaws.com), and SNS signing
+ * certificates and SubscribeURLs come from sns.<region>.amazonaws.com (the shared SES event topic's region). Exact
+ * service-host shapes only; any other amazonaws.com host stays blocked.
+ */
+export const EGRESS_HOST_PATTERNS: readonly RegExp[] = [
+  /^email\.[a-z0-9-]+\.amazonaws\.com$/,
+  /^sns\.[a-z0-9-]+\.amazonaws\.com$/,
+];
+
+/**
  * Hosts that a URL out of an UPLOADED FILE may never reach, whatever else it satisfies.
  *
  * The allowlist above answers "which services does the platform talk to". This answers a different question:
@@ -45,6 +55,7 @@ export function untrustedHostAllowed(hostname: string): boolean {
   if (UNTRUSTED_DENY_HOSTS.includes(h)) return false;
   // A subdomain of a denied host is the same host for this purpose.
   if (UNTRUSTED_DENY_HOSTS.some((d) => h.endsWith(`.${d}`))) return false;
+  if (EGRESS_HOST_PATTERNS.some((re) => re.test(h))) return false;
   if (/(^|\.)bedrock-runtime(-fips)?\./.test(h) && h.endsWith(".amazonaws.com")) return false;
   return true;
 }
@@ -59,7 +70,7 @@ export function egressAllowed(url: string | URL): boolean {
   let u: URL;
   try { u = new URL(String(url)); } catch { return false; }
   if (u.protocol !== "https:") return false;
-  return EGRESS_HOSTS.includes(u.hostname) || dynamic.has(u.hostname);
+  return EGRESS_HOSTS.includes(u.hostname) || EGRESS_HOST_PATTERNS.some((re) => re.test(u.hostname)) || dynamic.has(u.hostname);
 }
 
 /** Temporarily allow one validated host (environment probe). Returns a release function. */

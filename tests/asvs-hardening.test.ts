@@ -68,6 +68,13 @@ test("[SEC-002] F-11 egress allowlist: only fixed provider hosts over https; val
   release();
   assert.equal(egressAllowed("https://crestmont-platform-staging.example.workers.dev/api/health"), false);
 
+  // Amazon SES (EMAIL_PROVIDER = "ses"): the regional SES API and SNS certificate/SubscribeURL hosts only.
+  assert.equal(egressAllowed("https://email.us-east-2.amazonaws.com/v2/email/outbound-emails"), true);
+  assert.equal(egressAllowed("https://sns.us-east-2.amazonaws.com/SimpleNotificationService-abc.pem"), true);
+  for (const bad of ["https://s3.us-east-2.amazonaws.com/x", "https://sns.us-east-2.amazonaws.com.evil.example/x", "https://evil-sns.us-east-2.amazonaws.com/x", "http://sns.us-east-2.amazonaws.com/x"]) {
+    assert.equal(egressAllowed(bad), false, bad);
+  }
+
   // The deployed Worker entry point installs the guard on the global fetch.
   await import("../src/worker.ts");
   await assert.rejects(fetch("https://example.org/"), EgressBlockedError);
