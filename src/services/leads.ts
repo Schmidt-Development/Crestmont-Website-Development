@@ -10,6 +10,7 @@ import { cookie, isSecure, parseCookies } from "../app/http.ts";
 import { sendMail } from "./mailer.ts";
 import { sendInternalTemplate } from "./internal-notify.ts";
 import { intake } from "./contact-identity.ts";
+import { recordSalesEmailConsent } from "./sales-email-consent.ts";
 import { businessDate, endOfBusinessDay } from "../lib/business-time.ts";
 
 export const leadInput = v.object({
@@ -140,6 +141,12 @@ export async function captureLead(db: Db, body: unknown, meta: { ip?: string; at
       .bind(newId("act"), leadId, `Reply to the new ${input.source === "quote_form" ? "quote request" : "message"} from ${input.name}`, endOfBusinessDay(businessDate(new Date())), nowIso())],
   });
   if (!res.leadId) throw Object.assign(new Error("We could not save this request. Please check your email address and try again."), { status: 422 });
+  // The person typed this address into Crestmont's own form: a recipient-originated confirmation (sales-email-consent.ts).
+  const channel = meta.channel ?? input.source;
+  // Never turns a saved lead into an error; without the record the address simply stays ineligible (fails closed).
+  await recordSalesEmailConsent(db, { email: input.email, source: "inbound_form", ref: res.leadId, leadId: res.leadId, contactId: res.contactId ?? null, channel,
+    evidence: `Submitted by the person on the ${channel === "quote_form" ? "quote request form" : channel === "api_lead" ? "lead API (Turnstile-verified)" : "contact form"}` })
+    .catch((e) => console.error(JSON.stringify({ level: "error", msg: "sales email consent not recorded", leadId: res.leadId, error: (e as Error).message })));
   if (res.leadCreated) {
     await db.prepare(`INSERT INTO audit_logs (actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES ('system','lead.created','lead',?,?,?,?)`)
       .bind(res.leadId, JSON.stringify({ source: input.source, ...(Object.keys(attr).length ? { attribution: attr } : {}) }), meta.ip ?? null, nowIso()).run();

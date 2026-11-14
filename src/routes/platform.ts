@@ -35,6 +35,7 @@ import { readBody } from "./api.ts";
 import * as emailReview from "./email-review.ts";
 import { ValidationError } from "../lib/validate.ts";
 import { newId, nowIso, likeContains, likePrefix } from "../lib/db.ts";
+import { storedHeaders } from "../services/email-retry.ts";
 
 // ───────────── shared helpers ─────────────
 function staffPage(ctx: AppContext, title: string, body: SafeHtml, status = 200): Response {
@@ -642,13 +643,13 @@ ${(d.provider === "resend" || d.provider === "ses") && ["failed", "queued"].incl
   });
   r.post("/staff/email/:id/retry", async (ctx, p) => {
     requireStaff(ctx, "settings.operational");
-    const row = await ctx.db.prepare(`SELECT d.id, d.status, d.template, d.to_email, d.idempotency_key, m.provider, m.subject, m.html_body, m.text_body FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.id = ?`).bind(p.id)
-      .first<{ id: string; status: string; template: string; to_email: string; idempotency_key: string; provider: string; subject: string; html_body: string; text_body: string }>();
+    const row = await ctx.db.prepare(`SELECT d.id, d.status, d.template, d.to_email, d.idempotency_key, m.provider, m.subject, m.html_body, m.text_body, m.headers_json FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.id = ?`).bind(p.id)
+      .first<{ id: string; status: string; template: string; to_email: string; idempotency_key: string; provider: string; subject: string; html_body: string; text_body: string; headers_json: string | null }>();
     if (!row) throw new HttpError(404, "Delivery not found");
     if (row.provider === "ses" && !(ctx.email instanceof ResendEmail && ctx.email.kind === "ses")) return redirect(ctx, `/staff/email/${p.id}`, { kind: "error", text: "SES is not the active email provider in this environment; nothing was retried." });
     if ((row.provider !== "resend" && row.provider !== "ses") || !(ctx.email instanceof ResendEmail) || ctx.email.kind !== row.provider) return redirect(ctx, `/staff/email/${p.id}`, { kind: "error", text: "Resend is not configured in this environment; nothing was retried." });
     if (!["failed", "queued"].includes(row.status)) return redirect(ctx, `/staff/email/${p.id}`, { kind: "error", text: "Only failed or queued deliveries can be retried." });
-    const res = await ctx.email.attempt(row.id, { to: row.to_email, subject: row.subject, html: row.html_body, text: row.text_body, template: row.template, idempotencyKey: row.idempotency_key });
+    const res = await ctx.email.attempt(row.id, { to: row.to_email, subject: row.subject, html: row.html_body, text: row.text_body, template: row.template, idempotencyKey: row.idempotency_key, ...storedHeaders(row.headers_json) });
     await audit(ctx.db, { actorUserId: ctx.user!.id, action: "email.retried", subjectType: "email_delivery", subjectId: row.id, details: { result: res.status } });
     return redirect(ctx, `/staff/email/${p.id}`, res.status === "sent" ? { kind: "success", text: "Delivery succeeded." } : { kind: "error", text: "Retry failed; see the last error." });
   });

@@ -5,6 +5,8 @@
 //  POST /api/sales-outbound/test-dispatch        signs a SYNTHETIC test request with this Worker's Retell key (staging E2E)
 //  GET  /buy/:token                               secure purchase link → existing /checkout/<package> flow
 //  GET  /sales/unsubscribe/:token                 sales email unsubscribe (confirm page); POST performs it
+//  POST /api/sales/unsubscribe/:token             RFC 8058 one-click unsubscribe (List-Unsubscribe-Post; no cookies/CSRF)
+//  GET  /api/sales/unsubscribe/:token             the same URL opened in a browser → the confirm page
 //  GET  /staff/sales-outbound                     Owner page (voice.manage): the two calling modes, capacity, ramp, records, queue
 //  POST /staff/sales-outbound/modes               Scheduled AI Callbacks ON/OFF and AI Cold Outreach ON/OFF
 //  POST /staff/sales-outbound/capacity            concurrency allocation (15 cold + 5 reserved callbacks) and provider limit
@@ -247,6 +249,15 @@ export function register(r: Router): void {
     // Same answer whether or not the token matched: reveals nothing about the address.
     return linkPage(ctx, "You're unsubscribed", "You won't receive sales emails from Crestmont at that address. Emails about an account or a purchase you make are not affected.", 200);
   });
+
+  // RFC 8058 one-click: the mailbox provider POSTs "List-Unsubscribe=One-Click" to the List-Unsubscribe URL without
+  // cookies, so this lives under /api/ (no CSRF; no cookie session). The URL token is the only capability; the answer is
+  // the same whether or not it matched.
+  r.post("/api/sales/unsubscribe/:token", async (ctx, p) => {
+    await unsubscribeSalesEmail(ctx.db, p.token, "one_click");
+    return jsonResponse(ctx, 200, { unsubscribed: true });
+  });
+  r.get("/api/sales/unsubscribe/:token", (ctx, p) => redirect(ctx, `/sales/unsubscribe/${encodeURIComponent(p.token)}`));
 
   r.get("/staff/sales-outbound", (ctx) => ownerPage(ctx));
   r.post("/staff/sales-outbound/settings", async (ctx) => {

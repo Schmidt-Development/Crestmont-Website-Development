@@ -31,7 +31,8 @@ export function replyToFor(template: string): string {
   return MAILBOXES.support;
 }
 
-export interface EmailMessage { to: string; subject: string; html: string; text: string; template: string; idempotencyKey: string }
+/** headers: extra RFC 5322 headers (List-Unsubscribe / List-Unsubscribe-Post on sales_info), sent by Resend and SES alike. */
+export interface EmailMessage { to: string; subject: string; html: string; text: string; template: string; idempotencyKey: string; headers?: Record<string, string> }
 export type SendingProvider = "resend" | "ses";
 export interface EmailResult { deliveryId: string; status: "queued" | "sent" | "failed" | "duplicate" | "suppressed"; provider: SendingProvider | "dev-outbox" }
 
@@ -53,17 +54,41 @@ async function suppressionReason(db: Db, to: string): Promise<string | null> {
   } catch { return null; } // legacy databases without migration 0012
 }
 
+/**
+ * Sales opt-outs (sales_email_optouts: unsubscribe link, one-click List-Unsubscribe, do-not-contact) apply to the
+ * commercial sales_info email and to proposals (quote_sent): neither goes to an address that opted out. Account,
+ * billing and security mail is unaffected by a sales opt-out.
+ */
+const OPT_OUT_TEMPLATES = new Set(["sales_info", "quote_sent"]);
+async function optOutReason(db: Db, to: string, template: string): Promise<string | null> {
+  if (!OPT_OUT_TEMPLATES.has(template)) return null;
+  try {
+    const row = await db.prepare(`SELECT source, created_at FROM sales_email_optouts WHERE email = ?`).bind(to.trim().toLowerCase()).first<{ source: string; created_at: string }>();
+    return row ? `Not sent: recipient opted out of sales email (${row.source.replace(/_/g, " ")} recorded ${row.created_at.slice(0, 10)}).` : null;
+  } catch { return null; } // databases without migration 0060
+}
+/** Suppression first (it covers every template), then the sales opt-out. */
+async function blockReason(db: Db, msg: EmailMessage): Promise<string | null> {
+  return (await suppressionReason(db, msg.to)) ?? (await optOutReason(db, msg.to, msg.template));
+}
+/** Header names/values are single-line (no CR/LF injection). */
+const safeHeaders = (h: Record<string, string> | undefined): Record<string, string> | undefined => {
+  const out = Object.fromEntries(Object.entries(h ?? {}).filter(([k]) => /^[A-Za-z0-9-]{1,64}$/.test(k)).map(([k, v]) => [k, String(v).replace(/[\r\n]+/g, " ").trim()]));
+  return Object.keys(out).length ? out : undefined;
+};
+
 async function insertDelivery(db: Db, msg: EmailMessage, provider: SendingProvider | "dev-outbox"): Promise<{ id: string; suppressed: boolean } | null> {
   const id = newId("em");
   const at = nowIso();
-  const suppressed = await suppressionReason(db, msg.to);
+  const suppressed = await blockReason(db, msg);
   const res = await db.prepare(
     `INSERT INTO email_deliveries (id, template, to_email, idempotency_key, status, attempts, last_error, created_at, updated_at)
      VALUES (?,?,?,?,?, 0, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`,
   ).bind(id, msg.template, msg.to, msg.idempotencyKey, suppressed ? "suppressed" : "queued", suppressed, at, at).run();
   if (res.meta.changes !== 1) return null;
-  await db.prepare(`INSERT INTO email_messages (delivery_id, provider, subject, html_body, text_body) VALUES (?,?,?,?,?)`)
-    .bind(id, provider, msg.subject, msg.html, msg.text).run();
+  const headers = safeHeaders(msg.headers);
+  await db.prepare(`INSERT INTO email_messages (delivery_id, provider, subject, html_body, text_body, headers_json) VALUES (?,?,?,?,?,?)`)
+    .bind(id, provider, msg.subject, msg.html, msg.text, headers ? JSON.stringify(headers) : null).run();
   return { id, suppressed: !!suppressed };
 }
 
@@ -142,8 +167,8 @@ export class ResendEmail implements EmailAdapter {
       await this.db.prepare(`UPDATE email_deliveries SET last_error=?, updated_at=? WHERE id=?`).bind(blocked, nowIso(), id).run();
       return { deliveryId: id, status: "failed", provider: this.kind };
     }
-    // A suppression added after the message was queued also blocks retries.
-    const suppressed = await suppressionReason(this.db, msg.to);
+    // A suppression (or sales opt-out) added after the message was queued also blocks retries.
+    const suppressed = await blockReason(this.db, msg);
     if (suppressed) {
       await this.db.prepare(`UPDATE email_deliveries SET status='suppressed', last_error=?, updated_at=? WHERE id=?`).bind(suppressed, nowIso(), id).run();
       return { deliveryId: id, status: "suppressed", provider: this.kind };
@@ -166,6 +191,7 @@ export class ResendEmail implements EmailAdapter {
       method: "POST",
       headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json", "idempotency-key": msg.idempotencyKey },
       body: JSON.stringify({ from: this.from, reply_to: replyToFor(msg.template), to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text,
+        ...(safeHeaders(msg.headers) ? { headers: safeHeaders(msg.headers) } : {}),
         ...(this.environment ? { tags: [{ name: "environment", value: this.environment }] } : {}) }),
     });
     const body = (await r.json().catch(() => ({}))) as { id?: string; message?: string };
@@ -189,7 +215,7 @@ export class SesEmail extends ResendEmail {
   }
   protected override async transmit(msg: EmailMessage): Promise<string | null> {
     return sesSend(this.ses, {
-      from: this.from, to: [msg.to], replyTo: [replyToFor(msg.template)], subject: msg.subject, html: msg.html, text: msg.text,
+      from: this.from, to: [msg.to], replyTo: [replyToFor(msg.template)], subject: msg.subject, html: msg.html, text: msg.text, headers: safeHeaders(msg.headers),
       tags: { business: SES_BUSINESS_SLUG, category: msg.template, ...(this.environment ? { environment: this.environment } : {}) },
     }, this.fetchImpl);
   }

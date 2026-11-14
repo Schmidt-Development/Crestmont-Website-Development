@@ -16,6 +16,7 @@ import { escapeHtml } from "../lib/html.ts";
 import { publicPhoneFrom, OPERATING_LEGAL_NAME } from "../domain/business-identity.ts";
 import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
+import { salesInfoEligibility } from "./sales-email-consent.ts";
 
 /**
  * The 20 workflows the master directive (§55) requires branded templates for, in directive order.
@@ -815,10 +816,33 @@ async function loadIdentity(ctx: { db?: Db; settings?: Record<string, string> })
   } catch { return identityFrom({}); }
 }
 
-export type SendMail = MailSpec & { to: string; idempotencyKey: string; unsubscribeUrl?: string };
+/**
+ * unsubscribeUrl: the footer link (a confirm page). listUnsubscribeUrl: the RFC 8058 one-click endpoint (POST, no
+ * cookies or CSRF), sent as List-Unsubscribe + List-Unsubscribe-Post. Marketing templates require both.
+ */
+export type SendMail = MailSpec & { to: string; idempotencyKey: string; unsubscribeUrl?: string; listUnsubscribeUrl?: string };
 export type MailerCtx = Pick<AppContext, "email"> & { db?: Db; settings?: Record<string, string> };
 
+/** RFC 2369 / RFC 8058 headers for a marketing message (https one-click URL; no mailto: this platform has no inbound mail). */
+export function listUnsubscribeHeaders(oneClickUrl: string): Record<string, string> {
+  const u = httpUrl(oneClickUrl);
+  if (u === "#") throw new Error("Marketing email requires an http(s) one-click unsubscribe URL");
+  return { "List-Unsubscribe": `<${u}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" };
+}
+
 export async function sendMail(ctx: MailerCtx, m: SendMail) {
+  // Defence in depth for the Owner's rule (src/services/sales-email-consent.ts): sales_info is refused here, before
+  // anything is queued, unless the recipient confirmed the address themselves and has not opted out or been suppressed.
+  if (m.template === "sales_info") {
+    const gate = ctx.db ? await salesInfoEligibility(ctx.db, m.to) : { eligible: false as const, code: "recipient_not_confirmed" as const, reason: "Not sent: no database to check the recipient's confirmation." };
+    if (!gate.eligible) {
+      console.warn(JSON.stringify({ level: "warn", msg: "sales_info refused", code: gate.code, reason: gate.reason }));
+      throw Object.assign(new Error(gate.reason), { code: gate.code });
+    }
+  }
+  const marketing = TEMPLATES[m.template].category === "marketing";
+  if (marketing && !m.listUnsubscribeUrl) throw new Error("Marketing email requires a one-click unsubscribe URL");
   const r = renderTemplate(m.template, m.data as never, await loadIdentity(ctx), m.unsubscribeUrl);
-  return ctx.email.send({ to: m.to, subject: r.subject, html: r.html, text: r.text, template: m.template, idempotencyKey: m.idempotencyKey });
+  return ctx.email.send({ to: m.to, subject: r.subject, html: r.html, text: r.text, template: m.template, idempotencyKey: m.idempotencyKey,
+    ...(marketing ? { headers: listUnsubscribeHeaders(m.listUnsubscribeUrl!) } : {}) });
 }

@@ -22,6 +22,10 @@ import {
   type SalesGateFacts, type ResearchFacts,
 } from "../src/domain/sales-eligibility.ts";
 import { STEP_UP_ROUTES } from "../src/app/step-up.ts";
+import { sendMail } from "../src/services/mailer.ts";
+import { createEmailAdapter } from "../src/adapters/email.ts";
+import { salesInfoEligibility } from "../src/services/sales-email-consent.ts";
+import { captureLead } from "../src/services/leads.ts";
 
 const KEY = "key_test_outbound_sales_0001";
 const INBOUND_KEY = "key_test_inbound_reception_0001";
@@ -1002,4 +1006,110 @@ test("[VOICE-003] outbound calling status: eligibility explained, queue counts f
   const salesRep = await createStaff(t.db, "sales", "rep@crestmont.test");
   assert.doesNotMatch(await (await (await t.client().login(salesRep.email)).get("/staff/sales")).text(), /data-outbound-status/);
   assert.match(page, /action="\/staff\/voice\/budget"/);
+});
+
+// ───────────── sales_info eligibility (Owner decision 2026-11-13, option a) ─────────────
+
+const salesMailRows = async (t: Awaited<ReturnType<typeof app>>, to: string) => count(t.db, `SELECT COUNT(*) AS n FROM email_deliveries WHERE to_email = ?`, to);
+
+test("[EMAIL-003] [CRM-005] sales_info goes only to an address the prospect confirmed: harvested-only refused (not queued, logged); call-confirmed allowed with evidence", async () => {
+  const t = await app({ payments: true });
+  // A research prospect whose public listing carried an address (harvested data, TEST DATA).
+  const leadId = await t.seedLead({ emails: ["info@buckeye-bakery.example"] });
+  await t.authorise("+16145552142", leadId);
+  const row = await SO.enqueueSalesCall(t.db, leadId, { requestedBy: t.owner.id, now: t.now });
+  assert.equal((await SO.processSalesQueue(env(t))).dialled, 1);
+  const s = (await SO.getSalesCall(t.db, row.id))!;
+  const callId = s.provider_call_id!, salesId = row.id;
+  const harvested = "info@buckeye-bakery.example";
+  assert.equal((await one<{ email: string }>(t.db, `SELECT c.email FROM contacts c JOIN leads l ON l.contact_id = c.id WHERE l.id = ?`, leadId)).email, harvested, "the import stored the harvested address on the contact");
+
+  for (const email_type of ["package_information", "onboarding_instructions"]) {
+    const r = (await t.post(FN, fn(callId, salesId, "send_sales_email", { email_type, email: harvested }))).json;
+    assert.equal(r.sent, false, email_type);
+    assert.equal(r.reason, "recipient_not_confirmed", email_type);
+  }
+  await t.post(FN, fn(callId, salesId, "update_outbound_lead", { qualification: "qualified" }));
+  const co = (await t.post(FN, fn(callId, salesId, "create_checkout_session", { package: "business", email: harvested, buyer_confirmed: true }))).json;
+  assert.deepEqual([co.checkout_link_sent, co.reason], [false, "recipient_not_confirmed"]);
+  assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM sales_checkout_links WHERE lead_id = ?`, leadId), 0, "no purchase link is created for an unconfirmed address");
+  assert.equal(await salesMailRows(t, harvested), 0, "nothing is queued for a harvested-only address");
+  assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM sales_emails WHERE lead_id = ?`, leadId), 0);
+  assert.ok(await count(t.db, `SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'sales_outbound.email_refused' AND subject_id = ? AND details_json LIKE '%recipient_not_confirmed%'`, leadId) >= 3, "each refusal is logged with its reason");
+
+  // The mailer itself refuses sales_info to an unconfirmed address (defence in depth), before anything is queued.
+  await assert.rejects(sendMail({ email: createEmailAdapter({ DB: t.db, ENVIRONMENT: "development" }), db: t.db },
+    { template: "sales_info", data: { event: "follow_up", name: null, when: null, url: "http://crestmont.test" }, to: harvested, idempotencyKey: "direct-1",
+      unsubscribeUrl: "http://crestmont.test/sales/unsubscribe/x", listUnsubscribeUrl: "http://crestmont.test/api/sales/unsubscribe/x" }),
+    /research\/import data is not consent/);
+  assert.equal(await salesMailRows(t, harvested), 0);
+
+  // The prospect states the address on the call → recorded with sales call id, Retell call id and time → allowed.
+  const up = (await t.post(FN, fn(callId, salesId, "update_outbound_lead", { contact_email: "Info@Buckeye-Bakery.example" }))).json;
+  assert.equal(up.contact_verification, "verified");
+  const consent = await one<{ source: string; sales_call_id: string; provider_call_id: string; lead_id: string; confirmed_at: string; evidence: string }>(t.db,
+    `SELECT source, sales_call_id, provider_call_id, lead_id, confirmed_at, evidence FROM sales_email_consents WHERE email = ?`, harvested);
+  assert.deepEqual([consent.source, consent.sales_call_id, consent.provider_call_id, consent.lead_id], ["call_confirmed", salesId, callId, leadId]);
+  assert.match(consent.confirmed_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(consent.evidence, /stated the address on AI sales call/);
+  const ok = (await t.post(FN, fn(callId, salesId, "send_sales_email", { email_type: "package_information", email: harvested }))).json;
+  assert.equal(ok.sent, true, JSON.stringify(ok));
+  assert.equal((await lastEmail(t.db, harvested))!.template, "sales_info");
+});
+
+test("[EMAIL-003] sales_info: opted-out and suppressed addresses are refused before queueing even when confirmed; inbound-form addresses are eligible", async () => {
+  const t = await app();
+  const { salesId, callId, leadId } = await dialled(t);
+  await t.post(FN, fn(callId, salesId, "update_outbound_lead", { contact_email: "bea@buckeye-bakery.example" }));
+  assert.equal((await salesInfoEligibility(t.db, "bea@buckeye-bakery.example")).eligible, true);
+
+  await t.db.prepare(`INSERT INTO sales_email_optouts (email, source, created_at) VALUES ('bea@buckeye-bakery.example', 'staff', ?)`).bind(ISO(t.now)).run();
+  const opted = (await t.post(FN, fn(callId, salesId, "send_sales_email", { email_type: "package_information", email: "bea@buckeye-bakery.example" }))).json;
+  assert.deepEqual([opted.sent, opted.delivery], [false, "opted_out"]);
+  assert.equal(await salesMailRows(t, "bea@buckeye-bakery.example"), 0, "an opted-out address is not queued");
+  assert.equal((await salesInfoEligibility(t.db, "bea@buckeye-bakery.example") as { code: string }).code, "opted_out");
+
+  await t.db.prepare(`DELETE FROM sales_email_optouts`).run();
+  await t.db.prepare(`INSERT INTO email_suppressions (id, email, reason, detail, source_event_id, created_at) VALUES ('sup_bea','bea@buckeye-bakery.example','complaint',NULL,NULL,?)`).bind(ISO(t.now)).run();
+  const sup = (await t.post(FN, fn(callId, salesId, "send_sales_email", { email_type: "package_information", email: "bea@buckeye-bakery.example" }))).json;
+  assert.deepEqual([sup.sent, sup.delivery], [false, "suppressed"]);
+  assert.equal(await salesMailRows(t, "bea@buckeye-bakery.example"), 0, "a suppressed address is not queued");
+  assert.ok(await count(t.db, `SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'sales_outbound.email_refused' AND subject_id = ? AND details_json LIKE '%"code":"suppressed"%'`, leadId) >= 1);
+
+  // An address the person typed into Crestmont's own form is a recipient confirmation (source inbound_form).
+  const { leadId: formLead } = await captureLead(t.db, { name: "Carla Form", email: "Carla@Form-Bakery.example", message: "Please send me your website packages.", source: "quote_form", interest: "starter" }, { channel: "quote_form" });
+  const formConsent = await one<{ source: string; channel: string; lead_id: string }>(t.db, `SELECT source, channel, lead_id FROM sales_email_consents WHERE email = 'carla@form-bakery.example'`);
+  assert.deepEqual([formConsent.source, formConsent.channel, formConsent.lead_id], ["inbound_form", "quote_form", formLead]);
+  assert.equal((await salesInfoEligibility(t.db, "carla@form-bakery.example")).eligible, true);
+  assert.equal((await salesInfoEligibility(t.db, "never-confirmed@form-bakery.example") as { code: string }).code, "recipient_not_confirmed");
+});
+
+test("[EMAIL-003] sales_info carries List-Unsubscribe + List-Unsubscribe-Post; the one-click POST (no cookies, no CSRF) records the opt-out", async () => {
+  const t = await app();
+  const { salesId, callId } = await dialled(t);
+  await t.post(FN, fn(callId, salesId, "update_outbound_lead", { contact_email: "bea@buckeye-bakery.example" }));
+  assert.equal((await t.post(FN, fn(callId, salesId, "send_sales_email", { email_type: "package_information", email: "bea@buckeye-bakery.example" }))).json.sent, true);
+  const m = await one<{ headers_json: string; text_body: string }>(t.db, `SELECT m.headers_json, m.text_body FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.to_email = 'bea@buckeye-bakery.example' AND d.template = 'sales_info'`);
+  const h = JSON.parse(m.headers_json) as Record<string, string>;
+  assert.equal(h["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
+  const oneClick = /^<(http:\/\/crestmont\.test\/api\/sales\/unsubscribe\/([0-9a-f]{48}))>$/.exec(h["List-Unsubscribe"]);
+  assert.ok(oneClick, h["List-Unsubscribe"]);
+  assert.match(m.text_body, /Unsubscribe: http:\/\/crestmont\.test\/sales\/unsubscribe\/[0-9a-f]{48}/, "the footer link stays");
+  assert.match(m.text_body, /Registered business address pending|Crestmont Website Development\n/, "the footer keeps the business identity / postal address");
+
+  // A forged token answers the same and records nothing.
+  const forged = await t.client().request("POST", "/api/sales/unsubscribe/" + "0".repeat(48), { body: "List-Unsubscribe=One-Click", headers: { "content-type": "application/x-www-form-urlencoded" } });
+  assert.equal(forged.status, 200);
+  assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM sales_email_optouts`), 0);
+  // What a mailbox provider sends (RFC 8058): a cookie-less POST with the one-click body.
+  const res = await t.client().request("POST", new URL(oneClick![1]).pathname, { body: "List-Unsubscribe=One-Click", headers: { "content-type": "application/x-www-form-urlencoded" } });
+  assert.equal(res.status, 200);
+  assert.equal((await one<{ source: string }>(t.db, `SELECT source FROM sales_email_optouts WHERE email = 'bea@buckeye-bakery.example'`)).source, "unsubscribe_link");
+  assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'sales_outbound.email_unsubscribed' AND details_json LIKE '%one_click%'`), 1);
+  // Opening the header URL in a browser leads to the confirm page.
+  const g = await t.client().get(new URL(oneClick![1]).pathname);
+  assert.equal(g.status, 303);
+  assert.equal(g.headers.get("location"), `/sales/unsubscribe/${oneClick![2]}`);
+  const after = (await t.post(FN, fn(callId, salesId, "send_sales_email", { email_type: "package_information", email: "bea@buckeye-bakery.example", package: "starter" }))).json;
+  assert.deepEqual([after.sent, after.delivery], [false, "opted_out"]);
 });

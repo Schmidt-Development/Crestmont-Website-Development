@@ -8,6 +8,7 @@ import { createTestApp } from "./support/app.ts";
 import { createEmailAdapter, OutboxEmail, ResendEmail, SesEmail, SesMisconfiguredEmail } from "../src/adapters/email.ts";
 import { emailProvider, sesConfig, sesError, signSigV4, PermanentSendError, snsCanonicalString, spkiFromCertificate, pemToDer, type SesConfig } from "../src/adapters/ses.ts";
 import { retryQueuedEmails } from "../src/services/email-retry.ts";
+import { sendMail } from "../src/services/mailer.ts";
 import { emailProviderPresence, secretPresence } from "../src/services/integrations.ts";
 import type { Env } from "../src/app/context.ts";
 
@@ -377,4 +378,68 @@ test("[EMAIL-003] SNS webhook answers 5xx only on a storage error (so SNS retrie
     const r = await w.post(notification("sns-store", sesEvent("Delivery", "any-id")));
     assert.equal(r.status, 500);
   } finally { console.error = realError; }
+});
+
+// ───────────── List-Unsubscribe headers and sales opt-outs (both providers) ─────────────
+
+const UNSUB = { "List-Unsubscribe": "<https://crestmontwebsitedevelopment.com/api/sales/unsubscribe/abc>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" };
+
+test("[EMAIL-003] List-Unsubscribe / List-Unsubscribe-Post reach the provider: SES Content.Simple.Headers, Resend headers; kept for retries; no headers otherwise", async () => {
+  const db = createTestDb();
+  const { f, calls } = sesFetch(() => okSes());
+  const ses = new SesEmail(db, CFG, "x@crestmontwebsitedevelopment.com", f, () => null, "production");
+  assert.equal((await ses.send({ ...msg("prospect@gmail.com", "sales_info"), headers: UNSUB })).status, "sent");
+  const simple = JSON.parse(String(calls[0].init.body)).Content.Simple;
+  assert.deepEqual(simple.Headers, [{ Name: "List-Unsubscribe", Value: UNSUB["List-Unsubscribe"] }, { Name: "List-Unsubscribe-Post", Value: "List-Unsubscribe=One-Click" }]);
+  await ses.send(msg("customer@gmail.com", "invoice"));
+  assert.equal(JSON.parse(String(calls[1].init.body)).Content.Simple.Headers, undefined, "transactional mail carries no list headers");
+
+  const sent: Record<string, unknown>[] = [];
+  const resend = new ResendEmail(db, "re_test_not_real", "x@crestmontwebsitedevelopment.com",
+    (async (_u: string, init: RequestInit) => { sent.push(JSON.parse(String(init.body))); return new Response(JSON.stringify({ id: "re_1" }), { status: 200 }); }) as unknown as typeof fetch);
+  assert.equal((await resend.send({ ...msg("prospect2@gmail.com", "sales_info"), headers: { ...UNSUB, "Bad\r\nName": "x", "X-Inject": "a\r\nBcc: evil@example.org" } })).status, "sent");
+  assert.deepEqual(sent[0].headers, { ...UNSUB, "X-Inject": "a Bcc: evil@example.org" }, "header names are validated and values kept on one line");
+  await resend.send(msg("customer2@gmail.com", "invoice"));
+  assert.equal(sent[1].headers, undefined);
+
+  // A transient SES failure is retried by the scheduled job with the same headers.
+  let fail = true;
+  const { f: flaky, calls: fc } = sesFetch(() => (fail ? sesFail(503, "ServiceUnavailable", "busy") : okSes("retried")));
+  const s2 = new SesEmail(db, CFG, "x@crestmontwebsitedevelopment.com", flaky);
+  const r = await s2.send({ ...msg("retry-unsub@gmail.com", "sales_info"), headers: UNSUB });
+  await db.prepare(`UPDATE email_deliveries SET updated_at = ? WHERE id = ?`).bind(new Date(Date.now() - 6 * 60_000).toISOString(), r.deliveryId).run();
+  fail = false;
+  assert.equal((await retryQueuedEmails({ db, email: s2, now: () => new Date() })).sent, 1);
+  assert.deepEqual(JSON.parse(String(fc[1].init.body)).Content.Simple.Headers, JSON.parse(String(fc[0].init.body)).Content.Simple.Headers);
+});
+
+test("[EMAIL-003] quote_sent and sales_info are not sent to a sales opt-out or a suppressed address (both providers); other templates ignore sales opt-outs", async () => {
+  const db = createTestDb();
+  const at = new Date().toISOString();
+  await db.prepare(`INSERT INTO sales_email_optouts (email, source, created_at) VALUES ('optout@gmail.com', 'unsubscribe_link', ?)`).bind(at).run();
+  await db.prepare(`INSERT INTO email_suppressions (id, email, reason, detail, source_event_id, created_at) VALUES ('sup_q','bounced@gmail.com','hard_bounce',NULL,NULL,?)`).bind(at).run();
+  const { f, calls } = sesFetch(() => okSes());
+  const sentResend: string[] = [];
+  const adapters = [
+    new SesEmail(db, CFG, "x@crestmontwebsitedevelopment.com", f),
+    new ResendEmail(db, "re_test_not_real", "x@crestmontwebsitedevelopment.com", (async (_u: string, init: RequestInit) => { sentResend.push(String(init.body)); return new Response(JSON.stringify({ id: "re_q" }), { status: 200 }); }) as unknown as typeof fetch),
+  ];
+  for (const a of adapters) {
+    for (const template of ["quote_sent", "sales_info"]) {
+      for (const to of ["optout@gmail.com", "bounced@gmail.com"]) {
+        const r = await a.send(msg(to, template));
+        assert.equal(r.status, "suppressed", `${a.kind} ${template} ${to}`);
+        const row = (await db.prepare(`SELECT status, last_error FROM email_deliveries WHERE id = ?`).bind(r.deliveryId).first<{ status: string; last_error: string }>())!;
+        assert.equal(row.status, "suppressed");
+        assert.match(row.last_error, to.startsWith("optout") ? /opted out of sales email/ : /hard bounce/);
+      }
+    }
+    assert.equal((await a.send(msg("optout@gmail.com", "receipt"))).status, "sent", "a sales opt-out does not stop account/billing mail");
+  }
+  assert.equal(calls.length + sentResend.length, 2, "only the two receipts reached a provider");
+
+  // The staff proposal path (quotes.ts → sendMail) gets the same answer.
+  const r = await sendMail({ email: new OutboxEmail(db), db }, { template: "quote_sent", to: "optout@gmail.com", idempotencyKey: "quote-optout",
+    data: { contactName: "Opted Out", totalCents: 99900, validUntil: null, proposalUrl: "https://crestmontwebsitedevelopment.com/q/x" } });
+  assert.equal(r.status, "suppressed");
 });

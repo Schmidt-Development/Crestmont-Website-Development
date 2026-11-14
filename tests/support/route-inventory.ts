@@ -705,6 +705,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /buy/:token": token("purchase link emailed to the verified prospect (only its SHA-256 is stored)", { token: "salesLinkToken" }),
   "GET /sales/unsubscribe/:token": token("sales email unsubscribe token (confirm page)", { token: "salesUnsubToken" }),
   "POST /sales/unsubscribe/:token": token("sales email unsubscribe token", { token: "salesUnsubToken" }, exempt("records an opt-out for the token's own address; same answer whatever the token")),
+  "POST /api/sales/unsubscribe/:token": { ...token("RFC 8058 one-click unsubscribe token (List-Unsubscribe-Post)", { token: "salesUnsubToken" }, exempt("records an opt-out for the token's own address; same answer whatever the token")), api: true },
+  "GET /api/sales/unsubscribe/:token": { ...token("one-click unsubscribe URL opened in a browser (redirects to the confirm page)", { token: "salesUnsubToken" }), api: true },
   "GET /staff/sales-outbound": staff(rolesWith("voice.manage")),
   "POST /staff/sales-outbound/settings": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.settings_updated")),
   "POST /staff/sales-outbound/modes": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.modes_updated")),

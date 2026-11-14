@@ -14,7 +14,9 @@
 //  - prices come only from the catalog / Founder-approved effective prices; no discount or guarantee field exists;
 //  - checkout never takes card details: it emails a link into Crestmont's existing checkout (sign-in, verified email,
 //    agreement acceptance, Stripe Checkout). Payment is confirmed only by the Stripe webhook's records;
-//  - email: fixed templates only, verified recipient only, ≤ 3 per lead per day, sales opt-outs honoured;
+//  - email: fixed templates only, verified recipient only, ≤ 3 per lead per day, sales opt-outs and suppressions
+//    honoured; the commercial sales_info email only to an address the prospect confirmed themselves (stated on this
+//    call, or submitted on an inbound form — src/services/sales-email-consent.ts), never to research/import data;
 //  - scheduling never claims a confirmation the scheduling service did not return;
 //  - do-not-call applies everywhere immediately (sales-outbound.ts#suppressEverywhere).
 import type { Db } from "../lib/db.ts";
@@ -37,6 +39,7 @@ import { recordCallConsent } from "./voice-outbound.ts";
 import { syncAppointmentCallback, leadSchedule } from "./appointment-callbacks.ts";
 import * as sched from "./voice-scheduling.ts";
 import { sendMail, type MailerCtx } from "./mailer.ts";
+import { optOutOrSuppression, recordSalesEmailConsent, salesEmailConsent, salesInfoEligibility } from "./sales-email-consent.ts";
 import { endOfBusinessDay, businessDate } from "../lib/business-time.ts";
 import { leadFacts, researchContext, gateFor, getSalesCall, enqueueSalesCall, suppressEverywhere, type SalesCallRow, type LeadFacts } from "./sales-outbound.ts";
 import type { AppointmentHooks } from "./appointment-notifications.ts";
@@ -206,11 +209,38 @@ async function bind(db: Db, call: Obj, args: Obj, queryLeadId: string | null): P
 const dollars = (c: number) => `$${(c / 100).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 const lc = (s: string | null | undefined) => (s ?? "").trim().toLowerCase();
 
-/** The address the prospect verified on a call (profile) or the CRM contact's own address. Nothing else is mailable. */
-async function verifiedEmails(db: Db, b: Bound): Promise<Set<string>> {
+/**
+ * The addresses this lead may be emailed at. "transactional" (proposal, consultation, do-not-contact): the address the
+ * prospect verified on a call (profile) or the CRM contact's own address. "sales_info" (the commercial email): only
+ * those of them with a recorded recipient confirmation (sales-email-consent.ts) — a stored contacts.email whose only
+ * source is research/import data is NOT mailable. Nothing else is mailable at all.
+ */
+async function verifiedEmails(db: Db, b: Bound, purpose: "transactional" | "sales_info" = "transactional"): Promise<Set<string>> {
   const p = await db.prepare(`SELECT verified_email FROM sales_lead_profiles WHERE lead_id = ?`).bind(b.row.lead_id).first<{ verified_email: string | null }>();
   const contact = await db.prepare(`SELECT email FROM contacts WHERE id = ?`).bind(b.facts.contactId).first<{ email: string | null }>();
-  return new Set([lc(p?.verified_email), lc(contact?.email)].filter(Boolean));
+  const all = [lc(p?.verified_email), lc(contact?.email)].filter(Boolean);
+  if (purpose === "transactional") return new Set(all);
+  const confirmed = new Set<string>();
+  for (const e of all) if (await salesEmailConsent(db, e)) confirmed.add(e);
+  return confirmed;
+}
+
+/** Logs a refused sales email (audit + Worker log). The address itself is never logged. */
+async function logRefusal(db: Db, b: Bound, kind: string, code: string, reason: string): Promise<void> {
+  console.warn(JSON.stringify({ level: "warn", msg: "sales email refused", lead: b.row.lead_id, salesCall: b.row.id, kind, code }));
+  await audit(db, { actorKind: "ai", action: "sales_outbound.email_refused", subjectType: "lead", subjectId: b.row.lead_id, details: { kind, code, reason: reason.slice(0, 300), salesCall: b.row.id } });
+}
+
+/**
+ * sales_info recipient check: null when the address is confirmed by the recipient. An address that belongs to the lead
+ * but was never confirmed by the prospect (research/import data) is refused with recipient_not_confirmed and logged.
+ */
+async function salesInfoRecipient(db: Db, b: Bound, email: string, kind: string): Promise<{ reason: "email_not_verified" | "recipient_not_confirmed"; message?: string } | null> {
+  const e = lc(email);
+  if ((await verifiedEmails(db, b, "sales_info")).has(e)) return null;
+  if (!(await verifiedEmails(db, b)).has(e)) return { reason: "email_not_verified" };
+  await logRefusal(db, b, kind, "recipient_not_confirmed", "The stored address was not confirmed by the prospect (research/import data is not consent to email).");
+  return { reason: "recipient_not_confirmed", message: "We can only email an address the prospect gives or confirms themselves. Ask the prospect for their email address, record it with update_outbound_lead (contact_email), then try again." };
 }
 
 async function upsertProfile(db: Db, leadId: string, fields: Record<string, string | null>, via: string): Promise<void> {
@@ -242,7 +272,20 @@ export const MAX_SALES_EMAILS_PER_DAY = 3;
 /** Sends one fixed-template sales email (marketing category, unsubscribe link). Idempotent per lead + kind + day. */
 async function sendSalesMail(db: Db, deps: SalesFnDeps, b: Bound, kind: string, to: string, data: Parameters<typeof sendMail>[1], now: Date): Promise<{ sent: boolean; status: string; duplicate?: boolean; message?: string }> {
   const email = lc(to);
-  if (await db.prepare(`SELECT 1 AS x FROM sales_email_optouts WHERE email = ?`).bind(email).first()) return { sent: false, status: "opted_out", message: "This address asked not to receive sales email." };
+  // Opt-out and bounce/complaint suppression: refused before anything is queued (every kind, quotes included).
+  const blocked = await optOutOrSuppression(db, email);
+  if (blocked) {
+    await logRefusal(db, b, kind, blocked.code, blocked.reason);
+    return { sent: false, status: blocked.code, message: blocked.code === "opted_out" ? "This address asked not to receive sales email." : "Email can't be delivered to this address. A team member can follow up another way." };
+  }
+  // The commercial email only to an address the recipient confirmed themselves (Owner decision, option a).
+  if ((data as { template: string }).template === "sales_info") {
+    const gate = await salesInfoEligibility(db, email);
+    if (!gate.eligible) {
+      await logRefusal(db, b, kind, gate.code, gate.reason);
+      return { sent: false, status: gate.code, message: "We can only email an address the prospect gives or confirms themselves. Ask for their email address and record it with update_outbound_lead first." };
+    }
+  }
   const key = `sales:${b.row.lead_id}:${kind}:${businessDate(now)}`;
   const existing = await db.prepare(`SELECT delivery_status FROM sales_emails WHERE idempotency_key = ?`).bind(key).first<{ delivery_status: string | null }>();
   if (existing && kind !== "checkout_link") return { sent: existing.delivery_status === "sent" || existing.delivery_status === "queued", status: existing.delivery_status ?? "unknown", duplicate: true };
@@ -253,7 +296,8 @@ async function sendSalesMail(db: Db, deps: SalesFnDeps, b: Bound, kind: string, 
   const finalKey = existing ? `${key}:${id}` : key;
   let status = "failed", deliveryId: string | null = null;
   try {
-    const r = await sendMail(deps.mail, { ...(data as object), to: email, idempotencyKey: finalKey, unsubscribeUrl: `${deps.baseUrl}/sales/unsubscribe/${token}` } as Parameters<typeof sendMail>[1]);
+    const r = await sendMail(deps.mail, { ...(data as object), to: email, idempotencyKey: finalKey, unsubscribeUrl: `${deps.baseUrl}/sales/unsubscribe/${token}`,
+      listUnsubscribeUrl: `${deps.baseUrl}/api/sales/unsubscribe/${token}` } as Parameters<typeof sendMail>[1]);
     status = r.status; deliveryId = r.deliveryId;
   } catch (e) { status = "failed"; await audit(db, { actorKind: "ai", action: "sales_outbound.email_failed", subjectType: "lead", subjectId: b.row.lead_id, details: { kind, error: (e as Error).message.slice(0, 200) } }); }
   await db.prepare(`INSERT INTO sales_emails (id, lead_id, kind, recipient, idempotency_key, delivery_id, delivery_status, provider_call_id, unsubscribe_token_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
@@ -331,7 +375,12 @@ async function updateLead(db: Db, b: Bound, a: UpdateArgs): Promise<Obj> {
   const profile: Record<string, string | null> = {};
   if (a.contact_name) profile.verified_contact_name = a.contact_name;
   if (a.contact_role) profile.verified_role = a.contact_role;
-  if (a.contact_email && out.contact_verification === "verified") profile.verified_email = a.contact_email.toLowerCase();
+  if (a.contact_email && out.contact_verification === "verified") {
+    profile.verified_email = a.contact_email.toLowerCase();
+    // The prospect stated this address on the call: the recipient-originated confirmation sales_info requires.
+    await recordSalesEmailConsent(db, { email: a.contact_email, source: "call_confirmed", ref: b.row.id, leadId, contactId: b.facts.contactId, salesCallId: b.row.id,
+      providerCallId: b.providerCallId, evidence: `Prospect stated the address on AI sales call ${b.row.id} (Retell ${b.providerCallId}); recorded with update_outbound_lead` });
+  }
   if (a.budget_range) profile.budget_range = a.budget_range;
   if (a.purchase_timeline) profile.purchase_timeline = a.purchase_timeline;
   if (a.qualification) profile.qualification = a.qualification;
@@ -373,14 +422,18 @@ async function packagesPricing(db: Db, now: Date): Promise<Obj> {
 
 async function createCheckout(db: Db, deps: SalesFnDeps, b: Bound, a: { package: PackageId; email: string }, now: Date): Promise<SalesFnResult> {
   if (!deps.paymentsConfigured) return { status: 200, body: { checkout_link_sent: false, reason: "payments_not_configured", message: "Online payment isn't available yet. Offer to have a team member follow up by email." } };
-  const emails = await verifiedEmails(db, b);
-  if (!emails.has(lc(a.email))) return { status: 200, body: { checkout_link_sent: false, reason: "email_not_verified", message: "First confirm the prospect's email address with update_outbound_lead (contact_email), then try again. Links are only sent to a confirmed address." } };
+  const unconfirmed = await salesInfoRecipient(db, b, a.email, "checkout_link");
+  if (unconfirmed) return { status: 200, body: { checkout_link_sent: false, reason: unconfirmed.reason, message: unconfirmed.message ?? "First confirm the prospect's email address with update_outbound_lead (contact_email), then try again. Links are only sent to a confirmed address." } };
   const profile = await db.prepare(`SELECT qualification FROM sales_lead_profiles WHERE lead_id = ?`).bind(b.row.lead_id).first<{ qualification: string | null }>();
   const lead = await db.prepare(`SELECT stage FROM leads WHERE id = ?`).bind(b.row.lead_id).first<{ stage: string }>();
   if (profile?.qualification !== "qualified" && !["qualified", "quote_required", "quote_sent", "negotiation", "accepted", "awaiting_payment"].includes(lead?.stage ?? "")) {
     return { status: 200, body: { checkout_link_sent: false, reason: "not_qualified", message: "Confirm the prospect's needs and record qualification (update_outbound_lead qualification=qualified) before sending a purchase link." } };
   }
-  if (await db.prepare(`SELECT 1 AS x FROM sales_email_optouts WHERE email = ?`).bind(lc(a.email)).first()) return { status: 200, body: { checkout_link_sent: false, reason: "email_opted_out", message: "This address asked not to receive sales email. A team member can follow up another way." } };
+  const blocked = await optOutOrSuppression(db, a.email);
+  if (blocked) {
+    await logRefusal(db, b, "checkout_link", blocked.code, blocked.reason);
+    return { status: 200, body: { checkout_link_sent: false, reason: blocked.code === "opted_out" ? "email_opted_out" : "email_suppressed", message: blocked.code === "opted_out" ? "This address asked not to receive sales email. A team member can follow up another way." : "Email can't be delivered to this address. A team member can follow up another way." } };
+  }
   const pkg = PACKAGES[a.package];
   const price = await effectivePrice(db, "package", pkg.id, now);
   const day = businessDate(now);
@@ -430,8 +483,9 @@ async function paymentStatus(db: Db, b: Bound, ref: string | undefined): Promise
 }
 
 async function sendEmail(db: Db, deps: SalesFnDeps, b: Bound, a: { email_type: string; email: string; package?: PackageId }, now: Date): Promise<SalesFnResult> {
-  const emails = await verifiedEmails(db, b);
-  if (!emails.has(lc(a.email))) return { status: 200, body: { sent: false, reason: "email_not_verified", message: "Confirm the prospect's email with update_outbound_lead first. Email goes only to a confirmed address." } };
+  const commercial = ["package_information", "checkout_link", "follow_up", "onboarding_instructions"].includes(a.email_type); // template sales_info
+  const unconfirmed = commercial ? await salesInfoRecipient(db, b, a.email, a.email_type) : (await verifiedEmails(db, b)).has(lc(a.email)) ? null : { reason: "email_not_verified" as const, message: undefined };
+  if (unconfirmed) return { status: 200, body: { sent: false, reason: unconfirmed.reason, message: unconfirmed.message ?? "Confirm the prospect's email with update_outbound_lead first. Email goes only to a confirmed address." } };
   const name = b.facts.contactName;
   const done = (r: { sent: boolean; status: string; duplicate?: boolean; message?: string }, ok: string) => ({ status: 200, body: { sent: r.sent, delivery: r.status, ...(r.duplicate ? { already_sent_today: true } : {}), message: r.sent ? ok : r.message ?? `The email was not sent (${r.status}).` } });
   switch (a.email_type) {
@@ -644,15 +698,19 @@ export async function salesLinkForCheckout(db: Db, token: string | undefined, pa
   return { linkId: l.id, leadId: l.lead_id, email: l.email, packageId: l.package_id };
 }
 
-/** One-click unsubscribe from sales email (CAN-SPAM). Idempotent; reveals nothing about the address. */
-export async function unsubscribeSalesEmail(db: Db, token: string): Promise<boolean> {
+/**
+ * Unsubscribe from sales email (CAN-SPAM): the footer link's confirm page ("link") or the RFC 8058 one-click
+ * List-Unsubscribe POST ("one_click"). Both record the opt-out in sales_email_optouts (source unsubscribe_link), which
+ * every later sales_info and proposal email checks. Idempotent; reveals nothing about the address.
+ */
+export async function unsubscribeSalesEmail(db: Db, token: string, via: "link" | "one_click" = "link"): Promise<boolean> {
   if (!/^[0-9a-f]{48}$/.test(token)) return false;
   const row = await db.prepare(`SELECT recipient, lead_id FROM sales_emails WHERE unsubscribe_token_hash = ?`).bind(await hashToken(token)).first<{ recipient: string; lead_id: string }>();
   if (!row) return false;
   const r = await db.prepare(`INSERT INTO sales_email_optouts (email, source, created_at) VALUES (?, 'unsubscribe_link', ?) ON CONFLICT(email) DO NOTHING`).bind(row.recipient, nowIso()).run();
   if (r.meta.changes === 1) {
-    await addLeadNote(db, row.lead_id, "Prospect unsubscribed from sales email (link in a sales email).");
-    await audit(db, { actorKind: "user", action: "sales_outbound.email_unsubscribed", subjectType: "lead", subjectId: row.lead_id });
+    await addLeadNote(db, row.lead_id, via === "one_click" ? "Prospect unsubscribed from sales email (one-click unsubscribe in their mail app)." : "Prospect unsubscribed from sales email (link in a sales email).");
+    await audit(db, { actorKind: "user", action: "sales_outbound.email_unsubscribed", subjectType: "lead", subjectId: row.lead_id, details: { via } });
   }
   return true;
 }

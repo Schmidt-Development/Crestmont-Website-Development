@@ -93,14 +93,16 @@ export async function signSigV4(i: SigV4Input): Promise<Record<string, string>> 
 /** A send that must not be retried (the request itself is wrong, or the account/identity refuses it). */
 export class PermanentSendError extends Error {}
 
-export interface SesSendInput { from: string; to: string[]; replyTo: string[]; subject: string; html: string; text: string; tags: Record<string, string> }
+/** headers: extra message headers (List-Unsubscribe etc.), sent as Content.Simple.Headers. */
+export interface SesSendInput { from: string; to: string[]; replyTo: string[]; subject: string; html: string; text: string; tags: Record<string, string>; headers?: Record<string, string> }
 
 export function sesRequestBody(cfg: SesConfig, m: SesSendInput): Record<string, unknown> {
   return {
     FromEmailAddress: m.from,
     Destination: { ToAddresses: m.to },
     ReplyToAddresses: m.replyTo,
-    Content: { Simple: { Subject: { Data: m.subject, Charset: "UTF-8" }, Body: { Html: { Data: m.html, Charset: "UTF-8" }, Text: { Data: m.text, Charset: "UTF-8" } } } },
+    Content: { Simple: { Subject: { Data: m.subject, Charset: "UTF-8" }, Body: { Html: { Data: m.html, Charset: "UTF-8" }, Text: { Data: m.text, Charset: "UTF-8" } },
+      ...(m.headers && Object.keys(m.headers).length ? { Headers: Object.entries(m.headers).map(([Name, Value]) => ({ Name, Value })) } : {}) } },
     ConfigurationSetName: cfg.configurationSet,
     EmailTags: Object.entries(m.tags).map(([Name, Value]) => ({ Name, Value: sesTagValue(Value) })),
   };

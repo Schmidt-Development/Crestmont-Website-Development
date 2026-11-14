@@ -147,6 +147,8 @@ Authority: `paid` only when the invoice is `paid` **and** a `succeeded` payment 
 ```
 10. **Output:** `{ "sent": bool, "delivery"?: "sent|queued|failed|suppressed|opted_out|rate_limited|not_configured", "already_sent_today"?: true, "reason"?: "email_not_verified|no_approved_quote|quote_expired|no_consultation|no_follow_up_agreed|payment_not_confirmed", "message": "…" }` (checkout_link returns Function 4's shape)
 Limits: ≤ 3 sales emails per lead per 24 h; idempotent per lead + type + day; sales opt-outs and Resend suppressions honoured; on staging only `EMAIL_RECIPIENT_ALLOWLIST` addresses receive mail.
+
+Recipient rule (Owner decision 2026-11-13): the commercial `sales_info` email (package information, checkout link, follow-up, onboarding) goes only to an address the prospect confirmed themselves: stated on this call and recorded with `update_outbound_lead` (`contact_email`; stored in `sales_email_consents` with the sales call id, Retell call id and time) or submitted on an inbound form. An address that only came from research/import data is refused with `recipient_not_confirmed`, logged (`sales_outbound.email_refused`) and never queued. Every sales email carries `List-Unsubscribe` (one-click `POST /api/sales/unsubscribe/:token`) and `List-Unsubscribe-Post: List-Unsubscribe=One-Click` next to the footer link.
 11. Wait · 12. **Talk While Waiting:** On, static: `I'm sending that over now.` · 13. **Typing sound:** On
 
 ### Function 7 — `schedule_sales_followup`

@@ -14,6 +14,12 @@ const BASE_BACKOFF_MS = 5 * 60_000;
 export const MAX_EMAIL_ATTEMPTS = 5;
 const STUCK_AFTER_MS = 60 * 60_000;
 
+/** The List-Unsubscribe headers stored with a sales_info message (migration 0108), so a retry sends them again. */
+export function storedHeaders(json: string | null | undefined): { headers?: Record<string, string> } {
+  if (!json) return {};
+  try { const h = JSON.parse(json) as unknown; return h && typeof h === "object" && !Array.isArray(h) ? { headers: h as Record<string, string> } : {}; } catch { return {}; }
+}
+
 export function backoffMs(attempts: number): number {
   return BASE_BACKOFF_MS * 2 ** Math.max(0, attempts - 1);
 }
@@ -27,15 +33,15 @@ export async function retryQueuedEmails(ctx: Pick<AppContext, "db" | "email" | "
   let retried = 0, sent = 0;
   const sending = email.kind === "resend" || email.kind === "ses";
   if (sending && typeof email.attempt === "function") {
-    const rows = (await db.prepare(`SELECT d.id, d.template, d.to_email, d.idempotency_key, d.attempts, d.updated_at, m.subject, m.html_body, m.text_body
+    const rows = (await db.prepare(`SELECT d.id, d.template, d.to_email, d.idempotency_key, d.attempts, d.updated_at, m.subject, m.html_body, m.text_body, m.headers_json
         FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id
         WHERE d.status = 'queued' AND m.provider = ? AND d.attempts < ? AND d.updated_at <= ? ORDER BY d.updated_at LIMIT 50`)
       .bind(email.kind, MAX_EMAIL_ATTEMPTS, new Date(now - BASE_BACKOFF_MS).toISOString())
-      .all<{ id: string; template: string; to_email: string; idempotency_key: string; attempts: number; updated_at: string; subject: string; html_body: string; text_body: string }>()).results;
+      .all<{ id: string; template: string; to_email: string; idempotency_key: string; attempts: number; updated_at: string; subject: string; html_body: string; text_body: string; headers_json: string | null }>()).results;
     for (const r of rows) {
       if (Date.parse(r.updated_at) + backoffMs(r.attempts) > now) continue;
       retried++;
-      const res = await email.attempt.call(ctx.email, r.id, { to: r.to_email, subject: r.subject, html: r.html_body, text: r.text_body, template: r.template, idempotencyKey: r.idempotency_key });
+      const res = await email.attempt.call(ctx.email, r.id, { to: r.to_email, subject: r.subject, html: r.html_body, text: r.text_body, template: r.template, idempotencyKey: r.idempotency_key, ...storedHeaders(r.headers_json) });
       if (res.status === "sent") sent++;
     }
   }
