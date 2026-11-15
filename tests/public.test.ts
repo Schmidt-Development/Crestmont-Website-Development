@@ -284,7 +284,9 @@ test("[CMS-003] [CAT-007] pricing presentation edits need the Owner to publish a
 test("[PORT-004] [PORT-006] the Founder-owned portfolio projects are documented, published and public; nothing unverified is claimed", async () => {
   // Migrations 0005 (seed), 0104 (Glassly) and 0105 (Founder authorization of 2026-10-27 recorded on the placeholders).
   const { db, client } = await createTestApp();
-  const rows = (await db.prepare(`SELECT id, slug, live_url, published, relationship, relationship_documented_at, portfolio_consent_at, poster_desktop_asset, description FROM portfolio_projects ORDER BY position`).all<Record<string, unknown>>()).results;
+  // Lead Haven Collective (0108) is a live-website entry: unpublished until the live check confirms embedding.
+  assert.deepEqual({ ...(await db.prepare(`SELECT published, publish_when_ready FROM portfolio_projects WHERE slug = 'lead-haven-collective'`).first()) }, { published: 0, publish_when_ready: 1 });
+  const rows = (await db.prepare(`SELECT id, slug, live_url, published, relationship, relationship_documented_at, portfolio_consent_at, poster_desktop_asset, description FROM portfolio_projects WHERE slug <> 'lead-haven-collective' ORDER BY position`).all<Record<string, unknown>>()).results;
   assert.deepEqual(rows.map((r) => r.live_url).sort(), ["https://betterlansingmechanics.com", "https://glasslyautoglass.com", "https://lansingcarrentals.com", "https://mentorship.lansingcarrentals.com"]);
   for (const r of rows) {
     assert.equal(r.published, 1, String(r.id));
@@ -407,7 +409,7 @@ test("[PORT-007] staff can add a new project; it starts unpublished", async () =
   const ok = await c.post("/staff/portfolio", { name: "New Project", slug: "new-project", industry: "Retail", live_url: "https://new.example", description: "A verified description of the live website.", features: "Contact form", technology_summary: "", relationship: "Relationship documentation pending" });
   assert.equal(ok.status, 303);
   const row = await app.db.prepare(`SELECT published, position FROM portfolio_projects WHERE slug = 'new-project'`).first<{ published: number; position: number }>();
-  assert.deepEqual({ ...row }, { published: 0, position: 5 }, "appended after the four seeded projects (three from 0005, Glassly from 0104)");
+  assert.deepEqual({ ...row }, { published: 0, position: 6 }, "appended after the five seeded projects (three from 0005, Glassly from 0104, Lead Haven Collective from 0108)");
 });
 
 test("[PORT-006] /portfolio-media serves only screenshots of published portfolio projects", async () => {
