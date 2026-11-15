@@ -1,0 +1,28 @@
+{
+  "worker": "lead-haven-collective",
+  "source": {
+    "repository": "Schmidt-Development/Lead-Haven-Collective",
+    "base": "77a7efe",
+    "change": "6a15b1b",
+    "branch": "claude/crestmont-portfolio-framing",
+    "bundler": "wrangler 4.159.0 (the repository's lockfile)"
+  },
+  "mainModule": "index.js",
+  "oldSha256": "0afb5f80d13e61a3035b59d140907687b0b3d260bf48a0f2cea2349adf61ec64",
+  "newSha256": "83413533c97666f728912cac32d0c4cac423269c733f9891f4d8b6ec184cad73",
+  "oldHeaderRules": "var HEADER_RULES = [\n  {\n    \"pattern\": \"/*\",\n    \"headers\": {\n      \"X-Content-Type-Options\": \"nosniff\",\n      \"Referrer-Policy\": \"strict-origin-when-cross-origin\",\n      \"X-Frame-Options\": \"DENY\",\n      \"Permissions-Policy\": \"camera=(), microphone=(), geolocation=(), payment=()\",\n      \"Strict-Transport-Security\": \"max-age=31536000; includeSubDomains\"\n    }\n  },\n  {\n    \"pattern\": \"/account/*\",\n    \"headers\": {\n      \"Content-Security-Policy\": \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\",\n      \"Cache-Control\": \"no-store, no-transform\"\n    }\n  },\n  {\n    \"pattern\": \"/admin/*\",\n    \"headers\": {\n      \"Content-Security-Policy\": \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\",\n      \"Cache-Control\": \"no-store, no-transform\",\n      \"X-Robots-Tag\": \"noindex, nofollow\"\n    }\n  },\n  {\n    \"pattern\": \"/privacy/*\",\n    \"headers\": {\n      \"Content-Security-Policy\": \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\",\n      \"Cache-Control\": \"no-cache\"\n    }\n  },\n  {\n    \"pattern\": \"/legal/*\",\n    \"headers\": {\n      \"Content-Security-Policy\": \"default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\",\n      \"Cache-Control\": \"no-cache\"\n    }\n  }\n];",
+  "newHeaderRules": "var HEADER_RULES = [\n  {\n    \"pattern\": \"/*\",\n    \"headers\": {\n      \"X-Content-Type-Options\": \"nosniff\",\n      \"Referrer-Policy\": \"strict-origin-when-cross-origin\",\n      \"Content-Security-Policy\": \"frame-ancestors https://crestmontwebsitedevelopment.com https://www.crestmontwebsitedevelopment.com\",\n      \"Permissions-Policy\": \"camera=(), microphone=(), geolocation=(), payment=()\",\n      \"Strict-Transport-Security\": \"max-age=31536000; includeSubDomains\"\n    }\n  },\n  {\n    \"pattern\": \"/account/*\",\n    \"headers\": {\n      \"X-Frame-Options\": \"DENY\",\n      \"Content-Security-Policy\": \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\",\n      \"Cache-Control\": \"no-store, no-transform\"\n    }\n  },\n  {\n    \"pattern\": \"/admin/*\",\n    \"headers\": {\n      \"X-Frame-Options\": \"DENY\",\n      \"Content-Security-Policy\": \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\",\n      \"Cache-Control\": \"no-store, no-transform\",\n      \"X-Robots-Tag\": \"noindex, nofollow\"\n    }\n  },\n  {\n    \"pattern\": \"/privacy/*\",\n    \"headers\": {\n      \"X-Frame-Options\": \"DENY\",\n      \"Content-Security-Policy\": \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\",\n      \"Cache-Control\": \"no-cache\"\n    }\n  },\n  {\n    \"pattern\": \"/legal/*\",\n    \"headers\": {\n      \"X-Frame-Options\": \"DENY\",\n      \"Content-Security-Policy\": \"default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\",\n      \"Cache-Control\": \"no-cache\"\n    }\n  }\n];",
+  "verify": {
+    "site": "https://leadhavencollective.com",
+    "publicPath": "/",
+    "privatePaths": [
+      "/account/",
+      "/admin/",
+      "/privacy/"
+    ],
+    "frameAncestors": [
+      "https://crestmontwebsitedevelopment.com",
+      "https://www.crestmontwebsitedevelopment.com"
+    ]
+  }
+}

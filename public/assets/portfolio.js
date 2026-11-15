@@ -4,8 +4,11 @@
 //  • switching never moves focus or Crestmont's scroll position; inactive slides are inert;
 //  • a demo iframe is created only for the active project once the explorer is near the viewport, and stays
 //    mounted afterwards (its page and scroll position survive project switches); Reset reloads its start state;
-//  • frames are shown only after the demo announces itself with an origin-checked postMessage; otherwise the
-//    genuine poster stays and an honest status explains what happened;
+//  • a slide frames either the REAL live website (data-kind="live": its own headers permit this origin, checked by
+//    the server) or an isolated demo (data-kind="embed"). A demo frame is shown only after the demo announces itself
+//    with an origin-checked postMessage; a live site has no such script, so its frame is shown once it has loaded.
+//    If neither happens in time, the genuine poster (or a styled card) stays with an honest status and the
+//    Visit live website link;
 //  • each demo renders at a real device width (desktop 1440, tablet 820, phone 390 CSS px) and the whole viewport is
 //    scaled down to fit the frame — the full width is always visible and the site scrolls natively to its end. The
 //    scale never exceeds 1, and the viewport height follows the frame, so nothing is cropped horizontally.
@@ -27,7 +30,7 @@
     const expandBtn = root.querySelector("[data-pfx-expand]");
     const resetBtn = root.querySelector("[data-pfx-reset]");
     const modeBtns = [...root.querySelectorAll("[data-pfx-mode]")];
-    const allowed = new Set(slides.map((s) => s.dataset.demoOrigin).filter(Boolean));
+    const allowed = new Set(slides.map((s) => s.dataset.demoOrigin).filter(Boolean)); // demo handshake origins only
     const frames = new Map(); // slide index → { f, ready, timer }
     let cur = 0, near = false;
 
@@ -62,25 +65,31 @@
     };
     let userMode = false;
     const name = (i) => slides[(i + n) % n].dataset.name;
-    const status = (s, text, linkUrl) => {
+    const status = (s, text, linkUrl, linkText = " Open the demo in a new tab.") => {
       const el = s.querySelector("[data-pfx-status]");
       if (!el) return;
       el.textContent = text;
       if (linkUrl) {
         const a = document.createElement("a");
-        a.href = linkUrl; a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = " Open the demo in a new tab.";
+        a.href = linkUrl; a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = linkText;
         el.append(a);
       }
     };
+    const isLive = (s) => s.dataset.kind === "live";
     const urlLabel = (s, href) => { const el = s.querySelector("[data-pfx-url]"); if (el) el.textContent = href; };
 
+    const ready = (i, rec) => {
+      const s = slides[i];
+      if (rec.ready) return;
+      rec.ready = true; clearTimeout(rec.timer); s.classList.add("is-ready"); delete s.dataset.unavailable; status(s, "");
+    };
     function mount(i) {
       const s = slides[i];
-      const url = s.dataset.demoUrl;
+      const url = s.dataset.frameUrl;
       if (!url || frames.has(i)) return;
       const f = document.createElement("iframe");
       f.className = "pfx__frame";
-      f.title = `Interactive demo of the ${s.dataset.name} website`;
+      f.title = isLive(s) ? `The live ${s.dataset.name} website (interactive)` : `Interactive demo of the ${s.dataset.name} website`;
       // The demo can run its own pages and forms, and open clearly external links in a new tab; it can never
       // navigate or script Crestmont (no allow-top-navigation; cross-origin), and gets no device permissions.
       f.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox");
@@ -89,6 +98,8 @@
       const rec = { f, ready: false, timer: 0 };
       frames.set(i, rec);
       arm(i, rec, url);
+      // A live site cannot announce itself; its first load (the server verified it permits this origin) shows it.
+      if (isLive(s)) f.addEventListener("load", () => { if (f.src && f.src !== "about:blank") ready(i, rec); });
       f.src = url;
       s.querySelector("[data-pfx-stage]").append(f);
     }
@@ -96,11 +107,12 @@
       const s = slides[i];
       rec.ready = false;
       s.classList.remove("is-ready");
-      status(s, "Loading the interactive demo…");
+      status(s, isLive(s) ? `Loading the live ${s.dataset.name} website…` : "Loading the interactive demo…");
       clearTimeout(rec.timer);
       rec.timer = setTimeout(() => {
         if (rec.ready) return;
-        status(s, `The interactive ${s.dataset.name} demo did not respond, so the screenshot is shown instead.`, url);
+        if (isLive(s)) status(s, `The live ${s.dataset.name} website did not load here${s.querySelector("img.pfx__poster") ? ", so a screenshot is shown instead" : ""}.`, s.dataset.liveUrl, " Visit the live website in a new tab.");
+        else status(s, `The interactive ${s.dataset.name} demo did not respond, so the screenshot is shown instead.`, url);
         s.dataset.unavailable = "true";
       }, READY_TIMEOUT);
     }
@@ -125,7 +137,7 @@
       const m = demoMessage(e, MSG_TYPES);
       if (!m) return;
       const s = slides[m.i], rec = m.rec;
-      if (!rec.ready) { rec.ready = true; clearTimeout(rec.timer); s.classList.add("is-ready"); delete s.dataset.unavailable; status(s, ""); }
+      ready(m.i, rec);
       if (typeof m.d.href === "string") {
         try { const u = new URL(m.d.href); if (u.origin === e.origin) urlLabel(s, u.host + (u.pathname === "/" ? "" : u.pathname)); } catch { /* ignore */ }
       }
@@ -148,8 +160,15 @@
     modeBtns.forEach((b) => b.addEventListener("click", () => { userMode = true; setMode(b.dataset.pfxMode, true); }));
     resetBtn && resetBtn.addEventListener("click", () => {
       const s = slides[cur], rec = frames.get(cur);
-      if (!s.dataset.demoUrl) { if (live) live.textContent = `${name(cur)} has no interactive demo to reset.`; return; }
+      if (!s.dataset.frameUrl) { if (live) live.textContent = `${name(cur)} is shown as a screenshot; there is nothing to reload.`; return; }
       if (!rec) { mount(cur); return; }
+      if (isLive(s)) { // back to the live site's start page
+        arm(cur, rec, s.dataset.frameUrl);
+        rec.f.src = s.dataset.frameUrl;
+        urlLabel(s, new URL(s.dataset.frameUrl).host);
+        if (live) live.textContent = `${name(cur)} reloaded at its home page.`;
+        return;
+      }
       // Every demo serves /__demo/reset: clears its own demo cookies and returns to the start page.
       const resetUrl = new URL("/__demo/reset", s.dataset.demoUrl).toString();
       arm(cur, rec, s.dataset.demoUrl);
@@ -190,7 +209,12 @@
       root.classList.toggle("pfx--expanded", on);
       document.documentElement.classList.toggle("pfx-lock", on);
       if (!on) { spacer && spacer.remove(); spacer = null; window.scrollTo({ top: savedY, behavior: "instant" }); }
-      if (expandBtn) { expandBtn.setAttribute("aria-pressed", String(on)); expandBtn.textContent = on ? "Close expanded view" : "Expand"; }
+      if (expandBtn) { expandBtn.setAttribute("aria-pressed", String(on)); expandBtn.textContent = on ? "Exit full screen" : "Full screen"; }
+      // Real full screen where the browser offers it; the fixed overlay alone covers the window everywhere else.
+      try {
+        if (on && root.requestFullscreen && !document.fullscreenElement) root.requestFullscreen({ navigationUI: "hide" }).catch(() => undefined);
+        else if (!on && document.fullscreenElement === root) document.exitFullscreen().catch(() => undefined);
+      } catch { /* not available */ }
       // A larger frame: re-pick the device unless the visitor chose one, then refit.
       if (!userMode) setMode(autoMode(), false); else fit();
       if (on && live) live.textContent = `Expanded view of ${name(cur)}. Press Escape or Close expanded view to return.`;
@@ -198,6 +222,8 @@
     };
     const isOpen = () => root.classList.contains("pfx--expanded");
     expandBtn && expandBtn.addEventListener("click", () => setExpanded(!isOpen()));
+    // Leaving browser full screen (Escape or the browser's own control) also closes the overlay.
+    document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && isOpen()) setExpanded(false); });
     const focusables = () => [...root.querySelectorAll("a[href], button:not([disabled]), iframe, [tabindex]:not([tabindex='-1'])")]
       .filter((x) => !x.closest("[inert]") && !x.hidden && x.getClientRects().length);
     document.addEventListener("keydown", (e) => {

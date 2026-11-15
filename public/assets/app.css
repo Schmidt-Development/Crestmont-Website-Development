@@ -1193,6 +1193,23 @@ a.shot { display: block; cursor: zoom-in; }
 .pfx__status { position: absolute; left: var(--s-4); bottom: var(--s-4); max-width: min(520px, calc(100% - 2 * var(--s-4))); padding: var(--s-2) var(--s-3); border-radius: var(--r-2); background: rgba(8,8,8,.92); border: 1px solid var(--line-2); color: var(--text); font-size: var(--fs-sm); line-height: 1.45; }
 .pfx__status:empty { display: none; }
 .pfx__status a { color: var(--gold-1); }
+/* Live showcase (2026-11-15): the real website, a gold "Live website" flag with a soft pulse, and a branded loading
+   card while it loads (or when it cannot be shown and there is no screenshot). */
+.pfx__flag { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.pfx__flag--live { color: var(--on-gold, #0a0a0a); background: linear-gradient(135deg, var(--gold-1), var(--gold-2)); border-color: transparent; }
+.pfx__flag--shot { color: var(--text-3); border-color: var(--line-2); }
+.pfx__pulse { position: relative; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pfx__pulse::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid currentColor; opacity: 0; animation: pfx-pulse 1.8s var(--ease-out) infinite; }
+@keyframes pfx-pulse { 0% { transform: scale(.4); opacity: .9; } 100% { transform: scale(1.6); opacity: 0; } }
+.pfx__poster--loading { position: absolute; inset: 0; height: 100%; display: grid !important; place-content: center; justify-items: center; gap: var(--s-3); text-align: center; padding: var(--s-5);
+  background: radial-gradient(70% 60% at 50% 35%, rgba(201,162,77,.14), transparent 70%), linear-gradient(180deg, #0b0b0b, #050505); }
+.pfx__loading-name { font: 500 clamp(1.4rem, 3.4cqi, 2.6rem)/1.1 var(--font-display); letter-spacing: -.03em; color: var(--white, #fff); }
+.pfx__loading-host { font: 500 var(--fs-xs)/1 var(--font-mono); color: var(--gold-1); letter-spacing: .04em; }
+.pfx__spinner { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--line-gold); border-top-color: var(--gold-1); animation: pfx-spin .9s linear infinite; }
+@keyframes pfx-spin { to { transform: rotate(360deg); } }
+.pfx__slide[data-unavailable="true"] .pfx__spinner { animation: none; border-top-color: var(--line-gold); opacity: .5; }
+.pfx__label--live { display: inline-flex; justify-content: flex-end; gap: 6px; }
+@media (prefers-reduced-motion: reduce) { .pfx__pulse::after, .pfx__spinner { animation: none; } }
 .pfx__meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s-4) var(--s-7); align-items: end; padding: var(--s-5) var(--s-1) 0; }
 .pfx__count { margin: 0 0 var(--s-2); color: var(--text-3); font-size: var(--fs-sm); }
 .pfx__count-n { color: var(--gold-1); font-weight: 600; }

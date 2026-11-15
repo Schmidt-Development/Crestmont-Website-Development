@@ -3,7 +3,8 @@
 //
 // For every explorer location (home, portfolio, each case study) and every project:
 //   • the frame shows the site's full width (no horizontal crop), the arrows sit outside the frame, and the state is
-//     reported honestly: "interactive" only after the demo's origin-checked handshake, otherwise the screenshot.
+//     reported honestly: "interactive" only after the demo's origin-checked handshake (or, for the REAL live website,
+//     once the verified live frame has loaded), otherwise the screenshot.
 // For every interactive demo (portfolio page, desktop and phone):
 //   • wheel and touch scrolling over the demo scroll the demo, to its end, while Crestmont's page stays still — also
 //     when the gesture continues past either boundary; scrolling outside the explorer scrolls the page normally;
@@ -21,7 +22,7 @@ async function settle(p) {
   for (;;) {
     const s = await p.evaluate(() => {
       const sl = document.querySelector(".pfx__slide:not([inert])");
-      if (!sl.dataset.demoUrl) return "no-demo";
+      if (!sl.dataset.frameUrl && !sl.dataset.demoUrl) return "no-demo";
       if (sl.classList.contains("is-ready")) return "interactive";
       if (sl.dataset.unavailable === "true") return "unavailable";
       return "loading";
@@ -68,7 +69,7 @@ export async function checkLocation(p, base, path, label, ok) {
     // site or its database): HTTP status, time to answer, and whether the page carries the handshake script.
     let why = "";
     if (state === "unavailable") {
-      const demoUrl = await p.evaluate(() => document.querySelector(".pfx__slide:not([inert])")?.dataset.demoUrl || "");
+      const demoUrl = await p.evaluate(() => { const s = document.querySelector(".pfx__slide:not([inert])"); return s?.dataset.demoUrl || s?.dataset.frameUrl || ""; });
       if (demoUrl) {
         const t0 = Date.now();
         try {
@@ -88,8 +89,8 @@ const demoFrame = (p, origin) => p.frames().find((f) => f.url().startsWith(origi
 
 /** Scrolling, navigation, reset and controls for one interactive slide (the active one on the page). */
 export async function checkInteractive(p, label, ok, { touch = false } = {}) {
-  const info = await p.evaluate(() => { const s = document.querySelector(".pfx__slide:not([inert])"); return { name: s.dataset.name, origin: s.dataset.demoOrigin, url: s.dataset.demoUrl }; });
-  const tag = `${label} · ${info.name}`;
+  const info = await p.evaluate(() => { const s = document.querySelector(".pfx__slide:not([inert])"); return { name: s.dataset.name, origin: s.dataset.frameOrigin || s.dataset.demoOrigin, url: s.dataset.frameUrl || s.dataset.demoUrl, live: s.dataset.kind === "live" }; });
+  const tag = `${label} · ${info.name}${info.live ? " (live website)" : ""}`;
   const fr = demoFrame(p, info.origin);
   if (!fr) { ok(false, `${tag}: demo frame not found`); return; }
   const iframe = p.locator(".pfx__slide:not([inert]) iframe.pfx__frame");
@@ -149,9 +150,24 @@ export async function checkInteractive(p, label, ok, { touch = false } = {}) {
   });
   if (!target) {
     // A one-page site (Glassly): its navigation is in-page anchors — they must move the demo, never Crestmont.
-    const anchor = await fr.evaluate(() => { const a = [...document.querySelectorAll("a[href^='#']")].find((x) => x.getAttribute("href").length > 1 && x.getBoundingClientRect().width > 0); if (!a) return null; a.setAttribute("data-pfx-probe", ""); return a.getAttribute("href"); });
+    // A visible in-page link a visitor can tap (not a hidden skip link): bring it into the site's own viewport with
+    // window.scrollTo — scrollIntoView would also scroll Crestmont's page and spoil the measurement.
+    const anchor = await fr.evaluate(() => {
+      for (const a of document.querySelectorAll("a[href^='#']")) {
+        if (a.getAttribute("href").length < 2 || !a.getClientRects().length || getComputedStyle(a).visibility === "hidden") continue;
+        const dest = document.getElementById(decodeURIComponent(a.getAttribute("href").slice(1)));
+        if (!dest || Math.abs(dest.getBoundingClientRect().top - a.getBoundingClientRect().top) < innerHeight / 2) continue; // must actually move the page
+        const r0 = a.getBoundingClientRect();
+        if (r0.width < 1 || r0.height < 1) continue;
+        scrollTo({ top: Math.max(0, r0.top + scrollY - innerHeight / 2), behavior: "instant" });
+        const r = a.getBoundingClientRect();
+        if (document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest("a") !== a) continue;
+        a.setAttribute("data-pfx-probe", ""); return a.getAttribute("href");
+      }
+      return null;
+    });
+    await sleep(300);
     const yBefore = await outerY(p), dBefore = (await inner()).y;
-    if (anchor) { await fr.locator("[data-pfx-probe]").first().evaluate((el) => el.scrollIntoView({ block: "center", behavior: "instant" })); await sleep(300); }
     const d0 = (await inner()).y;
     if (anchor) { await fr.locator("[data-pfx-probe]").first().click().catch(() => {}); await sleep(1200); }
     const dAfter = (await inner()).y, yAfter = await outerY(p);
@@ -187,8 +203,8 @@ export async function checkInteractive(p, label, ok, { touch = false } = {}) {
     window.postMessage([forged], "*");
     window.postMessage({ ...forged, type: "takeover" }, "*");
     const f = document.createElement("iframe"); f.hidden = true; f.setAttribute("data-pfx-forged", "");
-    f.src = origin + "/__demo/leave?to=" + encodeURIComponent("https://example.com/"); document.body.append(f); // a valid (200) demo page
-  }, info.origin);
+    if (origin) { f.src = origin + "/__demo/leave?to=" + encodeURIComponent("https://example.com/"); document.body.append(f); } // a valid (200) demo page
+  }, info.live ? "" : info.origin);
   await sleep(4000);
   await p.evaluate(() => document.querySelector("[data-pfx-forged]")?.remove());
   const after = await urlText();
@@ -198,7 +214,7 @@ export async function checkInteractive(p, label, ok, { touch = false } = {}) {
   await p.locator("[data-pfx-reset]").first().click();
   let reset = false;
   for (let k = 0; k < 60 && !reset; k++) { await sleep(300); const f3 = demoFrame(p, info.origin); reset = !!f3 && new URL(f3.url()).pathname === new URL(info.url).pathname && (await p.evaluate(() => document.querySelector(".pfx__slide:not([inert])").classList.contains("is-ready"))); }
-  ok(reset, `${tag}: Reset returns the demo to its start page`);
+  ok(reset, `${tag}: ${info.live ? "Reload returns the live website to its home page" : "Reset returns the demo to its start page"}`);
 
   // Device controls change the rendered viewport (CSS px inside the frame).
   const widths = {};

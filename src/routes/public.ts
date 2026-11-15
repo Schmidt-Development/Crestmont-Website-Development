@@ -23,6 +23,7 @@ import { newId, nowIso } from "../lib/db.ts";
 import * as cms from "../services/cms.ts";
 import { lineDiff } from "../services/voice.ts";
 import * as pf from "../services/portfolio.ts";
+import { checkEmbed, safePublicUrl, type EmbedCheck } from "../services/embed-check.ts";
 import { serviceVisual } from "../ui/service-visuals.ts";
 import { receptionistConsole, voiceLibrary } from "../ui/receptionist.ts";
 import { constellation, journey, qualityLab } from "../ui/about.ts";
@@ -115,6 +116,23 @@ function maintenanceCards(): SafeHtml {
   return html`<div class="grid grid-3 pricing-grid" data-reveal-group>${plans().map((m) => html`<div class="card package" data-reveal><h3 class="card__title">${m.name}</h3><div class="price" data-testid="price-${m.id}">${formatCents(effective[`maintenance:${m.id}`] ?? m.monthlyCents)}<small> / month</small></div>
 ${approved ? html`<ul class="checklist">${Object.values(m.proposedEntitlements).map((e) => html`<li>${e}</li>`)}</ul>` : html`<p class="muted">Full plan details will be published here once finalised.</p>`}</div>`)}</div>
 ${approved ? "" : html`<p class="muted">Each plan will have explicit, published limits for hosting, maintenance time, content updates, security updates, monitoring, backups and support response targets — with no unlimited development or unlimited support. Have a question in the meantime? <a href="/contact?topic=maintenance">Ask us about maintenance</a>.</p>`}`;
+}
+
+/** Screenshot figures on a case study — only the screenshots that exist (a live, interactive entry may have none). */
+function caseShots(proj: pf.PortfolioProject): SafeHtml {
+  const hasDesk = !!(proj.desktop_screenshot_file_id || proj.poster_desktop_asset), hasMob = !!(proj.mobile_screenshot_file_id || proj.poster_mobile_asset);
+  if (!hasDesk && !hasMob) return html``;
+  return html`<section class="section section--flush"><div class="container case-shots">${hasDesk ? html`<figure>${shot(proj, "desktop", true)}<figcaption class="faint">Desktop${proj.desktop_screenshot_file_id ? (proj.screenshot_captured_at ? ` · captured ${formatDate(proj.screenshot_captured_at)}` : "") : " · demonstration build with sample data"}</figcaption></figure>` : ""}
+${hasMob ? html`<figure>${shot(proj, "mobile", true)}<figcaption class="faint">Mobile${proj.mobile_screenshot_file_id ? "" : " · demonstration build"}</figcaption></figure>` : ""}</div></section>`;
+}
+
+/** Structured data for a case study (search engines): the project as a CreativeWork by Crestmont, about the live site. */
+function caseJsonLd(ctx: AppContext, proj: pf.PortfolioProject): SafeHtml {
+  const base = ctx.baseUrl.replace(/\/$/, "");
+  const data = { "@context": "https://schema.org", "@type": "CreativeWork", name: `${proj.name} — website by Crestmont Website Development`, url: `${base}/portfolio/${proj.slug}`,
+    description: metaDescription(proj.description, 300), genre: proj.industry, creator: { "@id": `${base}/#organization` },
+    about: { "@type": "WebSite", name: proj.name, url: proj.live_url }, keywords: pf.features(proj).join(", ") };
+  return html`<script type="application/ld+json">${raw(JSON.stringify(data).replace(/</g, "\\u003c"))}</script>`;
 }
 
 function portfolioCard(p: pf.PortfolioProject): SafeHtml {
@@ -641,7 +659,7 @@ ${ids.map((fid) => { const f = top(fid); return html`<tr><th scope="row"><span c
     return html`${pageHero("Portfolio", intro.heading, intro.lede)}
 <section class="section section--flush"><div class="container">${projects.length ? html`${portfolioExplorer(ctx, projects, { variant: "portfolio" })}
 <div class="pf-index"><h2 class="pf-index__title">Case studies</h2><ul class="index-list">${projects.map((x) => html`<li class="pf-index__item"><a href="/portfolio/${x.slug}"><span class="index-list__name">${x.name}</span><span class="index-list__summary">${x.industry}</span><span class="index-list__arrow" aria-hidden="true">→</span></a><a class="pf-index__live" href="${safeUrl(x.live_url)}" target="_blank" rel="noopener noreferrer">Visit live website<span class="visually-hidden">: ${x.name} (opens in a new tab)</span></a></li>`)}</ul></div>`
-      : emptyState("Portfolio projects are being prepared", "Projects appear here once genuine desktop and mobile screenshots of each live website have been captured and verified, and the project's relationship to Crestmont is documented. We never substitute mock-ups or stock imagery.", html`<a class="btn btn--secondary" href="/contact">Ask us about our work</a>`)}</div></section>`;
+      : emptyState("Portfolio projects are being prepared", "Projects appear here once each live website has been verified and the project's relationship to Crestmont and the owner's consent are documented. We never substitute mock-ups or stock imagery.", html`<a class="btn btn--secondary" href="/contact">Ask us about our work</a>`)}</div></section>`;
   }));
 
   r.get("/portfolio/:slug", async (ctx, p) => {
@@ -651,8 +669,7 @@ ${ids.map((fid) => { const f = top(fid); return html`<tr><th scope="row"><span c
     return htmlResponse(ctx, publicLayout(ctx, { title: `${proj.name} — case study`, description: metaDescription(proj.description) }, html`
 ${pageHero(proj.industry, proj.name, undefined, html`<a class="btn btn--primary" href="${safeUrl(proj.live_url)}" rel="noopener noreferrer" target="_blank">Visit live website</a>${linkButton("All projects", "/portfolio", "ghost")}`)}
 <section class="section section--flush"><div class="container">${portfolioExplorer(ctx, [proj], { variant: "case", headingLevel: 2 })}</div></section>
-<section class="section section--flush"><div class="container case-shots"><figure>${shot(proj, "desktop", true)}<figcaption class="faint">Desktop${proj.desktop_screenshot_file_id ? (proj.screenshot_captured_at ? ` · captured ${formatDate(proj.screenshot_captured_at)}` : "") : " · demonstration build with sample data"}</figcaption></figure>
-<figure>${shot(proj, "mobile", true)}<figcaption class="faint">Mobile${proj.mobile_screenshot_file_id ? "" : " · demonstration build"}</figcaption></figure></div></section>
+${caseShots(proj)}${caseJsonLd(ctx, proj)}
 <section class="section"><div class="container grid grid-2"><div class="prose"><h2>About the project</h2>${paragraphs(proj.description).map((x) => html`<p>${x}</p>`)}
 ${proj.technology_summary ? html`<h3>Technology</h3><p>${proj.technology_summary}</p>` : ""}<p class="faint">${proj.relationship}</p></div>
 <div class="card"><h3 class="card__title">Verified features</h3><ul class="checklist">${pf.features(proj).map((f) => html`<li>${f}</li>`)}</ul>
@@ -1032,6 +1049,9 @@ ${input({ name: "relationship", label: "Relationship to Crestmont", value: v.rel
 <div class="form-actions">${button(submit)}</div></form>`;
 }
 
+/** Outbound fetch for the live-site check (tests substitute a stub through env.overrides.portfolioFetch). */
+const netFetch = (ctx: AppContext): typeof fetch => ctx.env.overrides?.portfolioFetch ?? fetch;
+
 function registerPortfolioAdmin(r: Router) {
   r.get("/staff/portfolio", async (ctx) => {
     requireStaff(ctx, "portfolio.manage");
@@ -1044,11 +1064,39 @@ function registerPortfolioAdmin(r: Router) {
     const v = projectFormValues(f);
     try {
       const { id } = await pf.createProject(ctx.db, ctx.actor!, v, ctx.ip, Number(str(f, "position")) || null);
-      return redirect(ctx, `/staff/portfolio/${id}`, { kind: "success", text: "Project added (unpublished)." });
+      // Step 3 happens on its own: the live preview is checked straight away (the site's own framing headers).
+      const r = await pf.refreshEmbed(ctx.db, { id, live_url: v.live_url }, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null).catch(() => null);
+      const text = r?.status === "allowed" ? "Project added (unpublished). The live website is shown below — review it, then complete the authorization to publish."
+        : `Project added (unpublished). ${r ? `The live website cannot be embedded here (${r.detail}), so a genuine screenshot is needed as its preview.` : "The live preview check will run again shortly."}`;
+      return redirect(ctx, `/staff/portfolio/${id}`, { kind: "success", text });
     } catch (e) {
-      if (e instanceof pf.PortfolioError && e.status === 422) return portfolioList(ctx, v, e.issues, 422);
+      if (e instanceof pf.PortfolioError && e.status === 422) return portfolioNew(ctx, v, e.issues, null, 422);
       cmsFail(e);
     }
+  });
+
+  // Step 1 → 2 of the simplified flow: a staff member enters only the live website address. Crestmont loads it once,
+  // checks whether it may be shown live (its own headers) and pre-fills the name and description from the page's own
+  // title and description, for the staff member to confirm or correct. Nothing is saved until they confirm.
+  r.post("/staff/portfolio/new", async (ctx) => {
+    requireStaff(ctx, "portfolio.manage");
+    const f = await ctx.form();
+    const raw = str(f, "live_url");
+    const url = safePublicUrl(raw.includes("://") ? raw : `https://${raw}`);
+    if (!url) return portfolioList(ctx, ["Enter the full public address of the live website, for example https://example.com/"], 422);
+    const check = await checkEmbed(url.toString(), new URL(ctx.baseUrl).origin, netFetch(ctx));
+    const name = (check.siteName ?? check.title?.split(/\s+[—–|·-]\s+/)[0] ?? "").trim().slice(0, 120);
+    const slug = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+    return portfolioNew(ctx, { live_url: check.url ?? url.toString(), name, slug, description: check.description ?? "", relationship: "Relationship documentation pending" }, [], check);
+  });
+
+  r.post("/staff/portfolio/:id/embed-check", async (ctx, p) => {
+    requireStaff(ctx, "portfolio.manage");
+    await ctx.form();
+    const proj = await pf.getById(ctx.db, p.id);
+    if (!proj) throw new HttpError(404, "Project not found");
+    const r = await pf.refreshEmbed(ctx.db, proj, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null);
+    return redirect(ctx, `/staff/portfolio/${p.id}`, { kind: r.status === "allowed" ? "success" : "error", text: r.status === "allowed" ? `The live website can be shown interactively (${r.detail}).` : `The live website cannot be shown interactively: ${r.detail}.` });
   });
 
   // Drag and drop / keyboard reordering: the whole active order at once ("order" = ids, comma-separated).
@@ -1131,22 +1179,22 @@ function registerPortfolioAdmin(r: Router) {
   action("testimonials", async (ctx, id, f) => { await pf.addTestimonial(ctx.db, ctx.actor!, id, { author: str(f, "author"), body: str(f, "body"), evidence: str(f, "evidence") }, ctx.ip); return "Verified testimonial saved (unpublished)."; });
 }
 
-async function portfolioList(ctx: AppContext, v: Partial<pf.ProjectInput> = {}, errors: string[] = [], status = 200): Promise<Response> {
+async function portfolioList(ctx: AppContext, errors: string[] = [], status = 200): Promise<Response> {
   const all = await pf.listActive(ctx.db);
   const archived = await pf.listArchived(ctx.db);
   const approved = pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) });
   const row = (p: pf.PortfolioProject, i: number) => {
-    const d = pf.demoState(p, approved);
+    const d = pf.previewState(p, approved);
     const b = pf.publishBlockers(p);
     return html`<li class="pf-order__item card" data-pf-id="${p.id}" data-testid="pf-row">
 <button type="button" class="pf-order__handle" data-pf-handle aria-label="Reorder ${p.name}: drag, or use the arrow keys" aria-describedby="pf-order-help">⠿</button>
 <span class="pf-order__pos" data-pf-pos aria-hidden="true">${i + 1}</span>
 <span class="pf-order__main"><a href="/staff/portfolio/${p.id}">${p.name}</a><br><span class="faint">${p.industry} · ${p.live_url}</span></span>
-<span class="pf-order__status">${p.published ? badge("published") : badge("draft", "Hidden")} ${d.kind === "embed" ? badge("ok", "Demo") : ""} ${b.length && !p.published ? badge("blocked", `${b.length} to publish`) : ""}</span>
+<span class="pf-order__status">${p.published ? badge("published") : badge("draft", "Hidden")} ${d.kind === "live" ? badge("ok", "Live") : d.kind === "embed" ? badge("ok", "Demo") : badge("muted", "Screenshot")} ${b.length && !p.published ? badge("blocked", `${b.length} to publish`) : ""}</span>
 <span class="pf-order__moves">${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Up", { hidden: { dir: "up" }, size: "sm" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Down", { hidden: { dir: "down" }, size: "sm" })}</span></li>`;
   };
   return staffShell(ctx, "Portfolio", html`${pageHead("Portfolio", undefined, "Content")}
-<p class="muted">The public portfolio shows published projects in exactly this order. Drag a project by its handle (mouse or touch), or focus the handle and use the arrow keys, then save the order. Up and Down work without JavaScript. Publishing requires genuine screenshots of the live site, a verified live link, documented relationship and the owner's consent.</p>
+<p class="muted">The public portfolio shows published projects in exactly this order. Drag a project by its handle (mouse or touch), or focus the handle and use the arrow keys, then save the order. Up and Down work without JavaScript. Publishing requires a verified live link, the documented relationship and the owner's consent — plus genuine screenshots only for websites that cannot be shown live.</p>
 <p id="pf-order-help" class="visually-hidden">Press the up or down arrow key to move this project; then press Save order.</p>
 ${all.length ? html`<ol class="pf-order" data-pf-order aria-label="Portfolio display order">${all.map(row)}</ol>
 <form method="post" action="/staff/portfolio/order" data-pf-order-form class="form-actions">${csrf(ctx)}<input type="hidden" name="order" value="${all.map((p) => p.id).join(",")}" data-pf-order-input>
@@ -1154,8 +1202,24 @@ ${all.length ? html`<ol class="pf-order" data-pf-order aria-label="Portfolio dis
 ${archived.length ? html`<details class="card"><summary><strong>Archived (${archived.length})</strong> · hidden from the site; nothing deleted</summary>${table(archived, [
   { header: "Project", cell: (p) => html`<a href="/staff/portfolio/${p.id}">${p.name}</a>` }, { header: "Archived", cell: (p) => formatDate(p.archived_at ?? null) },
   { header: "", cell: (p) => actionForm(ctx, `/staff/portfolio/${p.id}/restore`, "Restore", { variant: "secondary", size: "sm" }) }], { caption: "Archived portfolio projects" })}</details>` : ""}
-<h2 class="h4">Add a project</h2>${projectForm(ctx, "/staff/portfolio", { relationship: "Relationship documentation pending", ...v }, "Add project", errors, all.length + 1)}
+<h2 class="h4">Add a project</h2>${formErrors(errors)}<form method="post" action="/staff/portfolio/new" class="card" data-testid="pf-new">${csrf(ctx)}
+<p class="muted">Enter the live website's address. Crestmont opens it, checks whether it can be shown live and interactive in the portfolio, and fills in its name and description for you to confirm.</p>
+${input({ name: "live_url", label: "Live website address", type: "url", required: true, maxlength: 300, placeholder: "https://example.com/" })}
+<div class="form-actions">${button("Continue")}</div></form>
 <script src="/assets/portfolio-order.js" defer></script>`, status);
+}
+
+/** Step 2: confirm the details Crestmont read from the live site (nothing is saved until the staff member confirms). */
+async function portfolioNew(ctx: AppContext, v: Partial<pf.ProjectInput>, errors: string[], check: EmbedCheck | null, status = 200): Promise<Response> {
+  const n = (await pf.listActive(ctx.db)).length;
+  const verdict = !check ? "" : check.status === "allowed"
+    ? html`<div class="alert alert--success" role="status"><strong>Live preview available.</strong> ${check.detail}. The portfolio will show the real, working website — screenshots are optional.</div>`
+    : check.status === "blocked"
+      ? html`<div class="alert alert--warn" role="status"><strong>This website does not permit embedding.</strong> ${check.detail}. It will be shown with a genuine screenshot and a Visit live website button. If you own the site, allow framing by ${new URL(ctx.baseUrl).origin} in its security headers.</div>`
+      : html`<div class="alert alert--warn" role="status"><strong>The website could not be checked.</strong> ${check.detail}. You can still add it; the check runs again automatically.</div>`;
+  return staffShell(ctx, "Add a portfolio project", html`${pageHead("Add a portfolio project", linkButton("All projects", "/staff/portfolio", "ghost", "sm"), "Portfolio")}
+${verdict}<p class="muted">Confirm the name, industry, description and features (list only what you have confirmed on the live site). The project is saved unpublished; publishing needs the owner's documented authorization.</p>
+${projectForm(ctx, "/staff/portfolio", v, "Create project", errors, n + 1)}`, status);
 }
 
 /** Interactive demo settings (PORTFOLIO.md): isolated demo deployment, its verification and bundled posters. */
@@ -1193,14 +1257,22 @@ ${fileInput("screenshot", fid ? "Replace with a new genuine capture" : "Upload a
 ${input({ name: "captured_on", label: "Captured on", type: "date", required: true })}
 <div class="form-actions">${button(fid ? "Replace screenshot" : "Upload screenshot", { variant: "secondary", size: "sm" })}</div></form></div>`;
   };
+  const live = pf.liveEmbed(p);
   return staffShell(ctx, p.name, html`${pageHead(p.name, html`${linkButton("All projects", "/staff/portfolio", "ghost", "sm")}${p.published ? linkButton("View public page", `/portfolio/${p.slug}`, "ghost", "sm") : ""}`, "Portfolio")}
 ${formErrors(opts.errors ?? [])}
 <div class="card"><div class="row row--between"><div>${p.published ? badge("published") : badge("draft", "Unpublished")} <span class="faint">Updated ${formatDateTime(p.updated_at)}</span></div>
 <div>${p.archived_at ? html`${badge("muted", "Archived")} ${actionForm(ctx, `/staff/portfolio/${p.id}/restore`, "Restore", { variant: "secondary" })}` : html`${p.published ? actionForm(ctx, `/staff/portfolio/${p.id}/unpublish`, "Unpublish", { confirm: "Remove this project from the public portfolio?" }) : actionForm(ctx, `/staff/portfolio/${p.id}/publish`, "Publish", { variant: "primary" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/archive`, "Archive", { variant: "ghost", confirm: "Archive this project? It is hidden from the site and the list; its details and images are kept and it can be restored." })}`}</div></div>
 ${blockers.length ? html`<div class="alert alert--warn" role="status"><strong>Publishing is blocked until:</strong><ul>${blockers.map((b) => html`<li>${b}</li>`)}</ul></div>` : html`<p class="muted">All publishing requirements are met.</p>`}</div>
-<div class="grid grid-3">${shotAdmin("desktop")}${shotAdmin("tablet")}${shotAdmin("mobile")}</div>
+<h2 class="h4">Live preview</h2>
+<div class="card" data-testid="pf-embed"><div class="row row--between"><div>${live ? badge("ok", "Live website — interactive") : p.embed_status === "blocked" ? badge("blocked", "Embedding refused by the site") : p.embed_status === "error" ? badge("blocked", "Could not check") : badge("muted", "Not checked yet")}
+<span class="faint">${p.embed_checked_at ? `Checked ${formatDateTime(p.embed_checked_at)}` : ""}${p.embed_detail ? ` · ${p.embed_detail}` : ""}</span></div>
+${actionForm(ctx, `/staff/portfolio/${p.id}/embed-check`, "Check again", { variant: "secondary", size: "sm" })}</div>
+${!live && p.embed_status === "blocked" ? html`<p class="muted">The site's own security headers refuse framing by ${new URL(ctx.baseUrl).origin}, so visitors see a genuine screenshot and a Visit live website button. For a website you own, permit framing by exactly this origin (Content-Security-Policy: frame-ancestors ${new URL(ctx.baseUrl).origin}) and check again.</p>` : ""}
+<p class="muted">Re-checked automatically every day; if a site stops permitting it, its screenshot is shown instead.</p></div>
+${portfolioExplorer(ctx, [p], { variant: "case", headingLevel: 2 })}
 <div class="grid grid-2"><div class="card"><h3 class="card__title">Live link verification</h3>${dl([["Live link", html`<a href="${safeUrl(p.live_url)}" rel="noopener" target="_blank">${p.live_url}</a>`], ["Last verified", formatDate(p.link_verified_at)]])}
-<form method="post" action="/staff/portfolio/${p.id}/verify-link">${csrf(ctx)}${input({ name: "verified_on", label: "Date you opened the link and confirmed it loads the correct site", type: "date", required: true })}<div class="form-actions">${button("Record verification", { variant: "secondary", size: "sm" })}</div></form></div>
+<form method="post" action="/staff/portfolio/${p.id}/verify-link">${csrf(ctx)}<input type="hidden" name="verified_on" value="${new Date().toISOString().slice(0, 10)}">
+<p class="muted">Confirm only after looking at the preview above (or opening the link) and seeing the correct, working website.</p><div class="form-actions">${button("The preview shows the correct website — record verification", { variant: "secondary", size: "sm" })}</div></form></div>
 <div class="card"><h3 class="card__title">Relationship documentation</h3>${dl([["Current", p.relationship], ["Documented", p.relationship_documented_at ? formatDate(p.relationship_documented_at) : "Not yet documented"], ["Evidence", p.relationship_evidence]])}
 <form method="post" action="/staff/portfolio/${p.id}/relationship">${csrf(ctx)}${input({ name: "relationship", label: "Relationship statement shown publicly", value: /pending/i.test(p.relationship) ? "" : p.relationship, required: true, maxlength: 300 })}
 ${textarea({ name: "evidence", label: "Documentation (where it is kept, who authorised it, date)", rows: 3, required: true, maxlength: 2000 })}<div class="form-actions">${button("Record documentation", { variant: "secondary", size: "sm" })}</div></form></div></div>
@@ -1212,6 +1284,9 @@ ${select({ name: "method", label: "How consent was given", options: [{ value: "w
 ${input({ name: "given_on", label: "Date given", type: "date", required: true })}${textarea({ name: "evidence", label: "Where the consent record is kept", rows: 2, required: true, maxlength: 2000 })}
 <div class="form-actions">${button("Record consent", { variant: "secondary", size: "sm" })}</div></form>
 ${p.portfolio_consent_at && !p.portfolio_consent_withdrawn_at ? html`<form method="post" action="/staff/portfolio/${p.id}/consent-withdraw" class="stack" data-confirm="Record the withdrawal and unpublish this project now?">${csrf(ctx)}${input({ name: "note", label: "How the owner withdrew consent", required: true, maxlength: 500 })}<div class="form-actions">${button("Record withdrawal and unpublish", { variant: "danger", size: "sm" })}</div></form>` : ""}</div>
+<details class="card"${live ? "" : " open"}><summary><strong>Screenshots</strong> · ${live ? "optional — thumbnails and fallback for this live entry" : "required — the preview for a site that cannot be shown live"}</summary>
+<p class="muted">Upload only genuine captures of the live production site (the “Portfolio screenshots” workflow captures them automatically with a real browser). Never mock-ups or generated images.</p>
+<div class="grid grid-3">${shotAdmin("desktop")}${shotAdmin("tablet")}${shotAdmin("mobile")}</div></details>
 ${demoAdmin(ctx, p)}
 <h2 class="h4">Project details</h2>${projectForm(ctx, `/staff/portfolio/${p.id}`, v, "Save details")}
 <h2 class="h4">Verified testimonials</h2><p class="muted">Add only testimonials you have confirmed with the author, including permission to publish. They are stored separately and are unpublished until you publish them.</p>
