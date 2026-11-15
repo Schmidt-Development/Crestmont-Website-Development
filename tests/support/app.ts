@@ -19,11 +19,17 @@ export class MemoryStorage implements StorageAdapter {
   async delete(key: string) { this.objects.delete(key); }
 }
 
+/** A fetch that never connects (tests are offline). */
+export const OFFLINE_FETCH: typeof fetch = async () => { throw new TypeError("network disabled in tests"); };
+
 export async function createTestApp(extra: Partial<Env> = {}) {
   const db = createTestDb();
   await syncRequirements(db);
   const storage = new MemoryStorage();
   const env: Env = { DB: db, ENVIRONMENT: "development", APP_URL: "http://crestmont.test", overrides: { storage }, ...extra };
+  // The live portfolio check never reaches the internet from a test: unless a test supplies its own stub, every site
+  // "does not answer" (recorded as a check error, so the entry falls back to its screenshot).
+  if (!env.overrides?.portfolioFetch) env.overrides = { ...(env.overrides ?? {}), portfolioFetch: OFFLINE_FETCH };
   // close() releases the in-memory database. Tests that open an app per case can call it in a finally block; it is
   // safe to call more than once, so a test does not have to track whether it already did.
   let closed = false;

@@ -258,6 +258,22 @@ jobs:
           done
           echo "::warning::$PRODUCTION_URL/api/health did not return 200 within 6 minutes; the checks below decide."
 
+      # Live portfolio (Owner, 2026-11-15): client websites the Owner owns and controls permit framing by this site only.
+      # tools/client-sites/<site>/manifest.json names the site's own commit; scripts/client-site-framing.mjs brings that
+      # change to the site's running Worker as a content-only update (bindings, secrets, variables, routes and triggers
+      # untouched), verifies the live headers (public pages: frame-ancestors = exactly the Crestmont origins; private
+      # pages: still DENY / 'none') and rolls back on any mismatch. Idempotent: a site that already permits it is left
+      # alone. A client-site problem never rolls back this release; the portfolio then shows that site's fallback.
+      - name: Client sites — owner-authorized framing permission (Lead Haven Collective)
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node scripts/client-site-framing.mjs tools/client-sites/lead-haven-collective | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+
       # Interactive portfolio (Owner, 2026-11-13). The four isolated portfolio-demo Workers (their own synthetic data,
       # simulated payments, captured email; docs/frontend/PORTFOLIO.md) are recorded on production's portfolio rows
       # only when the runner sees each answer /__demo/info with "demo":true and name this site in frame-ancestors.
@@ -283,6 +299,24 @@ jobs:
           node --no-warnings scripts/portfolio-demo-sql.ts --origins "$origins" --verified "${verified#,}" > "$RUNNER_TEMP/demos.sql"
           $WRANGLER d1 execute crestmont-production --remote --env production --file "$RUNNER_TEMP/demos.sql" --yes > /dev/null
           echo "Recorded demos: ${verified#,}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Each live website is asked now (not only by tomorrow's daily check) whether it permits framing by this origin;
+      # entries waiting to be published once ready (Lead Haven Collective, migration 0108) are published if every
+      # requirement — including the owner's recorded consent — is met. One-time database challenge, like the backup.
+      - name: Live portfolio — check every live website's framing permission now
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          node --no-warnings scripts/ops-challenge.ts --purpose portfolio_embeds --out-sql "$work/c.sql" --out-nonce "$work/nonce" > /dev/null
+          echo "::add-mask::$(cat "$work/nonce")"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
+          http=$(curl -s -o "$work/r.json" -w '%{http_code}' --max-time 120 -X POST -H 'content-type: application/json' --data "{\"challenge\":\"$(cat "$work/nonce")\"}" "$PRODUCTION_URL/api/ops/portfolio-embeds" || echo 000)
+          [ "$http" = "200" ] || { echo "::warning title=Live portfolio check::HTTP $http"; exit 1; }
+          node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`### Live portfolio (framing permission for ${r.origin})`);for(const x of r.results)console.log(`- ${x.slug}: ${x.status}${x.published?" — published now (every requirement met)":""} — ${x.detail}`)' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Post-deploy production checks (LAUNCH-003)
         id: checks
@@ -331,8 +365,9 @@ jobs:
           node scripts/live-layout-check.mjs "$PRODUCTION_URL" "$RUNNER_TEMP/review" | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}; rm -rf "$RUNNER_TEMP/review"; exit "$rc"
 
-      # The live portfolio in a real browser: every project shows its interactive demo (not the screenshot), scrolls
-      # inside the frame, navigates, resets and switches devices, on desktop and phone. Reported; never a rollback.
+      # The live portfolio in a real browser: every project is interactive (its live website or isolated demo, not the
+      # screenshot), scrolls inside the frame, navigates, reloads/resets and switches devices, on desktop and phone;
+      # Lead Haven Collective must show its REAL live website. Reported; never a rollback.
       - name: Live interactive portfolio (desktop and phone, real browser)
         if: always() && steps.deploy.outcome == 'success'
         continue-on-error: true
@@ -341,7 +376,7 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
         run: |
           [ -f .pw/node_modules/playwright/index.mjs ] || { npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null && .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null; }
-          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 4 | tee -a "$GITHUB_STEP_SUMMARY"
+          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 5 --live lead-haven-collective | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
       - name: Production data report (read-only; no personal data)

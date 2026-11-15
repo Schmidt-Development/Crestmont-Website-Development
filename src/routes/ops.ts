@@ -31,6 +31,7 @@ import { issueFounderOwnerInvitation, deliveryStatus, OwnerBootstrapError } from
 import { sendCertificationBatch, sendMailboxChecks, certParts, CERT_RUN_ID } from "../services/email-certification.ts";
 import { consumeOpsChallenge, type OpsChallengePurpose } from "../services/ops-challenge.ts";
 import { runDatabaseBackup } from "../services/db-backup.ts";
+import { refreshAllEmbeds } from "../services/portfolio.ts";
 
 // ───────────── Signed automation ─────────────
 
@@ -327,6 +328,17 @@ export function register(r: Router): void {
     const m = await runDatabaseBackup({ db: ctx.db, storage: ctx.storage, now: ctx.now });
     await audit(ctx.db, { actorKind: "system", action: "database.backup_written", subjectType: "backup", details: { key: m.key, bytes: m.bytes, totalRows: m.totalRows } });
     return jsonResponse(ctx, 200, m);
+  });
+  // Live portfolio check now (src/services/portfolio.ts refreshAllEmbeds): the same check the daily Cron Trigger runs,
+  // run by the release pipeline right after a deploy so the portfolio reflects each live site's framing permission
+  // immediately. Signed (staging) or a one-time database challenge (production). Returns slugs and statuses only.
+  r.post("/api/ops/portfolio-embeds", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    const auth = await opsAuth(ctx, raw, "portfolio_embeds");
+    if (auth instanceof Response) return auth;
+    const results = await refreshAllEmbeds(ctx.db, new URL(ctx.baseUrl).origin, ctx.env.overrides?.portfolioFetch ?? fetch);
+    await audit(ctx.db, { actorKind: "system", action: "portfolio.embeds_checked", subjectType: "portfolio_project", details: { results: results.map((r) => `${r.slug}:${r.status}`) } });
+    return jsonResponse(ctx, 200, { origin: new URL(ctx.baseUrl).origin, results });
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.

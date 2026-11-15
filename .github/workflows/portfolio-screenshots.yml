@@ -6,6 +6,11 @@ name: Portfolio screenshots (for Founder review)
 # publishing stays blocked until the relationship (PORT-005) and link verification (PORT-006) are recorded.
 on:
   workflow_dispatch:
+    inputs:
+      url:
+        description: "Optional: capture this live website instead (https://…), e.g. a new portfolio entry that cannot be embedded"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -26,7 +31,10 @@ jobs:
       - name: Capture the live sites
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
-        run: node --no-warnings scripts/capture-portfolio.ts --out portfolio-shots
+          URL_INPUT: ${{ inputs.url }}
+        run: |
+          if [ -n "$URL_INPUT" ]; then node --no-warnings scripts/capture-portfolio.ts --out portfolio-shots --url "$URL_INPUT"
+          else node --no-warnings scripts/capture-portfolio.ts --out portfolio-shots; fi
       - name: Summary
         if: always()
         run: |

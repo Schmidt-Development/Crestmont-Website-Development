@@ -1,7 +1,14 @@
-# Portfolio explorer and isolated demos
+# Portfolio explorer: live websites and isolated demos
 
-The portfolio is a horizontal explorer of **interactive demos**. Each one is a separate demo deployment built from a
-verified revision of a project's source. Production sites are never embedded or proxied.
+The portfolio is a horizontal explorer of **real, working websites**. Each project shows, in this order
+(`previewState` in `src/services/portfolio.ts`):
+
+1. its **isolated demo** (a separate demo deployment built from a verified revision), where the Owner set one up;
+2. otherwise its **real live website**, framed directly, when — and only when — that site's own response headers
+   permit this Crestmont origin to frame it (`src/services/embed-check.ts`);
+3. otherwise the **genuine screenshot**, labelled "Screenshot", with the Visit live website link.
+
+Nothing is proxied, and no site's framing restriction is bypassed or weakened.
 `src/ui/portfolio-explorer.ts` renders the explorer and `public/assets/portfolio.js` enhances it. The same component
 is used on `/portfolio`, on the homepage work section and, with a single slide, on each `/portfolio/:slug` case study.
 
@@ -15,6 +22,49 @@ This is recorded through the existing relationship-evidence fields (`relationshi
 `relationship_documented_at`) and appended to `audit_logs` (`portfolio.relationship_documented`) by
 `scripts/portfolio-setup.ts`. The relationship text is "Founder-owned business — website designed and developed
 in-house by the Crestmont team". Do not ask the Founder for this again.
+
+## Live website showcase (Owner, 2026-11-15)
+
+> "I DO NOT want a traditional screenshot-based portfolio. I want Crestmont Website Development to showcase actual,
+> functioning client websites directly inside the Crestmont portfolio." … "FIX LEAD HAVEN COLLECTIVE FIRST — Use the
+> existing project record. Project name: Lead Haven Collective. Live URL: https://leadhavencollective.com/. Slug:
+> lead-haven-collective. Target URL: https://crestmontwebsitedevelopment.com/portfolio/lead-haven-collective. Get the
+> live website embedding working correctly for this project, including any necessary authorized configuration changes
+> on the destination website." … "For websites I own and control, configure the necessary production security headers
+> to explicitly permit framing by https://crestmontwebsitedevelopment.com, without broadly allowing arbitrary websites
+> to embed them."
+
+This written instruction is the owner's authorization for Lead Haven Collective (relationship, link and display
+consent), recorded by migration `0108_lead_haven_collective_portfolio.sql` only where those records were missing, never
+over a recorded withdrawal. Withdraw it in Staff → Portfolio like any other consent.
+
+**How it works**
+
+- *Staff flow.* Staff → Portfolio → Add a project asks only for the live address. Crestmont loads the page once,
+  checks its framing headers for this environment's origin and pre-fills name, slug and description from the page's
+  own title and description; the staff member confirms or corrects them (and the industry and verified features). The
+  project is created unpublished and its editor shows the live preview at once. Publishing still requires the
+  verified link ("The preview shows the correct website"), the documented relationship and the owner's consent.
+- *Screenshots* are optional for an entry whose live site is verified embeddable (thumbnails, fallback). A site that
+  refuses framing needs genuine desktop and mobile captures — the "Portfolio screenshots" workflow takes them from the
+  production site with a real browser (`url` input); never mock-ups.
+- *The check* (`checkEmbed`): https only, public host names only, follows https redirects (the final address is the
+  one framed), reads `Content-Security-Policy` `frame-ancestors` (every enforced policy must allow the origin; when
+  present it decides) or else `X-Frame-Options` (DENY / SAMEORIGIN refuse). It runs on create, on "Check again", daily
+  (`portfolio_embeds` in the 11:17 UTC cron) and right after every production release
+  (`POST /api/ops/portfolio-embeds`, one-time database challenge). An "allowed" answer counts for 8 days; a site that
+  stops permitting framing falls back to its screenshot.
+- *The page* adds exactly the verified live origins to its CSP `frame-src`. Live frames use the same sandbox as demos
+  (scripts, forms, popups; no top navigation, no device permissions) and are shown when they have loaded; a frame
+  that does not load within 20 s shows the screenshot or a branded card with Visit live website. Controls: Desktop /
+  Tablet / Mobile (1440 / 820 / 390 CSS px, scaled to fit), Reload, Full screen (browser full screen where offered).
+- *Owned client sites* permit framing by exactly `https://crestmontwebsitedevelopment.com` and its `www` host on
+  their public pages, and keep `frame-ancestors 'none'` + `X-Frame-Options: DENY` on private pages. For Lead Haven
+  Collective the change lives in its own repository (`tools/client-sites/lead-haven-collective/manifest.json` names the
+  commit); the production release applies it to the running Worker as a content-only update with
+  `scripts/client-site-framing.mjs` (verified, rolled back on mismatch, idempotent).
+- *Limitation:* a browser does not tell the framing page whether a cross-origin frame was refused, so the explorer
+  relies on the server-side check; that is why it is repeated daily and after every release.
 
 ## Data model (migration 0038, additive; numbered 0037 on the retired frontend-preview branch)
 

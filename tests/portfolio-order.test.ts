@@ -34,7 +34,9 @@ test("[PORT-004] the Owner adds projects at any position, saves a dragged order,
   assert.match(list, /data-pf-order/);
   assert.match(list, /data-pf-handle aria-label="Reorder Bravo Fixture: drag, or use the arrow keys"/);
   assert.match(list, /src="\/assets\/portfolio-order\.js"/);
-  assert.match(list, /name="position"/);
+  assert.match(list, /action="\/staff\/portfolio\/new"/, "new entries start from the live website address");
+  const step2 = await (await o.post("/staff/portfolio/new", { live_url: "https://delta-fixture.fixture-portfolio.com/" })).text();
+  assert.match(step2, /name="position"/, "the confirmation step offers the position for the new entry");
   let depth = 0, maxDepth = 0;
   for (const m of list.matchAll(/<(\/?)form\b/g)) { depth += m[1] ? -1 : 1; maxDepth = Math.max(maxDepth, depth); }
   assert.equal(maxDepth, 1, "no form is nested in another (Up/Down and Save order are separate forms)");

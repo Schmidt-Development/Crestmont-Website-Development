@@ -146,7 +146,7 @@ export interface Env {
   FILES?: unknown;             // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */
-  overrides?: Partial<Pick<AppContext, "email" | "storage" | "payments">> & { now?: () => Date; /** Test seam for read-only provider calls (cost import, reconciliation). */ fetch?: typeof fetch };
+  overrides?: Partial<Pick<AppContext, "email" | "storage" | "payments">> & { now?: () => Date; /** Test seam for read-only provider calls (cost import, reconciliation). */ fetch?: typeof fetch; /** Test seam for the live portfolio check (loads client websites). */ portfolioFetch?: typeof fetch };
   /** Legacy test seam retained for the API tests. */
   resolveActor?: (req: Request) => Promise<Actor | null>;
 }

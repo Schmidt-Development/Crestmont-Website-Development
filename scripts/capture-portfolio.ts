@@ -4,7 +4,8 @@
 // The output is for the Founder's review: screenshots are published only after the Founder uploads them in
 // Staff → Portfolio, documents the relationship (PORT-005) and verifies the link (PORT-006). This script never
 // writes to the platform.
-//   node --no-warnings scripts/capture-portfolio.ts --out portfolio-shots [--only <slug>]
+//   node --no-warnings scripts/capture-portfolio.ts --out portfolio-shots [--only <slug>] [--url https://site --slug <slug>]
+// --url captures any public https website (e.g. a new portfolio entry whose site does not permit embedding).
 //   env PLAYWRIGHT_MODULE (path to playwright's index.mjs; defaults to "playwright")
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -39,12 +40,16 @@ async function main() {
   const arg = (k: string) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
   const out = arg("--out") ?? "portfolio-shots";
   const only = arg("--only");
+  const extraUrl = arg("--url");
+  if (extraUrl && !/^https:\/\/[a-z0-9.-]+(\/[^\s]*)?$/i.test(extraUrl)) { console.error("--url must be a public https:// address"); process.exit(2); }
+  const extraSlug = (arg("--slug") ?? (extraUrl ? new URL(extraUrl).hostname.replace(/^www\./, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase() : "")).replace(/[^a-z0-9-]/g, "");
+  const targets: { slug: string; requirement: string; url: string }[] = extraUrl ? [{ slug: extraSlug, requirement: "PORT-007", url: extraUrl }] : PORTFOLIO_TARGETS.filter((x) => !only || x.slug === only);
   mkdirSync(out, { recursive: true });
   const pw = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
   const browser = await pw.chromium.launch();
   const records: CaptureRecord[] = [];
   try {
-    for (const t of PORTFOLIO_TARGETS.filter((x) => !only || x.slug === only)) {
+    for (const t of targets) {
       for (const [name, vp] of Object.entries(VIEWPORTS) as [keyof typeof VIEWPORTS, (typeof VIEWPORTS)[keyof typeof VIEWPORTS]][]) {
         const rec: CaptureRecord = { slug: t.slug, requirement: t.requirement, url: t.url, viewport: name, finalUrl: null, httpStatus: null, capturedAt: new Date().toISOString(), file: null, sha256: null, bytes: null, error: null };
         const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: vp.deviceScaleFactor, isMobile: vp.isMobile, hasTouch: vp.hasTouch });

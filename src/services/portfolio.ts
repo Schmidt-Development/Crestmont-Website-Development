@@ -1,7 +1,10 @@
 // Portfolio management (PORT-004..007, §13–§16). Projects are database-backed; screenshots are
 // stored through the storage adapter and recorded in `files` under the internal organization.
-// Publishing is refused while genuine screenshots are missing or the relationship to Crestmont
-// is undocumented — the honest pending state is shown instead of any substitute imagery.
+// Live showcase (Owner, 2026-11-15): when a client's live website permits Crestmont to frame it (checked from the
+// site's own headers, src/services/embed-check.ts), the explorer shows the real, working website and screenshots are
+// optional (thumbnails / fallback). A site that refuses framing is shown with a genuine screenshot instead, so
+// publishing it still requires one. Publishing is always refused while the relationship to Crestmont, the link or
+// the owner's consent is unrecorded — the honest pending state is shown instead of any substitute imagery.
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { can, type Actor } from "../domain/authz.ts";
@@ -9,6 +12,7 @@ import { findProhibitedClaims } from "../domain/catalog.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 import { validateUpload, sanitizeFilename } from "../adapters/storage.ts";
 import { toHex } from "../lib/crypto.ts";
+import { checkEmbed, safePublicUrl, type EmbedCheck, type EmbedStatus } from "./embed-check.ts";
 
 export interface PortfolioProject {
   id: string; slug: string; name: string; industry: string; live_url: string; relationship: string; description: string;
@@ -24,6 +28,8 @@ export interface PortfolioProject {
   /** FD-13 explicit, recorded opt-in by the website owner (migration 0068). */
   portfolio_consent_at?: string | null; portfolio_consent_by?: string | null; portfolio_consent_method?: "written" | "portal" | null;
   portfolio_consent_evidence?: string | null; portfolio_consent_recorded_by?: string | null; portfolio_consent_withdrawn_at?: string | null;
+  /** Live-site embedding check (migration 0107). */
+  embed_status?: EmbedStatus; embed_url?: string | null; embed_checked_at?: string | null; embed_detail?: string | null; publish_when_ready?: number;
 }
 export interface Testimonial { id: string; portfolio_project_id: string | null; author_name: string; body: string; verification_evidence: string; verified_by: string; published: number; created_at: string | null }
 
@@ -44,11 +50,28 @@ export const features = (p: Pick<PortfolioProject, "verified_features_json">): s
   try { const v = JSON.parse(p.verified_features_json); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; }
 };
 
+/** A live check older than this no longer counts: the daily re-check keeps it fresh; a site that stops answering, or
+ *  starts refusing framing, falls back to its screenshot instead of showing a broken frame. */
+export const EMBED_MAX_AGE_MS = 8 * 86_400_000;
+
+/** The live website itself may be framed right now: its own headers permitted this environment's origin recently. */
+export function liveEmbed(p: Pick<PortfolioProject, "embed_status" | "embed_url" | "embed_checked_at">, now = Date.now()): { url: string; origin: string } | null {
+  if (p.embed_status !== "allowed" || !p.embed_url || !p.embed_checked_at) return null;
+  const at = Date.parse(p.embed_checked_at);
+  if (Number.isNaN(at) || now - at > EMBED_MAX_AGE_MS) return null;
+  const u = safePublicUrl(p.embed_url);
+  return u ? { url: u.toString(), origin: u.origin } : null;
+}
+
 /** Reasons a project cannot be published right now (empty = publishable). */
 export function publishBlockers(p: PortfolioProject): string[] {
   const out: string[] = [];
-  if (!p.desktop_screenshot_file_id && !p.poster_desktop_asset) out.push("A genuine desktop screenshot of the live site has not been uploaded.");
-  if (!p.mobile_screenshot_file_id && !p.poster_mobile_asset) out.push("A genuine mobile screenshot of the live site has not been uploaded.");
+  // Screenshots are the fallback for a site that cannot be framed; a live, interactive entry does not need them.
+  if (!liveEmbed(p)) {
+    const why = p.embed_status === "blocked" ? " (the live site does not permit embedding, so a screenshot is shown instead)" : p.embed_status === "allowed" ? "" : " (or a successful live-embedding check)";
+    if (!p.desktop_screenshot_file_id && !p.poster_desktop_asset) out.push(`A genuine desktop screenshot of the live site has not been uploaded${why}.`);
+    if (!p.mobile_screenshot_file_id && !p.poster_mobile_asset) out.push(`A genuine mobile screenshot of the live site has not been uploaded${why}.`);
+  }
   if (!p.relationship_documented_at || /pending/i.test(p.relationship)) out.push("Crestmont's relationship to this business has not been documented.");
   if (!p.link_verified_at) out.push("The live link has not been verified.");
   // FD-13: never shown without the owner's explicit, recorded opt-in (and never after it is withdrawn).
@@ -102,6 +125,17 @@ export const allowLocalDemos = (environment: string | undefined) => environment 
 const originOf = (u: string | null | undefined): string | null => { try { const x = new URL(u ?? ""); const o = x.origin.toLowerCase(); return x.protocol === "https:" || LOCAL_RE.test(o) ? o : null; } catch { return null; } };
 
 export type DemoState = { kind: "embed"; url: string; origin: string } | { kind: "unavailable"; reason: string } | { kind: "none" };
+/** What the explorer shows: the real live website, an isolated demo copy, or the genuine screenshot. */
+export type PreviewState = { kind: "live"; url: string; origin: string } | DemoState;
+/** An Owner-verified isolated demo stays where one is ready (it runs the site's flows with sample data and was
+ *  approved for those projects); every other project shows its real live website when the site permits it; the
+ *  genuine screenshot is the fallback. Setting a project's demo to "None" switches it to its live website. */
+export function previewState(p: PortfolioProject, approvedDemos: Set<string>, now = Date.now()): PreviewState {
+  const demo = demoState(p, approvedDemos);
+  if (demo.kind === "embed") return demo;
+  const live = liveEmbed(p, now);
+  return live ? { kind: "live", ...live } : demo;
+}
 /** Whether a project's demo may be embedded right now: ready, verified, on an approved origin, not production. */
 export function demoState(p: Pick<PortfolioProject, "demo_url" | "demo_status" | "demo_verified_at" | "live_url">, approved: Set<string>): DemoState {
   if (p.demo_status === "none" || !p.demo_url) return { kind: "none" };
@@ -153,6 +187,51 @@ export async function setDemo(db: Db, actor: Actor, id: string, input: DemoInput
       .bind(v.demo_url, status, v.demo_revision, verifiedAt, v.verified_on ? 1 : 0, actor.userId ?? null, v.poster_desktop_asset, v.poster_mobile_asset, v.poster_tablet_asset, nowIso(), id),
     auditStmt(db, actor, "portfolio.demo_updated", id, { demoUrl: v.demo_url, status, revision: v.demo_revision, verifiedOn: v.verified_on, posters: [v.poster_desktop_asset, v.poster_tablet_asset, v.poster_mobile_asset] }, ip),
   ]);
+}
+
+// ── Live embedding check (recorded per project; re-run daily and whenever the link changes) ──
+export async function recordEmbedCheck(db: Db, id: string, r: EmbedCheck, actorUserId: string | null = null) {
+  const at = nowIso();
+  const prev = await db.prepare(`SELECT embed_status FROM portfolio_projects WHERE id = ?`).bind(id).first<{ embed_status: string }>();
+  const stmts = [db.prepare(`UPDATE portfolio_projects SET embed_status = ?, embed_url = ?, embed_checked_at = ?, embed_detail = ? WHERE id = ?`)
+    .bind(r.status, r.url, at, r.detail.slice(0, 500), id)];
+  if (prev?.embed_status !== r.status) stmts.push(db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .bind(actorUserId, actorUserId ? "user" : "system", "portfolio.embed_checked", "portfolio_project", id, JSON.stringify({ status: r.status, url: r.url, detail: r.detail, httpStatus: r.httpStatus }), null, at));
+  await db.batch(stmts);
+}
+
+/** Checks one project's live site for this environment's origin and records the answer. */
+export async function refreshEmbed(db: Db, p: Pick<PortfolioProject, "id" | "live_url">, siteOrigin: string, fetcher: typeof fetch = fetch, actorUserId: string | null = null): Promise<EmbedCheck> {
+  const r = await checkEmbed(p.live_url, siteOrigin, fetcher);
+  await recordEmbedCheck(db, p.id, r, actorUserId);
+  return r;
+}
+
+/**
+ * Re-checks every active project (cron and the release pipeline), then publishes the entries that asked to be published
+ * once ready (publish_when_ready) and now meet every requirement. A project whose live site stopped permitting framing
+ * simply falls back to its screenshot; nothing is unpublished automatically.
+ */
+export async function refreshAllEmbeds(db: Db, siteOrigin: string, fetcher: typeof fetch = fetch): Promise<{ slug: string; status: string; detail: string; published?: boolean }[]> {
+  const out: { slug: string; status: string; detail: string; published?: boolean }[] = [];
+  for (const p of await listActive(db)) {
+    const r = await refreshEmbed(db, p, siteOrigin, fetcher);
+    const row: { slug: string; status: string; detail: string; published?: boolean } = { slug: p.slug, status: r.status, detail: r.detail };
+    if (p.publish_when_ready && !p.published) {
+      const fresh = (await getById(db, p.id))!;
+      if (!publishBlockers(fresh).length) {
+        const at = nowIso();
+        await db.batch([
+          db.prepare(`UPDATE portfolio_projects SET published = 1, published_at = COALESCE(published_at, ?), publish_when_ready = 0, updated_at = ? WHERE id = ? AND archived_at IS NULL`).bind(at, at, p.id),
+          db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (NULL,'system','portfolio.published','portfolio_project',?,?,NULL,?)`)
+            .bind(p.id, JSON.stringify({ reason: "publish_when_ready: every requirement met", embed: r.status }), at),
+        ]);
+        row.published = true;
+      }
+    }
+    out.push(row);
+  }
+  return out;
 }
 
 export async function listPublished(db: Db): Promise<PortfolioProject[]> {
@@ -240,8 +319,9 @@ export async function updateProject(db: Db, actor: Actor, id: string, input: Pro
   const relChanged = values.relationship !== p.relationship;
   const stmts = [
     db.prepare(`UPDATE portfolio_projects SET slug=?, name=?, industry=?, live_url=?, relationship=?, description=?, verified_features_json=?, technology_summary=?, updated_at=?,
-      link_verified_at = CASE WHEN ? THEN NULL ELSE link_verified_at END, link_verified_by = CASE WHEN ? THEN NULL ELSE link_verified_by END WHERE id = ?`)
-      .bind(values.slug, values.name, values.industry, values.live_url, values.relationship, values.description, values.featuresJson, values.technology_summary || null, nowIso(), linkChanged ? 1 : 0, linkChanged ? 1 : 0, id),
+      link_verified_at = CASE WHEN ? THEN NULL ELSE link_verified_at END, link_verified_by = CASE WHEN ? THEN NULL ELSE link_verified_by END,
+      embed_status = CASE WHEN ? THEN 'unchecked' ELSE embed_status END, embed_url = CASE WHEN ? THEN NULL ELSE embed_url END WHERE id = ?`)
+      .bind(values.slug, values.name, values.industry, values.live_url, values.relationship, values.description, values.featuresJson, values.technology_summary || null, nowIso(), linkChanged ? 1 : 0, linkChanged ? 1 : 0, linkChanged ? 1 : 0, linkChanged ? 1 : 0, id),
     auditStmt(db, actor, "portfolio.updated", id, { linkChanged, relationshipChanged: relChanged }, ip),
   ];
   // A project whose link changed must be re-verified before it can stay public.
@@ -324,7 +404,7 @@ export async function setPublished(db: Db, actor: Actor, id: string, publish: bo
     if (blockers.length) throw new PortfolioError(409, "This project cannot be published yet", blockers);
   }
   await db.batch([
-    db.prepare(`UPDATE portfolio_projects SET published = ?, published_at = CASE WHEN ? THEN ? ELSE published_at END, updated_at = ? WHERE id = ?`).bind(publish ? 1 : 0, publish ? 1 : 0, nowIso(), nowIso(), id),
+    db.prepare(`UPDATE portfolio_projects SET published = ?, publish_when_ready = 0, published_at = CASE WHEN ? THEN ? ELSE published_at END, updated_at = ? WHERE id = ?`).bind(publish ? 1 : 0, publish ? 1 : 0, nowIso(), nowIso(), id),
     auditStmt(db, actor, publish ? "portfolio.published" : "portfolio.unpublished", id, {}, ip),
   ]);
 }

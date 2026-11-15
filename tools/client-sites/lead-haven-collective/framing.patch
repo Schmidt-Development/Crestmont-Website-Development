@@ -1,0 +1,103 @@
+--- a/index.js
++++ b/index.js
+@@ -6376,7 +6376,7 @@
+     "headers": {
+       "X-Content-Type-Options": "nosniff",
+       "Referrer-Policy": "strict-origin-when-cross-origin",
+-      "X-Frame-Options": "DENY",
++      "Content-Security-Policy": "frame-ancestors https://crestmontwebsitedevelopment.com https://www.crestmontwebsitedevelopment.com",
+       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+       "Strict-Transport-Security": "max-age=31536000; includeSubDomains"
+     }
+@@ -6384,6 +6384,7 @@
+   {
+     "pattern": "/account/*",
+     "headers": {
++      "X-Frame-Options": "DENY",
+       "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+       "Cache-Control": "no-store, no-transform"
+     }
+@@ -6391,6 +6392,7 @@
+   {
+     "pattern": "/admin/*",
+     "headers": {
++      "X-Frame-Options": "DENY",
+       "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+       "Cache-Control": "no-store, no-transform",
+       "X-Robots-Tag": "noindex, nofollow"
+@@ -6399,6 +6401,7 @@
+   {
+     "pattern": "/privacy/*",
+     "headers": {
++      "X-Frame-Options": "DENY",
+       "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+       "Cache-Control": "no-cache"
+     }
+@@ -6406,6 +6409,7 @@
+   {
+     "pattern": "/legal/*",
+     "headers": {
++      "X-Frame-Options": "DENY",
+       "Content-Security-Policy": "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+       "Cache-Control": "no-cache"
+     }
+@@ -6732,7 +6736,7 @@
+ .claim-head{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;margin:16px 0 8px}
+ .credit-balance{font-size:28px;font-weight:800;letter-spacing:-.01em}
+ .nowrap{white-space:nowrap}
+-` }, "/index.html": { "type": "text/html; charset=utf-8", "etag": '"fbb25705fd24460fd4fa"', "body": `<!doctype html>
++` }, "/index.html": { "type": "text/html; charset=utf-8", "etag": '"c44b33f94e76639b87d7"', "body": `<!doctype html>
+ <html lang="en">
+ <head>
+ <meta charset="utf-8">
+@@ -7334,7 +7338,8 @@
+       if (id !== 'top' && Math.abs(target.getBoundingClientRect().top + offset) > 4) lenis.scrollTo(target, { offset, duration: 0.6 });
+     } });
+   }
+-  else target.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
++  // window.scrollTo moves only this page \u2014 scrollIntoView would also scroll a page that frames this one (the portfolio).
++  else window.scrollTo({ top: id === 'top' ? 0 : Math.max(0, target.getBoundingClientRect().top + window.scrollY - 24), behavior: reduced ? 'auto' : 'smooth' });
+   if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+   target.focus({ preventScroll: true });
+   history.pushState(null, '', id === 'top' ? location.pathname + location.search : '#' + id);
+@@ -7378,6 +7383,7 @@
+  */
+ const CHECKOUT = { enabled: false, endpoint: '/api/checkout' };
+ const PENDING_KEY = 'lhc_pending_package';
++const FRAMED = (() => { try { return window.top !== window.self; } catch { return true; } })();
+ const storage = {
+   get(k) { try { return sessionStorage.getItem(k); } catch { return null; } },
+   set(k, v) { try { sessionStorage.setItem(k, v); } catch { /* unavailable */ } },
+@@ -7508,6 +7514,12 @@
+ form.addEventListener('submit', async (e) => {
+   e.preventDefault();
+   if (!canCheckout()) return;
++  if (FRAMED) {                                       // shown inside a portfolio frame: never sign in or pay inside a frame
++    const w = window.open(\`\${location.origin}/#build\`, '_blank');
++    if (w) w.opener = null;
++    hint.textContent = 'Checkout continues on leadhavencollective.com in a new tab.';
++    return;
++  }
+   const selection = JSON.stringify({ industry: state.industryId, quantity: state.quantity });
+   if (!idempotencyKey || idempotencyKey.selection !== selection) idempotencyKey = { selection, key: crypto.randomUUID() };
+   purchaseBtn.disabled = true;
+@@ -8302,6 +8314,19 @@
+   canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); fail('WebGL context lost.'); });
+ }
+ <\/script>
++<script>
++/* Inside the Crestmont portfolio frame, the private pages (sign-in, account, privacy requests) refuse to be framed,
++   so their links open in a new tab instead of showing a blocked frame. Outside a frame nothing changes. */
++(() => {
++  let framed = true;
++  try { framed = window.top !== window.self; } catch { /* cross-origin parent: framed */ }
++  if (!framed) return;
++  for (const a of document.querySelectorAll('a[href^="/account"], a[href^="/admin"], a[href^="/privacy"], a[href^="/legal"]')) {
++    a.target = '_blank';
++    a.rel = 'noopener';
++  }
++})();
++<\/script>
+ </body>
+ </html>
+ ` }, "/industries.mjs": { "type": "text/javascript; charset=utf-8", "etag": '"74ae8127d665f19c8bd0"', "body": "/**\n * Lead Haven Collective \u2014 industry catalog used by the purchasing configurator.\n *\n * Add an industry by appending an entry here: the configurator renders and\n * searches this list, so no interface changes are needed. `id` is the stable\n * value sent to the (future) checkout endpoint; `aliases` widen search.\n *\n * This list says which industries can be selected. It does NOT claim that\n * leads are in stock: eligible inventory must be verified server-side\n * (see validatePurchase in lead-pricing.mjs) before any checkout.\n */\nconst freezeAll = (list) => Object.freeze(list.map((i) => Object.freeze({ ...i, aliases: Object.freeze(i.aliases) })));\n\nexport const INDUSTRIES = freezeAll([\n  { id: 'roofing',             name: 'Roofing',             aliases: ['roofer', 'roof', 'contractor', 'exterior'] },\n  { id: 'hvac',                name: 'HVAC',                aliases: ['heating', 'cooling', 'air conditioning', 'furnace', 'ventilation'] },\n  { id: 'solar',               name: 'Solar',               aliases: ['solar panels', 'renewable', 'energy', 'photovoltaic'] },\n  { id: 'automotive-services', name: 'Automotive Services', aliases: ['auto', 'car', 'mechanic', 'repair', 'dealership'] },\n  { id: 'website-development', name: 'Website Development', aliases: ['web', 'web design', 'developer', 'websites'] },\n  { id: 'marketing-agencies',  name: 'Marketing Agencies',  aliases: ['marketing', 'agency', 'advertising', 'seo', 'digital'] },\n  { id: 'real-estate',         name: 'Real Estate',         aliases: ['realtor', 'property', 'brokerage', 'homes'] },\n  { id: 'insurance',           name: 'Insurance',           aliases: ['agent', 'broker', 'coverage', 'policy'] },\n  { id: 'commercial-cleaning', name: 'Commercial Cleaning', aliases: ['janitorial', 'cleaning', 'office cleaning', 'facilities'] },\n]);\n\nconst norm = (s) => String(s ?? '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036F]/g, '').replace(/\\s+/g, ' ').trim();\n\n/** Filter industries by a free-text query (name or alias, case/accents ignored). Empty query \u2192 all. */\nexport function searchIndustries(query, list = INDUSTRIES) {\n  const q = norm(query);\n  if (!q) return [...list];\n  return list.filter((i) => norm(i.name).includes(q) || i.aliases.some((a) => norm(a).includes(q)));\n}\n\n/** Look up an industry by id; null when unknown. */\nexport const findIndustry = (id, list = INDUSTRIES) => list.find((i) => i.id === id) || null;\n" }, "/lead-pricing.mjs": { "type": "text/javascript; charset=utf-8", "etag": '"4c8c0fedfd7af085c7b8"', "body": "/**\n * Lead Haven Collective \u2014 lead purchase pricing rules (single source of truth).\n *\n * Status: checkout is NOT implemented. No configurator UI, payment session or\n * backend exists yet; this module holds the approved rules so that a future\n * frontend configurator AND the server-side purchasing endpoint use the same\n * limits and formula. It has no dependencies and runs in browsers and Node.\n *\n * Rules (approved amendment):\n *   - 1,000 to 150,000 leads per transaction, in steps of 1,000\n *   - $75 per 1,000 leads  \u2192  price = (quantity / 1000) \xD7 75\n *   - $75.00 minimum, $11,250.00 maximum per transaction\n *   - an industry must be selected before purchasing\n *   - the server recomputes the price (a client-submitted total is never trusted)\n *   - checkout is refused when eligible inventory can't fulfil the quantity\n *\n * Money is handled in integer cents to avoid floating-point rounding.\n */\n\nexport const LEAD_PRICING = Object.freeze({\n  minQuantity: 1_000,\n  maxQuantity: 150_000,\n  step: 1_000,\n  pricePerThousandCents: 7_500, // $75.00\n  currency: 'USD',\n});\n\n/** Validate a requested lead quantity. Returns { ok: true } or { ok: false, error }. */\nexport function validateQuantity(quantity) {\n  const { minQuantity, maxQuantity, step } = LEAD_PRICING;\n  if (typeof quantity !== 'number' || !Number.isInteger(quantity)) {\n    return { ok: false, error: 'Quantity must be a whole number of leads.' };\n  }\n  if (quantity < minQuantity) {\n    return { ok: false, error: `The minimum purchase is ${formatQuantity(minQuantity)} leads.` };\n  }\n  if (quantity > maxQuantity) {\n    return { ok: false, error: `The maximum purchase is ${formatQuantity(maxQuantity)} leads per transaction.` };\n  }\n  if (quantity % step !== 0) {\n    return { ok: false, error: `Leads are sold in increments of ${formatQuantity(step)}.` };\n  }\n  return { ok: true };\n}\n\n/** Price in integer US cents: (quantity / 1000) \xD7 $75. Throws on an invalid quantity. */\nexport function priceCentsFor(quantity) {\n  const v = validateQuantity(quantity);\n  if (!v.ok) throw new RangeError(v.error);\n  return (quantity / LEAD_PRICING.step) * LEAD_PRICING.pricePerThousandCents;\n}\n\n/** Clamp and snap any slider/input value to a valid quantity (for UI controls). */\nexport function normalizeQuantity(value) {\n  const { minQuantity, maxQuantity, step } = LEAD_PRICING;\n  const n = Number(value);\n  if (!Number.isFinite(n)) return minQuantity;\n  const snapped = Math.round(n / step) * step;\n  return Math.min(maxQuantity, Math.max(minQuantity, snapped));\n}\n\nconst qtyFmt = new Intl.NumberFormat('en-US');\nconst usdFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });\n\n/** 150000 \u2192 \"150,000\" */\nexport const formatQuantity = (quantity) => qtyFmt.format(quantity);\n\n/** 1125000 \u2192 \"$11,250.00\" */\nexport const formatUsd = (cents) => usdFmt.format(cents / 100);\n\n/**\n * Server-side purchase check, to run before creating any payment session.\n * Deliberately ignores any client-submitted price/total and recomputes it.\n *\n * @param {{ industry?: string, quantity: number }} request  what the customer asked for\n * @param {{ industries: string[], eligibleInventory: (industry: string) => number }} ctx\n *        the server's industry list and a lookup of eligible, deliverable leads\n * @returns {{ ok: true, industry: string, quantity: number, priceCents: number, currency: 'USD' }\n *          | { ok: false, error: string }}\n */\nexport function validatePurchase(request, ctx) {\n  const industry = request && typeof request.industry === 'string' ? request.industry.trim() : '';\n  if (!industry) return { ok: false, error: 'Select an industry before purchasing.' };\n  if (!ctx.industries.includes(industry)) return { ok: false, error: 'That industry is not available.' };\n\n  const quantity = request.quantity;\n  const v = validateQuantity(quantity);\n  if (!v.ok) return v;\n\n  const available = Number(ctx.eligibleInventory(industry)) || 0;\n  if (available < quantity) {\n    return { ok: false, error: `Only ${formatQuantity(Math.max(0, Math.floor(available)))} eligible leads are available for ${industry}.` };\n  }\n\n  return { ok: true, industry, quantity, priceCents: priceCentsFor(quantity), currency: LEAD_PRICING.currency };\n}\n" }, "/privacy/app.js": { "type": "text/javascript; charset=utf-8", "etag": '"ae61fc4a23b4fc3916ba"', "body": "import { api, ApiError } from '/assets/api.js';\n\nconst $ = (id) => document.getElementById(id);\nconst STATES = 'AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY'.split(' ');\nconst sel = $('pr-jurisdiction');\nfor (const s of STATES) sel.append(new Option(`United States \u2014 ${s}`, `US-${s}`));\nfor (const [v, l] of [['CA', 'Canada'], ['GB', 'United Kingdom'], ['EU', 'European Union'], ['OTHER', 'Other country']]) sel.append(new Option(l, v));\n\n$('pr-form').addEventListener('submit', async (e) => {\n  e.preventDefault();\n  const f = e.currentTarget;\n  const out = $('pr-error');\n  out.textContent = '';\n  const types = [...f.querySelectorAll('input[name=types]:checked')].map((x) => x.value);\n  if (!types.length) { out.textContent = 'Choose at least one option.'; return; }\n  if (!f.email.checkValidity()) { out.textContent = 'Enter a valid email address.'; f.email.focus(); return; }\n  const btn = f.querySelector('button[type=submit]');\n  btn.disabled = true;\n  try {\n    const r = await api('/api/privacy-requests', { method: 'POST', body: {\n      types, email: f.email.value.trim(), name: f.name.value.trim() || undefined, relationship: f.relationship.value,\n      jurisdiction: f.jurisdiction.value || undefined, emails: f.emails.value, phones: f.phones.value, domains: f.domains.value,\n      details: f.details.value.trim() || undefined, website: f.website.value,\n    } });\n    f.reset();\n    out.textContent = `Thank you. Your request ${r.id || ''} was received; we have emailed a confirmation.`;\n  } catch (err) {\n    out.textContent = err instanceof ApiError ? err.message : 'Something went wrong. Please email leadhavencollective@gmail.com.';\n  } finally { btn.disabled = false; }\n});\n" }, "/privacy/index.html": { "type": "text/html; charset=utf-8", "etag": '"c6caf03931a1d2da2f57"', "body": '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>Privacy Requests \u2014 Lead Haven Collective</title>\n<meta name="description" content="Ask Lead Haven Collective to stop selling, delete, correct or show the business contact information we hold about you.">\n<link rel="icon" href="data:,">\n<link rel="preconnect" href="https://fonts.googleapis.com">\n<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">\n<link rel="stylesheet" href="/assets/app.css">\n<script type="module" src="/privacy/app.js"><\/script>\n</head>\n<body>\n<header class="topbar">\n  <div class="topbar-inner">\n    <a class="brand" href="/" aria-label="Lead Haven Collective \u2014 marketplace home">Lead Haven<small>Collective</small></a>\n    <nav aria-label="Site"><a class="btn btn-line btn-sm" href="/account/">My account</a></nav>\n  </div>\n</header>\n<main class="wrap" id="main">\n  <section class="card" aria-labelledby="pr-title">\n    <span class="eyebrow">Privacy</span>\n    <h1 id="pr-title">Privacy requests</h1>\n    <p class="lead">Lead Haven Collective (operated by Noahs Consulting LLC) sells business contact information to businesses. You can ask us to stop selling your information, delete or correct it, or tell you what we hold.</p>\n    <ul class="muted" style="margin:12px 0 0;padding-left:20px;line-height:1.6">\n      <li><strong>Opt-out, removal and deletion</strong> requests take effect for the email address and phone number you give as soon as we receive them: they are added to our suppression list, so we stop selling them and do not add them again from any source. Businesses that already received them are asked to remove them.</li>\n      <li>We may need to verify your identity before giving access to, correcting or deleting account information.</li>\n      <li>We acknowledge requests by email and aim to respond within 30 days, or sooner where the law that applies requires it.</li>\n      <li>You can also write to <a href="mailto:leadhavencollective@gmail.com">leadhavencollective@gmail.com</a>. Customers can also use the form in their <a href="/account/">account</a>.</li>\n    </ul>\n    <form class="form" id="pr-form" novalidate style="margin-top:20px">\n      <fieldset style="border:0;padding:0;margin:0">\n        <legend class="small" style="font-weight:600;margin-bottom:6px">What would you like us to do?</legend>\n        <label class="check"><input type="checkbox" name="types" value="opt_out"><span>Stop selling or sharing my information (opt-out)</span></label>\n        <label class="check"><input type="checkbox" name="types" value="suppression"><span>Remove me from your lead data</span></label>\n        <label class="check"><input type="checkbox" name="types" value="deletion"><span>Delete my information</span></label>\n        <label class="check"><input type="checkbox" name="types" value="correction"><span>Correct my information</span></label>\n        <label class="check"><input type="checkbox" name="types" value="access"><span>Tell me what information you hold about me</span></label>\n      </fieldset>\n      <div class="form-row">\n        <label>Your email <input type="email" name="email" autocomplete="email" required></label>\n        <label>Your name (optional) <input name="name" autocomplete="name" maxlength="120"></label>\n      </div>\n      <div class="form-row">\n        <label>You are\n          <select name="relationship">\n            <option value="lead_contact">A business contact who may be in your lead data</option>\n            <option value="customer">A Lead Haven Collective customer</option>\n            <option value="authorized_agent">An authorized agent acting for someone else</option>\n            <option value="other">Other</option>\n          </select></label>\n        <label>Where you live or work (optional)\n          <select name="jurisdiction" id="pr-jurisdiction"><option value="">Prefer not to say</option></select></label>\n      </div>\n      <div class="form-row">\n        <label>Other email addresses this is about (optional)<input name="emails" placeholder="name@business.com"></label>\n        <label>Phone numbers this is about (optional)<input name="phones" placeholder="+1 517 555 0100"></label>\n      </div>\n      <label>Business domain (optional; reviewed before it is applied)<input name="domains" placeholder="business.com"></label>\n      <label>Details (optional)<textarea name="details" maxlength="2000"></textarea></label>\n      <label class="hp" aria-hidden="true" style="position:absolute;left:-9999px">Website<input name="website" tabindex="-1" autocomplete="off"></label>\n      <p class="field-error" id="pr-error" role="alert"></p>\n      <div><button class="btn btn-primary" type="submit">Send request</button></div>\n    </form>\n    <p class="muted small" style="margin-top:16px">We use the information in this form only to handle your request and keep a record of it. See our Privacy Policy once published.</p>\n  </section>\n</main>\n</body>\n</html>\n' } };

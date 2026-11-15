@@ -66,7 +66,7 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
   const n = await p.locator(".pfx__slide").count();
   for (let i = 0; i < n; i++) {
     if (i) { await p.locator("[data-pfx-next]").first().click(); await p.waitForTimeout(700); }
-    for (let k = 0; k < 80; k++) { if (await p.evaluate(() => { const s = document.querySelector(".pfx__slide:not([inert])"); return s.classList.contains("is-ready") || s.dataset.unavailable === "true" || !s.dataset.demoUrl; })) break; await p.waitForTimeout(400); }
+    for (let k = 0; k < 80; k++) { if (await p.evaluate(() => { const s = document.querySelector(".pfx__slide:not([inert])"); return s.classList.contains("is-ready") || s.dataset.unavailable === "true" || !s.dataset.frameUrl; })) break; await p.waitForTimeout(400); }
     if (!(await p.evaluate(() => document.querySelector(".pfx__slide:not([inert])").classList.contains("is-ready")))) continue;
     await step(`${name} interactive demo ${i + 1}`, () => checkInteractive(p, `${name} /portfolio`, ok, { touch: mobile }));
     // External demo Workers (other repositories): a hung demo fails this one check after DEMO_FLOW_MS instead of
