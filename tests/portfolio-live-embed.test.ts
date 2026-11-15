@@ -166,6 +166,16 @@ test("[PORT-006] [PORT-007] daily re-check and the release pipeline: a site that
   assert.match(r2.portfolio_embeds.detail, /:blocked/);
   const anyAllowed = await t.db.prepare(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE embed_status = 'allowed'`).first<{ n: number }>();
   assert.equal(anyAllowed!.n, 0);
+  // A check that cannot reach the site does not erase a recent permission (a definite refusal does, as above).
+  permit = true; await runJobs(t.env, ["portfolio_embeds"]);
+  const before = await t.db.prepare(`SELECT embed_status, embed_checked_at FROM portfolio_projects WHERE slug = 'lead-haven-collective'`).first<{ embed_status: string; embed_checked_at: string }>();
+  assert.equal(before!.embed_status, "allowed");
+  const down = await createTestApp({ DB: t.db, overrides: { portfolioFetch: async () => { throw new TypeError("network"); } } } as never);
+  await runJobs(down.env, ["portfolio_embeds"]);
+  const after = await t.db.prepare(`SELECT embed_status, embed_checked_at, embed_detail FROM portfolio_projects WHERE slug = 'lead-haven-collective'`).first<{ embed_status: string; embed_checked_at: string; embed_detail: string }>();
+  assert.equal(after!.embed_status, "allowed");
+  assert.equal(after!.embed_checked_at, before!.embed_checked_at);
+  assert.match(after!.embed_detail, /could not reach the site/);
   // The ops endpoint (release pipeline) refuses an unsigned call.
   const unsigned = await t.client().request("POST", "/api/ops/portfolio-embeds", { body: "{}", headers: { "content-type": "application/json" } });
   assert.equal(unsigned.status, 401);

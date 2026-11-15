@@ -192,7 +192,13 @@ export async function setDemo(db: Db, actor: Actor, id: string, input: DemoInput
 // ── Live embedding check (recorded per project; re-run daily and whenever the link changes) ──
 export async function recordEmbedCheck(db: Db, id: string, r: EmbedCheck, actorUserId: string | null = null) {
   const at = nowIso();
-  const prev = await db.prepare(`SELECT embed_status FROM portfolio_projects WHERE id = ?`).bind(id).first<{ embed_status: string }>();
+  const prev = await db.prepare(`SELECT embed_status, embed_url, embed_checked_at FROM portfolio_projects WHERE id = ?`).bind(id).first<{ embed_status: string; embed_url: string | null; embed_checked_at: string | null }>();
+  // A check that could not reach the site says nothing new about its permission: a recent "allowed" answer stands
+  // (liveEmbed still expires it after EMBED_MAX_AGE_MS). Only a definite answer — allowed or refused — replaces it.
+  if (r.status === "error" && prev && liveEmbed({ embed_status: prev.embed_status as EmbedStatus, embed_url: prev.embed_url, embed_checked_at: prev.embed_checked_at })) {
+    await db.prepare(`UPDATE portfolio_projects SET embed_detail = ? WHERE id = ?`).bind(`Last check ${at.slice(0, 16).replace("T", " ")} UTC could not reach the site (${r.detail}); the permission confirmed ${prev.embed_checked_at!.slice(0, 10)} stands until it is 8 days old.`.slice(0, 500), id).run();
+    return;
+  }
   const stmts = [db.prepare(`UPDATE portfolio_projects SET embed_status = ?, embed_url = ?, embed_checked_at = ?, embed_detail = ? WHERE id = ?`)
     .bind(r.status, r.url, at, r.detail.slice(0, 500), id)];
   if (prev?.embed_status !== r.status) stmts.push(db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (?,?,?,?,?,?,?,?)`)
