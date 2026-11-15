@@ -83,7 +83,9 @@ export function evaluateFraming(headers: Headers, pageUrl: URL, ancestorOrigin: 
   return { allowed: true, detail: xfo ? `No frame-ancestors; X-Frame-Options "${xfo}" is not enforced by browsers` : "No framing restriction is sent" };
 }
 
-const decode = (s: string) => s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;|&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+const ENTITIES: Record<string, string> = { "&amp;": "&", "&quot;": '"', "&#39;": "'", "&#x27;": "'", "&lt;": "<", "&gt;": ">", "&nbsp;": " " };
+/** Decodes the common HTML entities in ONE pass (so "&amp;quot;" stays "&quot;"; never double-unescaped). */
+const decode = (s: string) => s.replace(/&(?:amp|quot|#39|#x27|lt|gt|nbsp);/g, (m) => ENTITIES[m] ?? m).replace(/\s+/g, " ").trim();
 function meta(html: string, attr: "name" | "property", key: string): string | null {
   const re = new RegExp(`<meta\\b[^>]*\\b${attr}\\s*=\\s*["']${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["'][^>]*>`, "i");
   const tag = re.exec(html)?.[0];

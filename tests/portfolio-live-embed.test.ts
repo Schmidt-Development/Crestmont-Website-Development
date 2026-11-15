@@ -60,6 +60,7 @@ test("[PORT-006] [PORT-007] the check only loads public https pages and follows 
   assert.match((await checkEmbed("https://pdf.fixture-portfolio.com/", CRESTMONT, stub)).detail, /not a web page/);
   assert.match((await checkEmbed("https://down.fixture-portfolio.com/", CRESTMONT, stub)).detail, /did not answer/);
   assert.deepEqual(pageFacts(`<meta property="og:site_name" content="Glassly &amp; Co"><title>x</title>`).siteName, "Glassly & Co");
+  assert.equal(pageFacts(`<title>A &amp;quot;B&amp;quot; &amp;lt;C&amp;gt;</title>`).title, "A &quot;B&quot; &lt;C&gt;", "entities are decoded once, never twice");
 });
 
 test("[PORT-006] [PORT-007] screenshots are optional only while the live site is verified embeddable; otherwise they stay required", () => {
