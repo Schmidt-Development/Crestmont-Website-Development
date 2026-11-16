@@ -172,7 +172,11 @@ export async function verifyLocally(files: FixtureFile[]): Promise<string[]> {
       if (f.kind === "page") { if (!new TextDecoder().decode(body).includes(FIXTURE.marker)) problems.push(`${f.path}: the synthetic-fixture banner is missing`); }
       else if (sha256(body) !== f.sha256) problems.push(`${f.path}: served bytes differ from the stored bytes`);
     }
-    const bad = await c.get(`/build-preview/${FIXTURE.jobId}/${FIXTURE.attempt}-${FIXTURE.cycle}/${token!.slice(0, -2)}00/index.html`);
+    // Tamper by changing the last character to a DIFFERENT one. (Overwriting the last two with "00" left the token
+    // unchanged whenever it already ended in "00" — then the "tampered" request rightly answered 200: a random CI failure.)
+    const tampered = token!.slice(0, -1) + (token!.endsWith("0") ? "1" : "0"); // still lowercase hex: the signature check refuses it
+    if (tampered === token) problems.push("the tampered capability equals the real one");
+    const bad = await c.get(`/build-preview/${FIXTURE.jobId}/${FIXTURE.attempt}-${FIXTURE.cycle}/${tampered}/index.html`);
     if (bad.status !== 403) problems.push(`a tampered capability answered ${bad.status}, not 403`);
   } finally { t.close(); }
   return problems;
