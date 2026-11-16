@@ -1,0 +1,65 @@
+name: Portfolio performance (production, read-only)
+
+# Measures the interactive portfolio as a visitor experiences it (scripts/portfolio-perf.mjs): start-up time, delivered
+# frames per second and bandwidth, scroll / swipe / click → visible response, settle time after input (a backlog of
+# stale frames), image decode and visitor CPU, on desktop, Android-sized, iPhone-sized and tablet viewports (Chromium
+# emulation, not Safari), and the same website loaded directly for comparison. It signs in nowhere, uses NO secret and
+# no environment, and opens one remote session per device (about 2–3 browser-minutes of the daily budget).
+# Runs on demand, or on a branch push whose head commit message contains [portfolio-perf] (performance work).
+on:
+  workflow_dispatch:
+    inputs:
+      position:
+        description: Portfolio position to measure
+        default: "2"
+      devices:
+        description: Comma-separated devices (desktop,pixel,iphone,ipad)
+        default: desktop,pixel,iphone,ipad
+      label:
+        description: Label for the report
+        default: measurement
+  push:
+    branches: ["claude/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portfolio-performance
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[portfolio-perf]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+      POSITION: ${{ inputs.position || '2' }}
+      DEVICES: ${{ inputs.devices || 'desktop,pixel,iphone,ipad' }}
+      LABEL: ${{ inputs.label || 'branch measurement' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Install Chromium (pinned Playwright)
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      - name: Measure the portfolio entry and the same website loaded directly
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: |
+          [[ "$POSITION" =~ ^[0-9]{1,2}$ ]] || { echo "::error::position must be a number"; exit 1; }
+          [[ "$DEVICES" =~ ^[a-z,]{1,60}$ ]] || { echo "::error::devices must be a comma-separated list"; exit 1; }
+          node scripts/portfolio-perf.mjs "$PRODUCTION_URL" --position "$POSITION" --devices "$DEVICES" --label "${LABEL//[^A-Za-z0-9 ._-]/}" --out portfolio-perf.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: portfolio-perf
+          path: portfolio-perf.json
+          retention-days: 30
