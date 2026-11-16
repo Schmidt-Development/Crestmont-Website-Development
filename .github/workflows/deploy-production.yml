@@ -498,6 +498,9 @@ jobs:
     timeout-minutes: 20
     env:
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      # Job-wide, so the install step and the check use the same browser folder (run 43794884320 installed Chromium
+      # to the default cache and then looked for it in .pw/browsers).
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
     steps:
       # The default branch's own check scripts (trusted code; no ref from the triggering event is checked out here — this
       # job has no environment protection, so it never runs code chosen by the event). It only drives a browser
@@ -519,7 +522,6 @@ jobs:
       - name: Live portfolio acceptance (desktop and phone, real browser) — mandatory
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
-          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
         run: |
           set +e
           node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 5 --live lead-haven-collective > accept.log 2>&1
