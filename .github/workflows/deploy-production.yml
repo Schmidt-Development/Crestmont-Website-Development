@@ -499,9 +499,12 @@ jobs:
     env:
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
     steps:
+      # The default branch's own check scripts (trusted code; no ref from the triggering event is checked out here — this
+      # job has no environment protection, so it never runs code chosen by the event). It only drives a browser
+      # against the public production site.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
