@@ -1,0 +1,49 @@
+name: Live portfolio acceptance (production, read-only)
+
+# The mandatory live-portfolio acceptance on demand, the same check the production release runs in its
+# verify-live-portfolio job (scripts/live-portfolio-check.mjs). In a real browser at desktop and phone sizes:
+#   - every published project on /portfolio is interactive (its real live website or its isolated demo, never only a
+#     screenshot);
+#   - each scrolls inside its frame without moving Crestmont's page, navigates, reloads/resets and switches devices;
+#   - Lead Haven Collective is published and shows its REAL live website.
+# It signs in nowhere, records nothing, uses NO secret and does not use the `production` environment (no approval
+# pause), like the production smoke test. It runs the default branch's own scripts.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-portfolio-acceptance
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Install Chromium (pinned Playwright)
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      - name: Live portfolio acceptance (desktop and phone, real browser)
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: |
+          set +e
+          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 5 --live lead-haven-collective > accept.log 2>&1
+          rc=$?
+          cat accept.log
+          { if [ "$rc" = 0 ]; then echo "## Feature verification: PASSED — live portfolio accepted on production"; else echo "## Feature verification: FAILED — the live portfolio was NOT accepted"; fi
+            echo; grep -E '^(PASS|FAIL)' accept.log | grep -E 'FAIL|lead-haven|published projects' ; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
