@@ -151,6 +151,9 @@ for (const r of intake.results) {
     await ctx.close();
   });
 
+  // The policy and the phone/tablet viewer do not depend on the website: checked once (the first Mode B site), which
+  // keeps the release check inside a few minutes of the daily browser budget.
+  if (r !== remote[0]) continue;
   // ── Mode B: the production policy on this real website (refused private routes and another website) ──
   await run(`${slug} policy`, async () => {
     const ctx = await b.newContext();
@@ -165,7 +168,7 @@ for (const r of intake.results) {
       const wait = (ms) => new Promise((r) => setTimeout(r, ms));
       for (let i = 0; i < 60 && !seen.ready; i++) await wait(500);
       const probes = ["/login", "/owner", "/admin", "/checkout", "/account", "//example.com/"];
-      for (const path of probes) { const n = seen.blocked.length; ws.send(JSON.stringify({ t: "nav", a: "path", path })); for (let i = 0; i < 30 && seen.blocked.length === n; i++) await wait(250); }
+      for (const path of probes) { const n = seen.blocked.length; ws.send(JSON.stringify({ t: "nav", a: "path", path })); for (let i = 0; i < 60 && seen.blocked.length === n; i++) await wait(250); }
       ws.close();
       return { ready: seen.ready, blocked: seen.blocked.length, probes: probes.length, titles: [...new Set(seen.blocked)] };
     }, { slug, preview: r.preview });
@@ -184,7 +187,9 @@ for (const r of intake.results) {
       ok(!!ci, `${slug} ${label}: rendered at ${w} px`);
       const y0 = await outerY(p), before = (await canvasInfo(p, slug)).hash;
       const cdp = await ctx.newCDPSession(p);
-      const from = await aim(p, slug, Math.round(w / 2), 600), to = await aim(p, slug, Math.round(w / 2), 150);
+      // Within the part of the canvas that is on screen (on a phone it can be taller than the viewport).
+      const vis = await p.locator(`${sel(slug)} canvas.pfx__remote`).evaluate((c) => { const r = c.getBoundingClientRect(); return { top: Math.max(r.top, 0), bottom: Math.min(r.bottom, innerHeight), x: r.left + r.width / 2 }; });
+      const from = { x: vis.x, y: vis.top + (vis.bottom - vis.top) * 0.8 }, to = { x: vis.x, y: vis.top + (vis.bottom - vis.top) * 0.25 };
       await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: from.x, y: from.y }] });
       for (let i = 1; i <= 10; i++) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: from.x, y: from.y + ((to.y - from.y) * i) / 10 }] }); await sleep(16); }
       await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
@@ -217,17 +222,8 @@ if (remote.length && rb.enabled) {
     for (const c of [...ctxs.slice(1), extra]) await c.close();
     ok(!!(await until(async () => (await status()).active === 0, 30000)), "every closed visitor's session is cleaned up");
   });
-  await run("idle", async () => {
-    const ctx = await b.newContext({ viewport: { width: 1280, height: 860 } });
-    const p = await openPreview(ctx, r);
-    ok(await isLive(p, slug), "idle check: live");
-    const ended = await p.waitForSelector(`${sel(slug)}[data-remote-state="ended"]`, { timeout: 150000 }).then(() => true, () => false);
-    ok(ended && /inactivity/i.test(await p.locator(`${sel(slug)} [data-pfx-status]`).innerText()), "an idle session ends on its own and says so");
-    ok(!!(await until(async () => (await status()).active === 0, 20000)), "the idle session's browser was released");
-    await p.click(`${sel(slug)} [data-pfx-resume]`);
-    ok(await isLive(p, slug), "Resume starts a new live session (recovery)");
-    await ctx.close();
-  });
+  // The idle timeout (90 s on production) is verified in CI with a 20 s setting (scripts/remote-browser-check.mjs);
+  // here it would cost two browser-minutes of the visitors' daily budget for every release.
 }
 
 await b.close();

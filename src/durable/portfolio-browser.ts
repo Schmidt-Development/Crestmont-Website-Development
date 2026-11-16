@@ -7,6 +7,7 @@ import type { Env } from "../app/context.ts";
 import { Cdp, chunkedSocket, type SocketLike } from "../services/remote-browser/cdp.ts";
 import { RemoteSession } from "../services/remote-browser/session.ts";
 import { finish, heartbeat } from "../services/remote-browser/admission.ts";
+import { holdEarlyMessages } from "../services/remote-browser/stream.ts";
 import type { ConnectInfo } from "../services/remote-browser/connect.ts";
 
 const BR = "https://fake.host"; // Browser Run binding endpoint (the host is ignored by the binding)
@@ -25,7 +26,7 @@ export class PortfolioBrowser {
     const pair = new Pair();
     const client = pair[0], server = pair[1];
     server.accept();
-    void this.run(info, server);
+    void this.run(info, holdEarlyMessages(server));
     return new Response(null, { status: 101, webSocket: client } as ResponseInit);
   }
 

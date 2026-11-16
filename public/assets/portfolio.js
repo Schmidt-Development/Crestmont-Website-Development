@@ -68,7 +68,7 @@
       root.dataset.mode = m;
       modeBtns.forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.pfxMode === m)));
       fit();
-      for (const rec of remotes.values()) tx(rec, { t: "device", d: m, h: frameH() });
+      for (const rec of remotes.values()) tx(rec, { t: "device", d: m, h: frameH(), ...viewSize(rec) });
       if (announce && live) live.textContent = `${DEVICES[m].label} viewport: the website is shown at ${DEVICES[m].w} pixels wide${Number(getComputedStyle(root).getPropertyValue("--pfx-s")) < 1 ? ", scaled to fit" : ""}.`;
     };
     let userMode = false;
@@ -166,7 +166,7 @@
         c.setAttribute("aria-roledescription", "remote browser");
         c.setAttribute("aria-label", `The live ${s.dataset.name} website, shown through Crestmont's remote browser. Click, scroll, touch or type to use it; sign-in, forms and purchases are turned off.`);
         s.querySelector("[data-pfx-stage]").append(c);
-        rec = { c, g: c.getContext("2d"), ws: null, ready: false, timer: 0, w: 0, h: 0, pending: null, drawing: false, starting: false, refused: false };
+        rec = { c, g: c.getContext("2d", { alpha: false }), ws: null, ready: false, timer: 0, w: 0, h: 0, pending: null, drawing: false, starting: false, refused: false };
         remotes.set(i, rec);
         bindRemoteInput(i, rec);
       }
@@ -188,32 +188,53 @@
         ok = res.ok && typeof r.ws === "string";
       } catch { /* network */ }
       rec.starting = false;
-      if (!ok) { refuse(i, rec, r.code, r.message); return; }
+      if (!ok) {
+        // One quiet retry for a transient failure (not for "busy", "budget", "rate" or "disabled").
+        if (!rec.retried && (!r.code || r.code === "error")) { rec.retried = true; setTimeout(() => { if (i === cur) connect(i, rec); }, 800); return; }
+        refuse(i, rec, r.code, r.message); return;
+      }
       if (i !== cur || document.hidden) return; // the visitor moved on while it was starting; the unclaimed session expires
       const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${r.ws}&device=${encodeURIComponent(root.dataset.mode)}&h=${frameH()}`);
-      ws.binaryType = "blob";
-      rec.ws = ws;
-      ws.addEventListener("message", (e) => { if (typeof e.data === "string") onNotice(i, rec, e.data); else draw(i, rec, e.data); });
+      ws.binaryType = "arraybuffer";
+      rec.ws = ws; rec.drawn = 0; rec.v2 = false;
+      // v2: this viewer acknowledges every picture it draws (the server never runs ahead of it) and says how large the
+      // canvas is actually shown, so frames are never captured bigger than needed.
+      ws.addEventListener("open", () => { tx(rec, { t: "hello", v: 2, ...viewSize(rec) }); });
+      ws.addEventListener("message", (e) => { if (typeof e.data === "string") onNotice(i, rec, e.data); else onFrame(i, rec, e.data); });
       ws.addEventListener("close", () => { if (rec.ws === ws) { rec.ws = null; if (s.dataset.remoteState !== "ended" && s.dataset.remoteState !== "unavailable") stop(i, rec, rec.ready ? "closed" : "error"); } });
     }
-    // Only the newest frame is drawn; frames that arrive while one is decoding replace each other.
-    function draw(i, rec, blob) {
-      rec.pending = blob;
+    // The canvas's displayed size in device pixels (frames are captured no larger than this).
+    const viewSize = (rec) => { const r = rec.c.getBoundingClientRect(); return { cw: Math.round(r.width), ch: Math.round(r.height), dpr: Math.min(2, window.devicePixelRatio || 1) }; };
+    // v2 frames start with an 8-byte header ("CM", flags, 0, frame number); older servers send the JPEG alone.
+    function onFrame(i, rec, buf) {
+      const u8 = new Uint8Array(buf);
+      let n = 0, jpeg = u8;
+      if (u8.length > 8 && u8[0] === 0x43 && u8[1] === 0x4d) { n = new DataView(buf).getUint32(4, true); jpeg = u8.subarray(8); rec.v2 = true; }
+      draw(i, rec, new Blob([jpeg], { type: "image/jpeg" }), n);
+    }
+    // Only the newest frame is drawn; frames that arrive while one is decoding replace each other (never queued).
+    // After each picture the viewer acknowledges the newest frame number it has handled, which lets the server send
+    // the next one: a slow connection or device slows the stream down instead of building a backlog.
+    function draw(i, rec, blob, n) {
+      rec.pending = blob; rec.pendingN = n;
       if (rec.drawing) return;
       rec.drawing = true;
       const step = () => {
-        const b = rec.pending; rec.pending = null;
+        const b = rec.pending, bn = rec.pendingN; rec.pending = null;
         if (!b) { rec.drawing = false; return; }
         createImageBitmap(b).then((bmp) => {
-          if (rec.c.width !== bmp.width || rec.c.height !== bmp.height) { rec.c.width = bmp.width; rec.c.height = bmp.height; }
-          rec.g.drawImage(bmp, 0, 0);
+          // The canvas keeps the remote viewport's size; a smaller frame is scaled up to fill it.
+          const W = rec.w || bmp.width, H = rec.h || bmp.height;
+          if (rec.c.width !== W || rec.c.height !== H) { rec.c.width = W; rec.c.height = H; }
+          rec.g.drawImage(bmp, 0, 0, W, H);
           if (bmp.close) bmp.close();
+          if (bn) { rec.drawn = Math.max(rec.drawn, bn); tx(rec, { t: "ack", n: rec.drawn }); }
           if (!rec.ready) {
             const s = slides[i];
-            rec.ready = true; clearTimeout(rec.timer); s.classList.add("is-ready"); s.dataset.remoteState = "live"; isolate(s); status(s, "");
+            rec.ready = true; rec.retried = false; clearTimeout(rec.timer); s.classList.add("is-ready"); s.dataset.remoteState = "live"; isolate(s); status(s, "");
           }
           step();
-        }, step);
+        }, () => { if (bn) { rec.drawn = Math.max(rec.drawn, bn); tx(rec, { t: "ack", n: rec.drawn }); } step(); });
       };
       step();
     }
@@ -221,7 +242,10 @@
       let m; try { m = JSON.parse(text); } catch { return; }
       if (!m || typeof m !== "object") return;
       const s = slides[i];
-      if (m.t === "ready" || m.t === "viewport") { rec.w = Number(m.w) || 0; rec.h = Number(m.h) || 0; }
+      if (m.t === "ready" || m.t === "viewport") {
+        rec.w = Number(m.w) || 0; rec.h = Number(m.h) || 0;
+        if (m.t === "viewport") requestAnimationFrame(() => tx(rec, { t: "view", ...viewSize(rec) }));
+      }
       else if (m.t === "url" && typeof m.href === "string") { try { const u = new URL(m.href); if (u.protocol === "https:") urlLabel(s, u.host + (u.pathname === "/" ? "" : u.pathname)); } catch { /* ignore */ } }
       else if (m.t === "blocked" && live) live.textContent = `${String(m.title || "That page")} — not available in the portfolio view.`;
       else if (m.t === "ended") stop(i, rec, String(m.reason || "ended"));
@@ -233,7 +257,10 @@
       clearTimeout(rec.timer);
       const ws = rec.ws; rec.ws = null;
       try { if (ws) ws.close(1000, "done"); } catch { /* closed */ }
-      if (reason === "error" || reason === "timeout" || !rec.ready) { refuse(i, rec, "error"); return; }
+      if (reason === "error" || reason === "timeout" || !rec.ready) {
+        if (!rec.retried) { rec.retried = true; setTimeout(() => { if (i === cur && !rec.ws) connect(i, rec); }, 800); return; }
+        refuse(i, rec, "error"); return;
+      }
       s.dataset.remoteState = "ended";
       flag(s, "Remote view paused");
       const why = reason === "idle" ? "The remote view paused after a period of inactivity." : reason === "time-limit" ? "The remote view reached its time limit." : reason === "away" ? "The remote view paused while you were away." : "The remote view has ended.";
@@ -252,8 +279,11 @@
     }
     function bindRemoteInput(i, rec) {
       const c = rec.c;
+      // The canvas position is read at most once per animation frame (no layout work per pointer event).
+      let rect = null, rectAt = -1;
+      const box = () => { const t = performance.now(); if (!rect || t - rectAt > 16) { rect = c.getBoundingClientRect(); rectAt = t; } return rect; };
       const pt = (cx, cy) => {
-        const r = c.getBoundingClientRect(), w = rec.w || c.width || 1, h = rec.h || c.height || 1;
+        const r = box(), w = rec.w || c.width || 1, h = rec.h || c.height || 1;
         return { x: Math.round(((cx - r.left) / (r.width || 1)) * w), y: Math.round(((cy - r.top) / (r.height || 1)) * h) };
       };
       const BTN = ["left", "middle", "right"];
@@ -263,7 +293,7 @@
         if (e.pointerType === "touch") return;
         e.preventDefault(); c.focus({ preventScroll: true });
         try { c.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-        flush(); tx(rec, { t: "mouse", a: "down", b: BTN[e.button] || "left", n: e.detail || 1, ...pt(e.clientX, e.clientY) });
+        flush(); if (wraf) { cancelAnimationFrame(wraf); wflush(); } tx(rec, { t: "mouse", a: "down", b: BTN[e.button] || "left", n: e.detail || 1, ...pt(e.clientX, e.clientY) });
       });
       c.addEventListener("pointerup", (e) => { if (e.pointerType === "touch") return; flush(); tx(rec, { t: "mouse", a: "up", b: BTN[e.button] || "left", n: e.detail || 1, ...pt(e.clientX, e.clientY) }); });
       c.addEventListener("pointermove", (e) => {
@@ -273,10 +303,15 @@
       });
       c.addEventListener("contextmenu", (e) => e.preventDefault());
       // The wheel and touch scroll the remote page only: Crestmont's page never moves while the pointer is on it.
+      // Wheel steps are added up and sent once per animation frame (a trackpad fires many small events).
+      let wheel = null, wraf = 0;
+      const wflush = () => { wraf = 0; if (wheel) { tx(rec, wheel); wheel = null; } };
       c.addEventListener("wheel", (e) => {
         e.preventDefault();
         const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1;
-        tx(rec, { t: "wheel", dx: Math.round(e.deltaX * k), dy: Math.round(e.deltaY * k), ...pt(e.clientX, e.clientY) });
+        const p = pt(e.clientX, e.clientY);
+        if (wheel) { wheel.dx += Math.round(e.deltaX * k); wheel.dy += Math.round(e.deltaY * k); wheel.x = p.x; wheel.y = p.y; }
+        else { wheel = { t: "wheel", dx: Math.round(e.deltaX * k), dy: Math.round(e.deltaY * k), ...p }; wraf = requestAnimationFrame(wflush); }
       }, { passive: false });
       const touches = (e) => [...e.touches].slice(0, 5).map((t) => ({ id: t.identifier % 100, ...pt(t.clientX, t.clientY) }));
       let tmove = null, traf = 0;

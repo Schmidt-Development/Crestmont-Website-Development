@@ -350,7 +350,7 @@ jobs:
           node --no-warnings scripts/ops-challenge.ts --purpose portfolio_intake --out-sql "$work/c.sql" --out-nonce "$work/nonce" > /dev/null
           echo "::add-mask::$(cat "$work/nonce")"
           $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
-          body=$(node -e 'console.log(JSON.stringify({ challenge: process.argv[1], urls: ["https://premiuminvoices.com/", "https://lendingforbeginners.com/", "https://leadhavencollective.com/"] }))' "$(cat "$work/nonce")")
+          body=$(node -e 'console.log(JSON.stringify({ challenge: process.argv[1], urls: ["https://geteveryinvoicepaid.com/", "https://premiuminvoices.com/", "https://lendingforbeginners.com/", "https://leadhavencollective.com/"] }))' "$(cat "$work/nonce")")
           http=$(curl -s -o "$work/r.json" -w '%{http_code}' --max-time 180 -X POST -H 'content-type: application/json' --data "$body" "$PRODUCTION_URL/api/ops/portfolio-intake" || echo 000)
           [ "$http" = "200" ] || { echo "::warning title=Portfolio intake::HTTP $http"; exit 1; }
           node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`### Portfolio display modes (remote browser ${r.remoteBrowser.enabled?"on":"OFF"}, ${r.remoteBrowser.maxConcurrent} concurrent, ${r.remoteBrowser.dailyMinutes} min/day)`);for(const x of r.results)console.log(`- ${x.url} → **${x.mode}** (${x.slug}${x.created?", added unpublished":", existing"}${x.published?", published":""}) — ${x.reason}`)' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"

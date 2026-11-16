@@ -77,6 +77,24 @@ export function decideRequest(r: RequestFacts, site: string): RequestDecision {
   return { action: "continue" };
 }
 
+/**
+ * What the browser pauses for a policy decision (Fetch.enable patterns). Every request that can navigate, write, beacon
+ * or open a stream is paused, whatever its address; so is ANY request (images, styles, fonts, scripts, media) to a
+ * plain-http address, an IP literal of a private or loopback range, an IPv6 literal, or an internal/reserved name —
+ * those are then refused by decideRequest. Everything else (public https subresources, which can only be read) loads
+ * without a round trip to Crestmont: measured on production, pausing every image and font made page loads and
+ * navigation inside the remote browser several times slower.
+ */
+export function interceptPatterns(): { urlPattern: string; resourceType?: string; requestStage: "Request" }[] {
+  // Resource types Chromium accepts in a fetch filter (verified against the running browser: TextTrack, Prefetch,
+  // WebSocket, Manifest, SignedExchange, Preflight and FedCM are refused as "Unknown resource type"; those requests are
+  // read-only GETs or never reach Fetch). The session also drops any type a different browser version refuses.
+  const types = ["Document", "XHR", "Fetch", "Ping", "EventSource", "CSPViolationReport", "Other"];
+  const hosts = ["http://*", "*://localhost*", "*://0.*", "*://10.*", "*://100.*", "*://127.*", "*://169.254.*", "*://172.*", "*://192.168.*", "*://[*", "*://*.localhost*", "*://*.local/*", "*://*.local:*",
+    "*://*.internal/*", "*://*.internal:*", "*://*.intranet/*", "*://*.lan/*", "*://*.home/*", "*://*.corp/*", "*://*.home.arpa*", "*://*.test/*", "*://*.invalid/*", "*://*.example/*", "*://*.onion/*", "*://metadata*", "*://instance-data*"];
+  return [...types.map((resourceType) => ({ urlPattern: "*", resourceType, requestStage: "Request" as const })), ...hosts.map((urlPattern) => ({ urlPattern, requestStage: "Request" as const }))];
+}
+
 /** A small, self-contained notice page served in place of a refused navigation (no external resources). */
 export function blockPageHtml(title: string, message: string): string {
   const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);

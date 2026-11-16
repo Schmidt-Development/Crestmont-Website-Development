@@ -37,18 +37,18 @@ export async function expireStale(db: Db, now: number): Promise<number> {
 
 export async function usage(db: Db, now: number): Promise<{ active: number; minutesToday: number }> {
   const day = iso(now).slice(0, 10);
-  const a = await db.prepare(`SELECT COUNT(*) AS n FROM remote_browser_sessions WHERE ended_at IS NULL`).first<{ n: number }>();
-  // Live sessions count with the time they have run so far.
-  const s = await db.prepare(`SELECT COALESCE(SUM(CASE WHEN ended_at IS NULL THEN (julianday(?) - julianday(COALESCE(started_at, created_at))) * 86400 ELSE seconds END), 0) AS secs
-    FROM remote_browser_sessions WHERE created_at >= ?`).bind(iso(now), `${day}T00:00:00.000Z`).first<{ secs: number }>();
-  return { active: a?.n ?? 0, minutesToday: Math.round(((s?.secs ?? 0) / 60) * 10) / 10 };
+  // One round trip: live sessions, and today's browser-seconds (live sessions count with the time run so far).
+  const r = await db.prepare(`SELECT (SELECT COUNT(*) FROM remote_browser_sessions WHERE ended_at IS NULL) AS n,
+    (SELECT COALESCE(SUM(CASE WHEN ended_at IS NULL THEN (julianday(?) - julianday(COALESCE(started_at, created_at))) * 86400 ELSE seconds END), 0)
+       FROM remote_browser_sessions WHERE created_at >= ?) AS secs`).bind(iso(now), `${day}T00:00:00.000Z`).first<{ n: number; secs: number }>();
+  return { active: r?.n ?? 0, minutesToday: Math.round(((r?.secs ?? 0) / 60) * 10) / 10 };
 }
 
-export async function admit(db: Db, cfg: RemoteBrowserConfig, req: { projectId: string; clientKey: string; access: "public" | "staff" | "preview"; now: number }): Promise<Admission> {
+export async function admit(db: Db, cfg: RemoteBrowserConfig, req: { projectId: string; clientKey: string; access: "public" | "staff" | "preview"; now: number; rateLimit?: number }): Promise<Admission> {
   if (!cfg.enabled) return { ok: false, status: 503, code: "disabled", message: "The interactive remote view is not available right now." };
-  const rl = await rateLimit(db, `rb:${req.clientKey}`, cfg.perVisitorPer10Min, 600, req.now);
+  // Independent steps in parallel (start-up time is round trips to the database).
+  const [rl] = await Promise.all([rateLimit(db, `rb:${req.clientKey}`, req.rateLimit ?? cfg.perVisitorPer10Min, 600, req.now), expireStale(db, req.now)]);
   if (!rl.allowed) return { ok: false, status: 429, code: "rate", message: "Too many interactive views were started from here. Please wait a few minutes." };
-  await expireStale(db, req.now);
   const u = await usage(db, req.now);
   if (u.minutesToday >= cfg.dailyMinutes) return { ok: false, status: 503, code: "budget", message: "Today's interactive viewing time has been used up. Please visit the live website, or come back tomorrow." };
   const id = `rb_${randomHex(12)}`, token = randomHex(24);
@@ -64,11 +64,12 @@ export interface SessionRow { id: string; project_id: string; token_hash: string
 /** The session for a WebSocket connection: unused, unexpired (2 minutes to connect) and with the right token. */
 export async function claim(db: Db, id: string, token: string, now: number): Promise<SessionRow | null> {
   if (!/^rb_[0-9a-f]{24}$/.test(id) || !/^[0-9a-f]{48}$/.test(token)) return null;
-  const row = await db.prepare(`SELECT * FROM remote_browser_sessions WHERE id = ?`).bind(id).first<SessionRow>();
-  if (!row || row.ended_at || row.started_at || row.token_hash !== (await sha256Hex(token))) return null;
-  if (now - Date.parse(row.created_at) > 120_000) return null;
-  const upd = await db.prepare(`UPDATE remote_browser_sessions SET started_at = ?, last_seen_at = ? WHERE id = ? AND started_at IS NULL AND ended_at IS NULL`).bind(iso(now), iso(now), id).run();
-  return (upd.meta as { changes?: number } | undefined)?.changes ? row : null;
+  // One atomic round trip: the right token, unused, not ended, created within the last two minutes.
+  const row = await db.prepare(`UPDATE remote_browser_sessions SET started_at = ?, last_seen_at = ?
+      WHERE id = ? AND token_hash = ? AND started_at IS NULL AND ended_at IS NULL AND created_at >= ?
+      RETURNING id, project_id, token_hash, started_at, ended_at, access, created_at`)
+    .bind(iso(now), iso(now), id, await sha256Hex(token), iso(now - 120_000)).first<SessionRow>();
+  return row ?? null;
 }
 export async function heartbeat(db: Db, id: string, now: number) {
   await db.prepare(`UPDATE remote_browser_sessions SET last_seen_at = ? WHERE id = ? AND ended_at IS NULL`).bind(iso(now), id).run();

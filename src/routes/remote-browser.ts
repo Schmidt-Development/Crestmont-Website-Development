@@ -14,6 +14,7 @@ import { readBody } from "./api.ts";
 import * as pf from "../services/portfolio.ts";
 import { admit, clientKey, remoteBrowserConfig, usage } from "../services/remote-browser/admission.ts";
 import { prepareConnection, previewTokenProject } from "../services/remote-browser/connect.ts";
+import { sha256Hex } from "../lib/crypto.ts";
 
 export const LIVE_PATH = /^\/api\/portfolio\/remote-sessions\/(rb_[0-9a-f]{24})\/live$/;
 
@@ -38,7 +39,11 @@ export function register(r: Router): void {
     } else if (p.published) access = "public";
     if (!access) return jsonResponse(ctx, 404, { code: "not_found", message: "Project not found" });
     if (p.display_mode !== "remote") return jsonResponse(ctx, 409, { code: "not_remote", message: "This project is not shown through the remote browser." });
-    const a = await admit(ctx.db, cfg, { projectId: p.id, clientKey: await clientKey(ctx.ip, "remote-browser"), access, now: Date.now() });
+    // Public visitors are rate-limited per (hashed) address. A preview link — issued only by staff with
+    // portfolio.manage or the Owner-approved release pipeline — is limited per link instead, so a release check that
+    // opens several sessions from one runner is not refused; concurrency and the daily budget apply to everyone.
+    const key = access === "preview" ? `preview:${(await sha256Hex(String(body.preview))).slice(0, 24)}` : await clientKey(ctx.ip, "remote-browser");
+    const a = await admit(ctx.db, cfg, { projectId: p.id, clientKey: key, access, now: Date.now(), rateLimit: access === "preview" ? 30 : undefined });
     if (!a.ok) return jsonResponse(ctx, a.status, { code: a.code, message: a.message, live: p.live_url }, a.status === 429 ? { "retry-after": "120" } : {});
     return jsonResponse(ctx, 200, { id: a.id, ws: `/api/portfolio/remote-sessions/${a.id}/live?token=${a.token}`, limits: { seconds: cfg.maxSessionSeconds, idleSeconds: cfg.idleSeconds } }, { "cache-control": "no-store" });
   });

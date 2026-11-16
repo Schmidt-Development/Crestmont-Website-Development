@@ -14,6 +14,7 @@ import { acceptWebSocket } from "./ws-server.ts";
 import { launchLocalBrowser } from "./local-browser.ts";
 import { Cdp } from "../src/services/remote-browser/cdp.ts";
 import { RemoteSession } from "../src/services/remote-browser/session.ts";
+import { holdEarlyMessages } from "../src/services/remote-browser/stream.ts";
 import { finish, heartbeat, remoteBrowserConfig } from "../src/services/remote-browser/admission.ts";
 import { prepareConnection } from "../src/services/remote-browser/connect.ts";
 import { LIVE_PATH } from "../src/routes/remote-browser.ts";
@@ -129,8 +130,9 @@ server.on("upgrade", async (req, socket) => {
   if (req.headers.origin !== new URL(env.APP_URL!).origin) return deny(403);
   const info = await prepareConnection(db, m[1]!, url.searchParams.get("token") ?? "", url.searchParams, Date.now(), cfg).catch(() => null);
   if (!info) return deny(403);
-  const visitor = acceptWebSocket(req, socket);
-  if (!visitor) return;
+  const accepted = acceptWebSocket(req, socket);
+  if (!accepted) return;
+  const visitor = holdEarlyMessages(accepted);
   let close = () => undefined as void;
   try {
     const b = await launchLocalBrowser(String(env.REMOTE_BROWSER_LOCAL));
