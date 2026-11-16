@@ -161,6 +161,12 @@ export async function checkEmbed(liveUrl: string, ancestorOrigin: string, fetche
       url = next;
       continue;
     }
+    // A bot check (e.g. Cloudflare's managed challenge) is the site's protection: Crestmont reports it and never tries
+    // to get past it, so such a site is shown with the honest fallback (Mode C).
+    if (res.headers.get("cf-mitigated") === "challenge") {
+      await res.body?.cancel().catch(() => undefined);
+      return { status: "error", url: url.toString(), origin: url.origin, detail: "The site answers automated visitors with a bot check, which Crestmont does not bypass", httpStatus: res.status, ...none };
+    }
     if (res.status < 200 || res.status > 299) {
       await res.body?.cancel().catch(() => undefined);
       return { status: "error", url: url.toString(), origin: url.origin, detail: `The site answered HTTP ${res.status}`, httpStatus: res.status, ...none };
@@ -172,6 +178,9 @@ export async function checkEmbed(liveUrl: string, ancestorOrigin: string, fetche
     }
     const verdict = evaluateFraming(res.headers, url, ancestor.origin);
     const facts = pageFacts(await readText(res, MAX_HTML).catch(() => ""));
+    if (/^(just a moment|attention required|access denied)/i.test(facts.title ?? "")) {
+      return { status: "error", url: url.toString(), origin: url.origin, detail: `The site answers automated visitors with a bot check ("${facts.title}"), which Crestmont does not bypass`, httpStatus: res.status, ...facts };
+    }
     return { status: verdict.allowed ? "allowed" : "blocked", url: url.toString(), origin: url.origin, detail: verdict.detail, httpStatus: res.status, ...facts };
   }
   return { status: "error", url: url.toString(), origin: url.origin, detail: "The site redirects too many times", httpStatus: null, ...none };

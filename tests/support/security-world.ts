@@ -239,6 +239,7 @@ async function buildStaffRecords(w: World) {
   ids.portfolioSlug = "matrix-portfolio";
   await ok(o.post(`/staff/portfolio/${ids.portfolio}/screenshot`, { kind: "desktop", captured_on: "2026-10-26", screenshot: png("matrix.png") }), "portfolio screenshot");
   ids.portfolioFile = (await one<{ id: string }>(db, `SELECT desktop_screenshot_file_id AS id FROM portfolio_projects WHERE id = ?`, ids.portfolio)).id;
+  ids.portfolioPreviewToken = await (await import("../../src/services/remote-browser/connect.ts")).issuePreviewToken(db, ids.portfolio, 30, "matrix", Date.now());
   await ok(o.post(`/staff/portfolio/${ids.portfolio}/testimonials`, { author: "A. Person", body: "Great to work with on this site.", evidence: "Email from author dated 2026-10-26 granting permission" }), "testimonial");
   ids.testimonial = (await one<{ id: string }>(db, `SELECT id FROM testimonials ORDER BY created_at DESC LIMIT 1`)).id;
   // One design reference for the gallery routes. Inserted directly: the upload route takes a multipart image, and

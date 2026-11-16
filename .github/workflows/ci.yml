@@ -89,6 +89,42 @@ jobs:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: LENIS_FILE="$RUNNER_TEMP/package/dist/lenis.mjs" node scripts/scroll-isolation-check.mjs http://localhost:8787 "$FIXTURES"
 
+  # Automatic portfolio display system (docs/frontend/PORTFOLIO.md §Display modes): the staff Add flow picks Mode A / B / C
+  # by itself for frame-ancestors 'none', X-Frame-Options DENY, an allowed site and an unreachable one, and the remote
+  # browser (one local Chromium per session in place of Cloudflare Browser Run, same session code) is genuinely
+  # interactive on every portfolio surface — desktop, Android, iPhone-sized and tablet viewports (Chromium emulation,
+  # not Safari) — with its limits, cleanup and failure recovery. Any failed check fails CI.
+  portfolio-remote-browser:
+    name: Portfolio display modes + remote browser (real browser, fixture sites)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Install Chromium (pinned Playwright)
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      - name: Start the local site with the remote browser on a local Chromium
+        run: |
+          mkdir -p .dev
+          CHROMIUM="$(node -e 'import(process.argv[1]).then((m) => console.log(m.chromium.executablePath()))' "$GITHUB_WORKSPACE/.pw/node_modules/playwright/index.mjs")"
+          REMOTE_BROWSER=on REMOTE_BROWSER_CHROMIUM="$CHROMIUM" REMOTE_BROWSER_FIXTURES=1 REMOTE_BROWSER_MAX_CONCURRENT=2 REMOTE_BROWSER_IDLE_SECONDS=20 REMOTE_BROWSER_RATE_PER_10MIN=500 \
+            node --no-warnings dev/server.ts --port 8787 --db .dev/rb.db > "$RUNNER_TEMP/dev.log" 2>&1 &
+          for i in $(seq 1 60); do curl -fs -o /dev/null http://localhost:8787/api/health && break; sleep 1; done
+          curl -fs http://localhost:8787/api/portfolio/remote-sessions/status
+      - name: Display modes, interaction, limits and recovery
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: node --no-warnings scripts/remote-browser-check.mjs http://localhost:8787 .dev/rb.db
+      - name: Development server log (on failure)
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP/dev.log"
+
   # AI Builds runner: real image builds on every push (nothing is pushed anywhere), plus self-checks inside the built
   # images. This is the build evidence the Windows host cannot provide until it exists; it does not run a model.
   runner-images:

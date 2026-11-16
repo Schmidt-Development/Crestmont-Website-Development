@@ -12,6 +12,11 @@
 //  • each demo renders at a real device width (desktop 1440, tablet 820, phone 390 CSS px) and the whole viewport is
 //    scaled down to fit the frame — the full width is always visible and the site scrolls natively to its end. The
 //    scale never exceeds 1, and the viewport height follows the frame, so nothing is cropped horizontally.
+//  • a slide with data-kind="remote" (Mode B: the site refuses framing) shows the REAL live website through
+//    Crestmont's remote browser: a session is requested from /api/portfolio/remote-sessions, its WebSocket streams
+//    JPEG frames of an isolated Chromium page onto a <canvas>, and the visitor's pointer, wheel, touch and keys are sent
+//    back. Only the active slide holds a session; it closes when the visitor moves on or hides the page, and an ended
+//    or refused session leaves an honest notice (with Resume where it can) — never a screenshot presented as live.
 (() => {
   const roots = document.querySelectorAll("[data-pfx]");
   if (!roots.length) return;
@@ -32,6 +37,8 @@
     const modeBtns = [...root.querySelectorAll("[data-pfx-mode]")];
     const allowed = new Set(slides.map((s) => s.dataset.demoOrigin).filter(Boolean)); // demo handshake origins only
     const frames = new Map(); // slide index → { f, ready, timer }
+    const remotes = new Map(); // slide index → remote-browser session state
+    const previewTok = root.dataset.preview || "";
     let cur = 0, near = false;
 
     // Fit: one measurement per explorer (every slide has the same frame), applied as CSS variables.
@@ -61,6 +68,7 @@
       root.dataset.mode = m;
       modeBtns.forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.pfxMode === m)));
       fit();
+      for (const rec of remotes.values()) tx(rec, { t: "device", d: m, h: frameH() });
       if (announce && live) live.textContent = `${DEVICES[m].label} viewport: the website is shown at ${DEVICES[m].w} pixels wide${Number(getComputedStyle(root).getPropertyValue("--pfx-s")) < 1 ? ", scaled to fit" : ""}.`;
     };
     let userMode = false;
@@ -76,6 +84,7 @@
       }
     };
     const isLive = (s) => s.dataset.kind === "live";
+    const isRemote = (s) => s.dataset.kind === "remote";
     const urlLabel = (s, href) => { const el = s.querySelector("[data-pfx-url]"); if (el) el.textContent = href; };
 
     // Scroll isolation (app.css): the stage of a shown frame is a 1px scroll container that stops a gesture leaving
@@ -94,6 +103,7 @@
     };
     function mount(i) {
       const s = slides[i];
+      if (isRemote(s)) { mountRemote(i); return; }
       const url = s.dataset.frameUrl;
       if (!url || frames.has(i)) return;
       const f = document.createElement("iframe");
@@ -125,6 +135,167 @@
         s.dataset.unavailable = "true";
       }, READY_TIMEOUT);
     }
+
+    // ── Mode B: the remote browser ──
+    const tx = (rec, m) => { if (rec.ws && rec.ws.readyState === 1) rec.ws.send(JSON.stringify(m)); };
+    const frameH = () => Math.round(parseFloat(getComputedStyle(root).getPropertyValue("--pfx-fh")) || 900);
+    const flag = (s, text) => { const el = s.querySelector("[data-pfx-flag]"); if (el) el.textContent = text; };
+    const notice = (s, text, opts = {}) => {
+      const el = s.querySelector("[data-pfx-status]");
+      if (!el) return;
+      el.textContent = text;
+      if (opts.resume) {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "pfx__resume"; b.dataset.pfxResume = ""; b.textContent = opts.resume;
+        b.addEventListener("click", opts.onResume);
+        el.append(" ", b);
+      }
+      const a = document.createElement("a");
+      a.href = s.dataset.liveUrl; a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = " Visit the live website in a new tab.";
+      el.append(a);
+    };
+    function mountRemote(i) {
+      const s = slides[i];
+      let rec = remotes.get(i);
+      if (rec && (rec.ws || rec.starting || rec.refused)) return;
+      if (!rec) {
+        const c = document.createElement("canvas");
+        c.className = "pfx__frame pfx__remote";
+        c.tabIndex = 0;
+        c.setAttribute("role", "img");
+        c.setAttribute("aria-roledescription", "remote browser");
+        c.setAttribute("aria-label", `The live ${s.dataset.name} website, shown through Crestmont's remote browser. Click, scroll, touch or type to use it; sign-in, forms and purchases are turned off.`);
+        s.querySelector("[data-pfx-stage]").append(c);
+        rec = { c, g: c.getContext("2d"), ws: null, ready: false, timer: 0, w: 0, h: 0, pending: null, drawing: false, starting: false, refused: false };
+        remotes.set(i, rec);
+        bindRemoteInput(i, rec);
+      }
+      connect(i, rec);
+    }
+    async function connect(i, rec) {
+      const s = slides[i];
+      rec.ready = false; rec.starting = true; rec.refused = false; rec.offscreen = false;
+      s.classList.remove("is-ready"); delete s.dataset.unavailable; s.dataset.remoteState = "starting";
+      flag(s, "Live website · remote view");
+      status(s, `Starting a remote browser for the live ${s.dataset.name} website…`);
+      clearTimeout(rec.timer);
+      rec.timer = setTimeout(() => { if (!rec.ready) stop(i, rec, "timeout"); }, READY_TIMEOUT + 10000);
+      let r = {}, ok = false;
+      try {
+        const res = await fetch("/api/portfolio/remote-sessions", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" },
+          body: JSON.stringify(previewTok ? { slug: s.dataset.remoteSlug, preview: previewTok } : { slug: s.dataset.remoteSlug }) });
+        r = await res.json().catch(() => ({}));
+        ok = res.ok && typeof r.ws === "string";
+      } catch { /* network */ }
+      rec.starting = false;
+      if (!ok) { refuse(i, rec, r.code, r.message); return; }
+      if (i !== cur || document.hidden) return; // the visitor moved on while it was starting; the unclaimed session expires
+      const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${r.ws}&device=${encodeURIComponent(root.dataset.mode)}&h=${frameH()}`);
+      ws.binaryType = "blob";
+      rec.ws = ws;
+      ws.addEventListener("message", (e) => { if (typeof e.data === "string") onNotice(i, rec, e.data); else draw(i, rec, e.data); });
+      ws.addEventListener("close", () => { if (rec.ws === ws) { rec.ws = null; if (s.dataset.remoteState !== "ended" && s.dataset.remoteState !== "unavailable") stop(i, rec, rec.ready ? "closed" : "error"); } });
+    }
+    // Only the newest frame is drawn; frames that arrive while one is decoding replace each other.
+    function draw(i, rec, blob) {
+      rec.pending = blob;
+      if (rec.drawing) return;
+      rec.drawing = true;
+      const step = () => {
+        const b = rec.pending; rec.pending = null;
+        if (!b) { rec.drawing = false; return; }
+        createImageBitmap(b).then((bmp) => {
+          if (rec.c.width !== bmp.width || rec.c.height !== bmp.height) { rec.c.width = bmp.width; rec.c.height = bmp.height; }
+          rec.g.drawImage(bmp, 0, 0);
+          if (bmp.close) bmp.close();
+          if (!rec.ready) {
+            const s = slides[i];
+            rec.ready = true; clearTimeout(rec.timer); s.classList.add("is-ready"); s.dataset.remoteState = "live"; isolate(s); status(s, "");
+          }
+          step();
+        }, step);
+      };
+      step();
+    }
+    function onNotice(i, rec, text) {
+      let m; try { m = JSON.parse(text); } catch { return; }
+      if (!m || typeof m !== "object") return;
+      const s = slides[i];
+      if (m.t === "ready" || m.t === "viewport") { rec.w = Number(m.w) || 0; rec.h = Number(m.h) || 0; }
+      else if (m.t === "url" && typeof m.href === "string") { try { const u = new URL(m.href); if (u.protocol === "https:") urlLabel(s, u.host + (u.pathname === "/" ? "" : u.pathname)); } catch { /* ignore */ } }
+      else if (m.t === "blocked" && live) live.textContent = `${String(m.title || "That page")} — not available in the portfolio view.`;
+      else if (m.t === "ended") stop(i, rec, String(m.reason || "ended"));
+      else if (m.t === "error") stop(i, rec, "error");
+    }
+    // A session that ended (inactivity, time limit, the visitor moved on) keeps its last picture, clearly marked, with Resume.
+    function stop(i, rec, reason) {
+      const s = slides[i];
+      clearTimeout(rec.timer);
+      const ws = rec.ws; rec.ws = null;
+      try { if (ws) ws.close(1000, "done"); } catch { /* closed */ }
+      if (reason === "error" || reason === "timeout" || !rec.ready) { refuse(i, rec, "error"); return; }
+      s.dataset.remoteState = "ended";
+      flag(s, "Remote view paused");
+      const why = reason === "idle" ? "The remote view paused after a period of inactivity." : reason === "time-limit" ? "The remote view reached its time limit." : reason === "away" ? "The remote view paused while you were away." : "The remote view has ended.";
+      notice(s, `${why} The picture above is no longer live.`, { resume: "Resume", onResume: () => connect(i, rec) });
+    }
+    // Mode C at view time: the remote browser is busy, over budget, off or failed. Never shown as interactive.
+    function refuse(i, rec, code, message) {
+      const s = slides[i];
+      clearTimeout(rec.timer);
+      rec.refused = true; rec.ready = false;
+      s.classList.remove("is-ready"); s.dataset.remoteState = "unavailable"; s.dataset.unavailable = "true";
+      const shot = !!s.querySelector("img.pfx__poster");
+      flag(s, shot ? "Screenshot" : "Live view unavailable");
+      const why = typeof message === "string" && message ? message : code === "busy" ? "All interactive viewers are in use right now." : "The interactive remote view is not available right now.";
+      notice(s, `${why}${shot ? " A screenshot of the live website is shown instead — it is not interactive." : ""}`, code === "busy" || code === "error" || !code ? { resume: "Try again", onResume: () => { rec.refused = false; connect(i, rec); } } : {});
+    }
+    function bindRemoteInput(i, rec) {
+      const c = rec.c;
+      const pt = (cx, cy) => {
+        const r = c.getBoundingClientRect(), w = rec.w || c.width || 1, h = rec.h || c.height || 1;
+        return { x: Math.round(((cx - r.left) / (r.width || 1)) * w), y: Math.round(((cy - r.top) / (r.height || 1)) * h) };
+      };
+      const BTN = ["left", "middle", "right"];
+      let move = null, raf = 0;
+      const flush = () => { raf = 0; if (move) { tx(rec, move); move = null; } };
+      c.addEventListener("pointerdown", (e) => {
+        if (e.pointerType === "touch") return;
+        e.preventDefault(); c.focus({ preventScroll: true });
+        try { c.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+        flush(); tx(rec, { t: "mouse", a: "down", b: BTN[e.button] || "left", n: e.detail || 1, ...pt(e.clientX, e.clientY) });
+      });
+      c.addEventListener("pointerup", (e) => { if (e.pointerType === "touch") return; flush(); tx(rec, { t: "mouse", a: "up", b: BTN[e.button] || "left", n: e.detail || 1, ...pt(e.clientX, e.clientY) }); });
+      c.addEventListener("pointermove", (e) => {
+        if (e.pointerType === "touch") return;
+        move = { t: "mouse", a: "move", ...pt(e.clientX, e.clientY) };
+        if (!raf) raf = requestAnimationFrame(flush);
+      });
+      c.addEventListener("contextmenu", (e) => e.preventDefault());
+      // The wheel and touch scroll the remote page only: Crestmont's page never moves while the pointer is on it.
+      c.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1;
+        tx(rec, { t: "wheel", dx: Math.round(e.deltaX * k), dy: Math.round(e.deltaY * k), ...pt(e.clientX, e.clientY) });
+      }, { passive: false });
+      const touches = (e) => [...e.touches].slice(0, 5).map((t) => ({ id: t.identifier % 100, ...pt(t.clientX, t.clientY) }));
+      let tmove = null, traf = 0;
+      const tflush = () => { traf = 0; if (tmove) { tx(rec, tmove); tmove = null; } };
+      c.addEventListener("touchstart", (e) => { e.preventDefault(); tflush(); tx(rec, { t: "touch", a: "start", p: touches(e) }); }, { passive: false });
+      c.addEventListener("touchmove", (e) => { e.preventDefault(); tmove = { t: "touch", a: "move", p: touches(e) }; if (!traf) traf = requestAnimationFrame(tflush); }, { passive: false });
+      c.addEventListener("touchend", (e) => { e.preventDefault(); tflush(); tx(rec, e.touches.length ? { t: "touch", a: "move", p: touches(e) } : { t: "touch", a: "end", p: [] }); }, { passive: false });
+      c.addEventListener("touchcancel", () => { tflush(); tx(rec, { t: "touch", a: "cancel", p: [] }); });
+      const mods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+      const key = (a) => (e) => {
+        if (e.key === "Tab" || (e.key === "Escape" && isOpen())) return; // focus can always leave; Escape closes full screen
+        if (e.key.length > 24) return;
+        e.preventDefault();
+        tx(rec, { t: "key", a, key: e.key, code: e.code, mod: mods(e) });
+      };
+      c.addEventListener("keydown", key("down"));
+      c.addEventListener("keyup", key("up"));
+    }
+    const pauseRemote = (i, reason) => { const rec = remotes.get(i); if (rec && rec.ws) stop(i, rec, reason); };
 
     // Origin-checked handshake from the demo's embed script: {source:"crestmont-demo", type:"ready"|"navigate", href}.
     // A message is accepted only when ALL hold: its origin is an approved demo origin, it was sent by one of this
@@ -160,6 +331,7 @@
       if (prev) prev.setAttribute("aria-label", `Previous project: ${name(cur - 1)}`);
       if (next) next.setAttribute("aria-label", `Next project: ${name(cur + 1)}`);
       if (announce && live) live.textContent = `Showing ${name(cur)}, project ${cur + 1} of ${n}.`;
+      for (const j of remotes.keys()) if (j !== cur) pauseRemote(j, "away");
       if (near) mount(cur);
     }
 
@@ -169,6 +341,12 @@
     modeBtns.forEach((b) => b.addEventListener("click", () => { userMode = true; setMode(b.dataset.pfxMode, true); }));
     resetBtn && resetBtn.addEventListener("click", () => {
       const s = slides[cur], rec = frames.get(cur);
+      if (isRemote(s)) {
+        const rr = remotes.get(cur);
+        if (rr && rr.ws) { tx(rr, { t: "nav", a: "home" }); urlLabel(s, s.dataset.remoteHost); if (live) live.textContent = `${name(cur)} reloaded at its home page.`; }
+        else if (rr) { rr.refused = false; connect(cur, rr); } else mountRemote(cur);
+        return;
+      }
       if (!s.dataset.frameUrl) { if (live) live.textContent = `${name(cur)} is shown as a screenshot; there is nothing to reload.`; return; }
       if (!rec) { mount(cur); return; }
       if (isLive(s)) { // back to the live site's start page
@@ -185,6 +363,12 @@
       urlLabel(s, new URL(s.dataset.demoUrl).host);
       if (live) live.textContent = `${name(cur)} demo reset to its starting page.`;
     });
+    const histBtn = (sel, a) => { const b = root.querySelector(sel); if (b) b.addEventListener("click", () => { const rr = remotes.get(cur); if (rr && isRemote(slides[cur])) tx(rr, { t: "nav", a }); }); };
+    histBtn("[data-pfx-back]", "back");
+    histBtn("[data-pfx-forward]", "forward");
+    // A hidden page holds no browser: the session pauses and Resume starts a new one.
+    document.addEventListener("visibilitychange", () => { if (document.hidden) for (const j of remotes.keys()) pauseRemote(j, "away"); });
+    window.addEventListener("pagehide", () => { for (const j of remotes.keys()) pauseRemote(j, "away"); });
     // Expanding takes the explorer out of the flow; a spacer holds its place so the page never shortens (which would
     // clamp the scroll position), and the exact position is restored on close.
     // While expanded the explorer is a modal dialog (CREST-GAP-076): role=dialog + aria-modal, everything outside it is
@@ -258,6 +442,16 @@
       new ResizeObserver(() => { const m = autoMode(); if (!userMode && m !== root.dataset.mode) setMode(m, false); else fit(); }).observe(screen0);
     } else window.addEventListener("resize", fit);
     go(0, false);
+    // Mode B costs browser time: a remote session is released as soon as the explorer leaves the screen and started
+    // again when it comes back (only if it was released for that reason).
+    if ("IntersectionObserver" in window && slides.some(isRemote)) {
+      new IntersectionObserver((es) => {
+        const on = es.some((x) => x.isIntersecting);
+        const rec = remotes.get(cur);
+        if (!on) { if (rec && rec.ws) { stop(cur, rec, "away"); rec.offscreen = true; } }
+        else if (rec && rec.offscreen && !rec.ws && !rec.starting) { rec.offscreen = false; connect(cur, rec); }
+      }, { threshold: 0 }).observe(root);
+    }
     // Lazy: create the active demo only when the explorer approaches the viewport.
     if ("IntersectionObserver" in window) {
       const io = new IntersectionObserver((es) => { if (es.some((x) => x.isIntersecting)) { near = true; mount(cur); io.disconnect(); } }, { rootMargin: "300px 0px" });

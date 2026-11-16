@@ -186,6 +186,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/ops/integration-probe": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
     "POST /api/ops/database-backup": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
     "POST /api/ops/portfolio-embeds": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
+    "POST /api/ops/portfolio-intake": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
     "POST /api/webhooks/stripe": async (b) => { const t = ts(); return { "stripe-signature": `t=${t},v1=${await hmacSha256Hex(SECRETS.stripe, `${t}.${b}`)}` }; },
     "POST /api/webhooks/voice": async (b) => ({ "x-crestmont-voice-signature": await signVoiceEvent(SECRETS.voice, b) }),
     "POST /api/webhooks/retell": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
@@ -196,6 +197,8 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/leads": async () => ({}),
     // The website assistant accepts same-origin JSON only; the Origin header is its "signature".
     "POST /api/assistant": async () => ({ origin: "http://crestmont.test" }),
+    // Portfolio remote-browser sessions: same-origin JSON only, like the assistant.
+    "POST /api/portfolio/remote-sessions": async () => ({ origin: "http://crestmont.test" }),
     "POST /api/scheduled/run": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
     "POST /api/voice/retell-audit": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
     "POST /api/voice/retell-tools/founder-flag": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
@@ -220,7 +223,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
   for (const r of jsonPosts) {
     // Unsigned: rejected before parsing (lead capture is the one public JSON endpoint).
     const unsigned = await anon.request("POST", r.pattern, { body: bodies.hostile, headers: { "content-type": "application/json" } });
-    if (r.key === "POST /api/assistant") { if (unsigned.status !== 403) problems.push(`${r.key} without Origin → ${unsigned.status}`); }
+    if (r.key === "POST /api/assistant" || r.key === "POST /api/portfolio/remote-sessions") { if (unsigned.status !== 403) problems.push(`${r.key} without Origin → ${unsigned.status}`); }
     else if (r.key !== "POST /api/leads" && unsigned.status !== 401) problems.push(`${r.key} unsigned → ${unsigned.status}`);
     for (const [variant, body] of Object.entries(bodies)) {
       const e0 = appErrors(w.db);

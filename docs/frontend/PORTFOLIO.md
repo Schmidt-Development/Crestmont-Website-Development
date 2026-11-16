@@ -5,10 +5,13 @@ The portfolio is a horizontal explorer of **real, working websites**. Each proje
 
 1. its **isolated demo** (a separate demo deployment built from a verified revision), where the Owner set one up;
 2. otherwise its **real live website**, framed directly, when — and only when — that site's own response headers
-   permit this Crestmont origin to frame it (`src/services/embed-check.ts`);
-3. otherwise the **genuine screenshot**, labelled "Screenshot", with the Visit live website link.
+   permit this Crestmont origin to frame it (`src/services/embed-check.ts`) — **Mode A**;
+3. otherwise, when the site refuses framing, the **real live website through Crestmont's remote browser** — **Mode B**
+   (see [Display modes](#display-modes-owner-2026-11-16));
+4. otherwise the **genuine screenshot**, labelled "Screenshot", with the Visit live website link — **Mode C**.
 
-Nothing is proxied, and no site's framing restriction is bypassed or weakened.
+Nothing is reverse-proxied, no response header of any site is stripped or rewritten, and no site's framing
+restriction is bypassed or weakened: Mode B never puts the site in a frame at all.
 `src/ui/portfolio-explorer.ts` renders the explorer and `public/assets/portfolio.js` enhances it. The same component
 is used on `/portfolio`, on the homepage work section and, with a single slide, on each `/portfolio/:slug` case study.
 
@@ -65,6 +68,125 @@ over a recorded withdrawal. Withdraw it in Staff → Portfolio like any other co
   `scripts/client-site-framing.mjs` (verified, rolled back on mismatch, idempotent).
 - *Limitation:* a browser does not tell the framing page whether a cross-origin frame was refused, so the explorer
   relies on the server-side check; that is why it is repeated daily and after every release.
+
+## Display modes (Owner, 2026-11-16)
+
+> "Fix Crestmont Website Development's portfolio system so that new websites can be added and displayed interactively
+> without requiring any modifications to the destination websites. We are permanently ending the workflow of
+> individually repairing websites' security headers to make them compatible with Crestmont."
+
+Adding a project never requires a change to the destination website. The live check (`checkEmbed`) decides the
+display method automatically on Add, on "Check again", daily and after every release, and stores it with the project
+(`portfolio_projects.display_mode` / `display_reason`, migration 0109; `selectDisplayMode` in
+`src/services/portfolio.ts`):
+
+| Mode | When | What visitors get |
+|---|---|---|
+| **A — Native interactive embed** (`embed`) | the site's own headers permit framing by this origin | the real site in the explorer's sandboxed iframe (unchanged) |
+| **B — Remote interactive browser** (`remote`) | the site refuses framing (`frame-ancestors`, `X-Frame-Options`) but answers publicly, and the remote browser is enabled here | the real live site rendered in an isolated Chromium session that Crestmont controls, streamed into the same explorer; the visitor's clicks, scrolling, keys and touch are relayed to it |
+| **C — Unavailable / honest fallback** (`unavailable`) | the site did not answer, returned an error, shows a bot check (Crestmont does not bypass it), or the remote browser is off in this environment | a clear notice, the Visit live website link, and a genuine screenshot labelled "Screenshot" if one exists — never presented as interactive |
+
+Staff see the mode, the reason and Mode B's limitations in the editor's *Live preview* card, and an immediate
+interactive preview (Mode B previews run through a 30-minute, single-project preview link because the session API
+does not read staff cookies). Publishing requirements are unchanged — verified link, documented relationship and the
+owner's explicit consent — except that a Mode B entry, like a Mode A entry, needs no screenshots.
+
+### How Mode B works
+
+```
+visitor's browser ──POST /api/portfolio/remote-sessions──▶ Worker: same-origin JSON, published remote project (or preview
+        │                                                   link), rate limit, concurrency cap, daily budget → one-time token
+        └──WebSocket /api/portfolio/remote-sessions/:id/live──▶ Worker checks the token once ──▶ Durable Object
+             (one per session, PortfolioBrowser) ──▶ Cloudflare Browser Run: a fresh headless Chromium, its own browser
+             context ──CDP──▶ the real live site
+   ◀── JPEG frames (Page.startScreencast) drawn on a <canvas>      ── input (mouse, wheel, touch, keys, nav, device) ──▶
+```
+
+- `src/services/remote-browser/session.ts` — the session (shared by production and the local/CI driver): new browser
+  context, downloads denied, guard script and request interception installed **before** the first navigation, device
+  emulation (1440 / 820 / 390 CSS px; phones and tablets get touch and a mobile user agent that still says
+  HeadlessChrome), screencast, bounded and rate-limited input (150 messages/s), idle and time limits, and it always
+  disposes of the context and closes the browser.
+- `src/services/remote-browser/policy.ts` — every request the page makes is paused and decided: https only; never IP
+  literals, internal names or cloud-metadata hosts; only GET/HEAD/OPTIONS (no form posts, writes or uploads);
+  top-level navigation stays on the project's own site (and its subdomains) and never opens sign-in, account,
+  owner/admin, dashboard, billing, checkout/cart, payment, API, upload or download paths — those get a "Private page" /
+  "Submitting is turned off" notice. The guard script disables `window.open`, form submission, password and file
+  inputs and download links. Dialogs are dismissed, pop-up windows closed, file pickers intercepted.
+- `src/services/remote-browser/admission.ts` — one row per session (`remote_browser_sessions`; the IP only as a salted
+  hash), atomic concurrency cap, daily browser-minutes budget, per-visitor rate (6 per 10 minutes), random one-time
+  token (SHA-256 stored; must connect within 2 minutes), heartbeats, and cleanup of sessions that stop reporting.
+- `src/routes/remote-browser.ts`, `src/durable/portfolio-browser.ts` — the API and the Durable Object.
+- `public/assets/portfolio.js` — the viewer: draws only the newest frame, maps pointer/touch coordinates to the remote
+  viewport, owns every gesture on the canvas (`touch-action: none`, non-passive handlers), so Crestmont's page never
+  scrolls while a visitor scrolls the remote site; Back / Forward / Reload / device buttons; only the active slide holds
+  a session, which closes when the visitor moves to another project or hides the page; an ended session keeps its last
+  picture, greyed and labelled "no longer live", with **Resume**; a refused one (busy, budget, off, error) shows Mode C
+  with **Try again** where it can help.
+- Configuration (`wrangler.toml`, staging and production): `browser = { binding = "BROWSER" }`, the `PORTFOLIO_BROWSER`
+  Durable Object (SQLite class), and `REMOTE_BROWSER = "on"`, `REMOTE_BROWSER_MAX_CONCURRENT = "3"`,
+  `REMOTE_BROWSER_DAILY_MINUTES = "20"` (optional `REMOTE_BROWSER_MAX_SESSION_SECONDS`, default 300, and
+  `REMOTE_BROWSER_IDLE_SECONDS`, default 90). Anything but `on`, or a missing binding, turns Mode B off and refused
+  sites fall back to Mode C.
+
+### Cost (Cloudflare, Workers Paid — no new subscription or provider)
+
+Browser Run (Browser Rendering) and SQLite Durable Objects are included in the Workers Paid plan Crestmont already has.
+Published allowances: **10 browser-hours a month** included, then **$0.09 per browser-hour**; **10 concurrent browsers**
+included (monthly average of the daily peak), then **$2.00 per additional concurrent browser**. Durable Objects: 1
+million requests and 400,000 GB-s a month included.
+
+| Setting | Monthly use at the cap | Extra cost |
+|---|---|---|
+| Defaults: 3 concurrent, 20 browser-minutes a day | ≈ 10 browser-hours, ≤ 3 concurrent; DO ≈ 4,600 GB-s | **$0** (inside the allowance) |
+| 60 minutes a day | ≈ 30 browser-hours | ≈ $1.80 a month |
+| 4 hours a day, 10 concurrent | ≈ 120 browser-hours | ≈ $9.90 a month |
+
+Raising the caps is a configuration change in `wrangler.toml` released through the normal approved deploy; when the
+daily budget is used up, visitors get Mode C ("Today's interactive viewing time has been used up") until midnight UTC.
+`GET /api/portfolio/remote-sessions/status` reports live sessions and minutes used today.
+
+### What Mode B does not do (stated plainly)
+
+- It is **not** native embedding: visitors see a live video-like picture of a real browser, not the page's own DOM.
+  Text is slightly less crisp than native (JPEG frames at device pixel ratio 1), and every interaction has a network
+  round trip (typically 50–200 ms); fast animations can drop frames.
+- Sign-in, accounts, forms that submit, purchases, uploads, downloads, pop-ups and new windows are turned off by
+  design. Browser history inside a session is the site's own pages only.
+- Visitors on phones cannot type into the remote site with their on-screen keyboard (there is no local text field to
+  focus); taps, scrolling and navigation work. Desktop keyboards work.
+- Text selection, copy/paste, the right-click menu, audio, camera, microphone, geolocation and file pickers are not
+  relayed.
+- WebGL and other GPU features run in headless Chromium with software rendering where the site supports it; heavy 3D
+  scenes may be slow.
+- Sites behind bot protection that challenges headless browsers are shown in Mode C — the challenge is never bypassed,
+  and the browser always identifies itself as HeadlessChrome.
+- Sessions last at most 5 minutes and end after 90 s without input (Resume starts a new one); with the default caps at
+  most 3 people can use the remote view at the same moment — the 4th is told and can try again.
+- Browser coverage of the viewer: verified in Chromium (desktop, and Android / iPhone-sized / tablet emulation with
+  touch) in CI and in production acceptance. **Real Safari on iOS/macOS has not been verified by an automated test**;
+  the viewer uses only standard APIs Safari supports (`WebSocket`, `createImageBitmap(Blob)`, canvas, pointer and touch
+  events), but treat Safari as unverified until it is checked on a device.
+
+### Adding a future website (no website-specific code)
+
+1. Staff → Portfolio → Add a project → enter the address → Continue. The confirmation page says which mode was
+   selected and why.
+2. Confirm the details → Create project. The editor shows the mode and an immediate interactive preview.
+3. Record the verified link, the relationship and the owner's consent → Publish. Nothing changes on the website.
+
+### Verification
+
+- `tests/portfolio-remote-browser.test.ts` — selection rules (the regression guard for the whole system), Add flow for
+  `frame-ancestors 'none'`, `X-Frame-Options: DENY`, an allowed site, an unreachable site and a bot check; policy;
+  admission; API; session core with a fake browser; `wrangler.toml` wiring.
+- `scripts/remote-browser-check.mjs` (CI job *Portfolio display modes + remote browser*) — real Chromium against the
+  development server with one local Chromium per session and TEST DATA fixture sites (`scripts/fixtures/remote/`): the
+  staff Add flow selects A/B/C automatically; on /portfolio/:slug, /portfolio and the homepage clicks, typing, wheel and
+  touch scrolling and navigation reach the real page while Crestmont's page stays still; private routes, third-party
+  sites, downloads and form posts are refused; reload, Back, device switching, heavy JS animation and a long page;
+  Android / iPhone-sized / tablet viewports; concurrency, cleanup, idle timeout, failure recovery and API refusals.
+- Production: `live-portfolio-acceptance.yml` after every release (see *Deployment status*).
 
 ## Data model (migration 0038, additive; numbered 0037 on the retired frontend-preview branch)
 

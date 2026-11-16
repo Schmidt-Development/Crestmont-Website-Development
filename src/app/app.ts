@@ -19,6 +19,7 @@ import { recordAppError } from "../services/monitoring.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { previewGate } from "./preview-gate.ts";
 import { prelaunchGate } from "./prelaunch.ts";
+import { LIVE_PATH, liveSocket } from "../routes/remote-browser.ts";
 import { metricWeight, recordRequestMetric } from "../services/env-metrics.ts";
 import { STEP_UP_MAX_AGE_MINUTES, stepUpAction, stepUpReturnPath } from "./step-up.ts";
 
@@ -199,6 +200,9 @@ export async function handle(req: Request, env: Env, exec?: ExecLike): Promise<R
   // Production before the public launch: customer sign-up, enquiries and checkout are closed (src/app/prelaunch.ts).
   const notOpen = prelaunchGate(req, env);
   if (notOpen) return withHeaders(notOpen, { "strict-transport-security": hstsValue(env) });
+  // Portfolio remote-browser WebSocket (Mode B): the Durable Object's 101 response is returned untouched (its headers
+  // cannot be rewritten); the token check and policy live in src/routes/remote-browser.ts.
+  if (LIVE_PATH.test(url.pathname)) return liveSocket(req, env, url);
   // READY-006: per-environment hourly error-rate / duration buckets (src/services/env-metrics.ts).
   // One UPSERT per request, after the response on Cloudflare (waitUntil); no path, id or user is stored.
   const started = Date.now();

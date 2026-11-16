@@ -33,13 +33,14 @@ import * as salesOutbound from "./sales-outbound.ts";
 import * as research from "./research.ts";
 import * as scan from "./scan.ts";
 import * as calendars from "./calendars.ts";
+import * as remoteBrowser from "./remote-browser.ts";
 
 // Order matters for a few of these. `builds` registers `/staff/builds/:id`, which would otherwise swallow
 // `/staff/builds/gallery` and `/staff/builds/frontends` and answer 404 for both, so the modules owning those
 // literal paths register first.
 export function registerAll(r: Router): void {
   // reportsOps precedes finance so /staff/reports/operations is not captured by /staff/reports/:file.
-  for (const m of [api, auth, publicSite, portal, crm, projects, support, reportsOps, finance, owner, readiness, platform, legal, hooks, ops, notifications, portalMaintenance, live, designGallery, designLocked, builds, buildPreview, websiteDelivery, websiteDeliveryTab, tax, voiceOps, salesOptimization, accountProfile, research, testPayments, salesOutbound, scan, calendars]) m.register(r);
+  for (const m of [api, auth, publicSite, portal, crm, projects, support, reportsOps, finance, owner, readiness, platform, legal, hooks, ops, notifications, portalMaintenance, live, designGallery, designLocked, builds, buildPreview, websiteDelivery, websiteDeliveryTab, tax, voiceOps, salesOptimization, accountProfile, research, testPayments, salesOutbound, scan, calendars, remoteBrowser]) m.register(r);
 }
 
 /** Every registered method + path pattern, in match order (route security matrix, AUTH-007/SEC-001). */

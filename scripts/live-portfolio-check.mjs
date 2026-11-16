@@ -44,6 +44,8 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
       if (i) { await p.locator("[data-pfx-next]").first().click(); await p.waitForTimeout(700); }
       for (let k = 0; k < 80; k++) { if (await p.evaluate(() => { const s = document.querySelector(".pfx__slide:not([inert])"); return s.classList.contains("is-ready") || s.dataset.unavailable === "true" || !s.dataset.frameUrl; })) break; await p.waitForTimeout(400); }
       if (!(await p.evaluate(() => document.querySelector(".pfx__slide:not([inert])").classList.contains("is-ready")))) continue;
+      // A Mode B project (remote browser) has no frame to drive here; scripts/live-remote-acceptance.mjs verifies it.
+      if (await p.evaluate(() => document.querySelector(".pfx__slide:not([inert])").dataset.kind === "remote")) { ok(true, `${name} project ${i + 1}: live through the remote browser (interaction verified by live-remote-acceptance)`); continue; }
       try { await checkInteractive(p, `${name} /portfolio`, ok, { touch: mobile }); } catch (e) { ok(false, `${name} demo ${i + 1}: ${String(e.message).split("\n")[0].slice(0, 200)}`); }
       // An "open the live website" link is offered next to each demo.
       const live = await p.locator(".pfx__slide:not([inert]) a.pfx__link--live[href^='https://']").count();

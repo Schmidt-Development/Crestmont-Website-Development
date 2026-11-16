@@ -24,6 +24,8 @@ import * as cms from "../services/cms.ts";
 import { lineDiff } from "../services/voice.ts";
 import * as pf from "../services/portfolio.ts";
 import { checkEmbed, safePublicUrl, type EmbedCheck } from "../services/embed-check.ts";
+import { remoteBrowserConfig } from "../services/remote-browser/admission.ts";
+import { issuePreviewToken, previewTokenProject } from "../services/remote-browser/connect.ts";
 import { serviceVisual } from "../ui/service-visuals.ts";
 import { receptionistConsole, voiceLibrary } from "../ui/receptionist.ts";
 import { constellation, journey, qualityLab } from "../ui/about.ts";
@@ -678,6 +680,21 @@ ${tms.length ? section("Testimonials", "What they said", html`<div class="grid g
 <dialog id="viewer" class="viewer" aria-label="Screenshot viewer"><img alt=""><form method="dialog"><button class="btn btn--secondary btn--sm" type="submit" data-close>Close</button></form></dialog>`));
   });
 
+  // Preview link (an unpublished project's interactive display, for review and release acceptance): issued only by staff
+  // with portfolio.manage or the Owner-approved ops challenge, expires within the hour, shows that one project only.
+  r.get("/portfolio/preview/:token", async (ctx, p) => {
+    const id = await previewTokenProject(ctx.db, p.token, Date.now());
+    const proj = id ? await pf.getById(ctx.db, id) : null;
+    if (!proj || proj.archived_at) throw new HttpError(404, "This preview link is not valid or has expired.");
+    const res = htmlResponse(ctx, publicLayout(ctx, { title: `${proj.name} — preview`, noindex: true }, html`
+${pageHero("Preview — not published", proj.name, `Display: ${proj.display_mode === "embed" ? "native interactive embed (Mode A)" : proj.display_mode === "remote" ? "remote interactive browser (Mode B)" : proj.display_mode === "unavailable" ? "unavailable — honest fallback (Mode C)" : "not checked yet"}. ${proj.display_reason ?? ""}`)}
+<section class="section section--flush"><div class="container" data-testid="pf-preview" data-display-mode="${proj.display_mode}">${portfolioExplorer(ctx, [proj], { variant: "case", headingLevel: 2, previewToken: p.token })}</div></section>`));
+    res.headers.set("cache-control", "no-store");
+    res.headers.set("x-robots-tag", "noindex, nofollow");
+    res.headers.set("referrer-policy", "no-referrer");
+    return res;
+  });
+
   // Public screenshot bytes: ONLY files that are the current screenshot of a published project.
   r.get("/portfolio-media/:fileId", async (ctx, p) => {
     if (!(await pf.isPublicPortfolioFile(ctx.db, p.fileId))) throw new HttpError(404, "Not found");
@@ -1049,6 +1066,9 @@ ${input({ name: "relationship", label: "Relationship to Crestmont", value: v.rel
 <div class="form-actions">${button(submit)}</div></form>`;
 }
 
+const MODE_LABEL = { embed: "Mode A — native interactive embed", remote: "Mode B — remote interactive browser", unavailable: "Mode C — unavailable (honest fallback)" } as const;
+const REMOTE_LIMITS = "In the remote view visitors can scroll, click, type into search boxes and follow the site's own public pages. Sign-in, account and checkout pages, form submissions, purchases, uploads, downloads and pop-ups are blocked, sessions end after a few minutes or when idle, and it is a picture of a real browser rather than the page itself (slightly less crisp, with a small delay).";
+
 /** Outbound fetch for the live-site check (tests substitute a stub through env.overrides.portfolioFetch). */
 const netFetch = (ctx: AppContext): typeof fetch => ctx.env.overrides?.portfolioFetch ?? fetch;
 
@@ -1065,9 +1085,11 @@ function registerPortfolioAdmin(r: Router) {
     try {
       const { id } = await pf.createProject(ctx.db, ctx.actor!, v, ctx.ip, Number(str(f, "position")) || null);
       // Step 3 happens on its own: the live preview is checked straight away (the site's own framing headers).
-      const r = await pf.refreshEmbed(ctx.db, { id, live_url: v.live_url }, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null).catch(() => null);
-      const text = r?.status === "allowed" ? "Project added (unpublished). The live website is shown below — review it, then complete the authorization to publish."
-        : `Project added (unpublished). ${r ? `The live website cannot be embedded here (${r.detail}), so a genuine screenshot is needed as its preview.` : "The live preview check will run again shortly."}`;
+      const r = await pf.refreshEmbed(ctx.db, { id, live_url: v.live_url }, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null, remoteBrowserConfig(ctx.env).enabled).catch(() => null);
+      const sel = r ? pf.selectDisplayMode(r, remoteBrowserConfig(ctx.env).enabled) : null;
+      const text = `Project added (unpublished). ${!sel ? "The live preview check will run again shortly." : sel.mode === "embed" ? "Display: native interactive embed (Mode A). The live website is shown below"
+        : sel.mode === "remote" ? "Display: remote interactive browser (Mode B) — the site refuses framing, so Crestmont's remote browser shows the real site; nothing on the site changes. Try it below"
+        : `Display: unavailable (Mode C) — ${sel.reason} A genuine screenshot and the live link will be shown`}. Review it, then complete the owner's authorization to publish.`;
       return redirect(ctx, `/staff/portfolio/${id}`, { kind: "success", text });
     } catch (e) {
       if (e instanceof pf.PortfolioError && e.status === 422) return portfolioNew(ctx, v, e.issues, null, 422);
@@ -1095,8 +1117,9 @@ function registerPortfolioAdmin(r: Router) {
     await ctx.form();
     const proj = await pf.getById(ctx.db, p.id);
     if (!proj) throw new HttpError(404, "Project not found");
-    const r = await pf.refreshEmbed(ctx.db, proj, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null);
-    return redirect(ctx, `/staff/portfolio/${p.id}`, { kind: r.status === "allowed" ? "success" : "error", text: r.status === "allowed" ? `The live website can be shown interactively (${r.detail}).` : `The live website cannot be shown interactively: ${r.detail}.` });
+    const r = await pf.refreshEmbed(ctx.db, proj, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null, remoteBrowserConfig(ctx.env).enabled);
+    const sel = pf.selectDisplayMode(r, remoteBrowserConfig(ctx.env).enabled);
+    return redirect(ctx, `/staff/portfolio/${p.id}`, { kind: sel.mode === "unavailable" ? "error" : "success", text: `${MODE_LABEL[sel.mode]}. ${sel.reason}` });
   });
 
   // Drag and drop / keyboard reordering: the whole active order at once ("order" = ids, comma-separated).
@@ -1214,8 +1237,10 @@ async function portfolioNew(ctx: AppContext, v: Partial<pf.ProjectInput>, errors
   const n = (await pf.listActive(ctx.db)).length;
   const verdict = !check ? "" : check.status === "allowed"
     ? html`<div class="alert alert--success" role="status"><strong>Live preview available.</strong> ${check.detail}. The portfolio will show the real, working website — screenshots are optional.</div>`
+    : check.status === "blocked" && remoteBrowserConfig(ctx.env).enabled
+      ? html`<div class="alert alert--success" role="status"><strong>Remote interactive browser selected (Mode B).</strong> ${check.detail}, so the site cannot be framed directly. Crestmont's remote browser will show the real, live website interactively instead — no change to the website is needed. ${REMOTE_LIMITS}</div>`
     : check.status === "blocked"
-      ? html`<div class="alert alert--warn" role="status"><strong>This website does not permit embedding.</strong> ${check.detail}. It will be shown with a genuine screenshot and a Visit live website button. If you own the site, allow framing by ${new URL(ctx.baseUrl).origin} in its security headers.</div>`
+      ? html`<div class="alert alert--warn" role="status"><strong>This website does not permit embedding, and the remote browser is not enabled here (Mode C).</strong> ${check.detail}. It will be shown with a genuine screenshot, clearly labelled, and a Visit live website button.</div>`
       : html`<div class="alert alert--warn" role="status"><strong>The website could not be checked.</strong> ${check.detail}. You can still add it; the check runs again automatically.</div>`;
   return staffShell(ctx, "Add a portfolio project", html`${pageHead("Add a portfolio project", linkButton("All projects", "/staff/portfolio", "ghost", "sm"), "Portfolio")}
 ${verdict}<p class="muted">Confirm the name, industry, description and features (list only what you have confirmed on the live site). The project is saved unpublished; publishing needs the owner's documented authorization.</p>
@@ -1257,19 +1282,25 @@ ${fileInput("screenshot", fid ? "Replace with a new genuine capture" : "Upload a
 ${input({ name: "captured_on", label: "Captured on", type: "date", required: true })}
 <div class="form-actions">${button(fid ? "Replace screenshot" : "Upload screenshot", { variant: "secondary", size: "sm" })}</div></form></div>`;
   };
-  const live = pf.liveEmbed(p);
+  const live = pf.liveEmbed(p) || p.display_mode === "remote";
+  const mode = p.display_mode, remoteOn = remoteBrowserConfig(ctx.env).enabled;
+  // The staff preview of an unpublished Mode B project runs through a short-lived preview link (the remote-session API
+  // does not read staff cookies): 30 minutes, this project only, viewing only.
+  const previewToken = mode === "remote" && remoteOn ? await issuePreviewToken(ctx.db, p.id, 30, "staff-editor", Date.now()) : undefined;
   return staffShell(ctx, p.name, html`${pageHead(p.name, html`${linkButton("All projects", "/staff/portfolio", "ghost", "sm")}${p.published ? linkButton("View public page", `/portfolio/${p.slug}`, "ghost", "sm") : ""}`, "Portfolio")}
 ${formErrors(opts.errors ?? [])}
 <div class="card"><div class="row row--between"><div>${p.published ? badge("published") : badge("draft", "Unpublished")} <span class="faint">Updated ${formatDateTime(p.updated_at)}</span></div>
 <div>${p.archived_at ? html`${badge("muted", "Archived")} ${actionForm(ctx, `/staff/portfolio/${p.id}/restore`, "Restore", { variant: "secondary" })}` : html`${p.published ? actionForm(ctx, `/staff/portfolio/${p.id}/unpublish`, "Unpublish", { confirm: "Remove this project from the public portfolio?" }) : actionForm(ctx, `/staff/portfolio/${p.id}/publish`, "Publish", { variant: "primary" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/archive`, "Archive", { variant: "ghost", confirm: "Archive this project? It is hidden from the site and the list; its details and images are kept and it can be restored." })}`}</div></div>
 ${blockers.length ? html`<div class="alert alert--warn" role="status"><strong>Publishing is blocked until:</strong><ul>${blockers.map((b) => html`<li>${b}</li>`)}</ul></div>` : html`<p class="muted">All publishing requirements are met.</p>`}</div>
 <h2 class="h4">Live preview</h2>
-<div class="card" data-testid="pf-embed"><div class="row row--between"><div>${live ? badge("ok", "Live website — interactive") : p.embed_status === "blocked" ? badge("blocked", "Embedding refused by the site") : p.embed_status === "error" ? badge("blocked", "Could not check") : badge("muted", "Not checked yet")}
+<div class="card" data-testid="pf-embed" data-display-mode="${mode}"><div class="row row--between"><div>${mode === "embed" ? badge("ok", MODE_LABEL.embed) : mode === "remote" ? badge(remoteOn ? "ok" : "blocked", MODE_LABEL.remote) : mode === "unavailable" ? badge("blocked", MODE_LABEL.unavailable) : badge("muted", "Not checked yet")}
 <span class="faint">${p.embed_checked_at ? `Checked ${formatDateTime(p.embed_checked_at)}` : ""}${p.embed_detail ? ` · ${p.embed_detail}` : ""}</span></div>
 ${actionForm(ctx, `/staff/portfolio/${p.id}/embed-check`, "Check again", { variant: "secondary", size: "sm" })}</div>
-${!live && p.embed_status === "blocked" ? html`<p class="muted">The site's own security headers refuse framing by ${new URL(ctx.baseUrl).origin}, so visitors see a genuine screenshot and a Visit live website button. For a website you own, permit framing by exactly this origin (Content-Security-Policy: frame-ancestors ${new URL(ctx.baseUrl).origin}) and check again.</p>` : ""}
-<p class="muted">Re-checked automatically every day; if a site stops permitting it, its screenshot is shown instead.</p></div>
-${portfolioExplorer(ctx, [p], { variant: "case", headingLevel: 2 })}
+${p.display_reason ? html`<p data-testid="pf-display-reason">${p.display_reason}</p>` : ""}
+${mode === "remote" ? html`<p class="muted" data-testid="pf-remote-limits">${REMOTE_LIMITS}${remoteOn ? "" : " The remote browser is switched off in this environment, so visitors currently see the screenshot and the live link."}</p>`
+  : mode === "unavailable" ? html`<p class="muted">Visitors see a genuine screenshot (labelled as a screenshot) and a Visit live website button. Nothing is changed on the website.</p>` : ""}
+<p class="muted">The display method is chosen automatically and re-checked every day: native embed when the site permits framing by ${new URL(ctx.baseUrl).origin}, otherwise Crestmont's remote browser, otherwise the honest fallback.</p></div>
+${portfolioExplorer(ctx, [p], { variant: "case", headingLevel: 2, previewToken })}
 <div class="grid grid-2"><div class="card"><h3 class="card__title">Live link verification</h3>${dl([["Live link", html`<a href="${safeUrl(p.live_url)}" rel="noopener" target="_blank">${p.live_url}</a>`], ["Last verified", formatDate(p.link_verified_at)]])}
 <form method="post" action="/staff/portfolio/${p.id}/verify-link">${csrf(ctx)}<input type="hidden" name="verified_on" value="${new Date().toISOString().slice(0, 10)}">
 <p class="muted">Confirm only after looking at the preview above (or opening the link) and seeing the correct, working website.</p><div class="form-actions">${button("The preview shows the correct website — record verification", { variant: "secondary", size: "sm" })}</div></form></div>
