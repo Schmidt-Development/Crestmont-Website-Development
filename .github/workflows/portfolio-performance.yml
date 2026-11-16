@@ -55,7 +55,7 @@ jobs:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: |
           [[ "$POSITION" =~ ^[0-9]{1,2}$ ]] || { echo "::error::position must be a number"; exit 1; }
-          [[ "$DEVICES" =~ ^[a-z,]{1,60}$ ]] || { echo "::error::devices must be a comma-separated list"; exit 1; }
+          [[ "$DEVICES" =~ ^[a-z0-9,]{1,60}$ ]] || { echo "::error::devices must be a comma-separated list"; exit 1; }
           node scripts/portfolio-perf.mjs "$PRODUCTION_URL" --position "$POSITION" --devices "$DEVICES" --label "${LABEL//[^A-Za-z0-9 ._-]/}" --out portfolio-perf.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
