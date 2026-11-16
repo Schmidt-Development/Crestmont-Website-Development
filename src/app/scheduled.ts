@@ -26,6 +26,7 @@ import { processSalesQueue } from "../services/sales-outbound.ts";
 import { runSuspensionSweep } from "../services/maintenance-lifecycle.ts";
 import { runDatabaseBackup } from "../services/db-backup.ts";
 import { refreshAllEmbeds } from "../services/portfolio.ts";
+import { remoteBrowserConfig } from "../services/remote-browser/admission.ts";
 
 export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
   | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound" | "sales_outbound" | "sales_opt" | "research_promote" | "ops_alerts" | "hosting_suspension" | "db_backup" | "portfolio_embeds";
@@ -115,7 +116,7 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         // Criterion 5 (2026-11-13): the Worker's own daily database dump to its private bucket. No GitHub run, no approval.
         case "db_backup": { if (!ctx.storage || ctx.storage.kind !== "r2") { detail = "skipped: no R2 bucket bound"; break; } const m = await runDatabaseBackup({ db: ctx.db, storage: ctx.storage, now: env.overrides?.now }); detail = `${m.key}: ${m.totalRows} rows in ${Object.keys(m.tables).length} tables, ${m.bytes} bytes, sha256 ${m.sha256.slice(0, 12)}`; break; }
         // Live portfolio (2026-11-15): re-ask every live site whether it still permits framing by this origin.
-        case "portfolio_embeds": { const r = await refreshAllEmbeds(ctx.db, new URL(ctx.baseUrl).origin, env.overrides?.portfolioFetch ?? fetch); detail = r.map((x) => `${x.slug}:${x.status}${x.published ? "+published" : ""}`).join(", ") || "no active projects"; break; }
+        case "portfolio_embeds": { const r = await refreshAllEmbeds(ctx.db, new URL(ctx.baseUrl).origin, env.overrides?.portfolioFetch ?? fetch, remoteBrowserConfig(env).enabled); detail = r.map((x) => `${x.slug}:${x.status}${x.published ? "+published" : ""}`).join(", ") || "no active projects"; break; }
         case "retention": detail = (await runRetention({ db: ctx.db, storage: ctx.storage })).map((r) => `${r.category}:${r.mode === "skipped" ? "off" : r.affected}`).join(", "); break;
       }
       results[job] = { ok: true, detail };

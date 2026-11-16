@@ -62,6 +62,19 @@ export interface Env {
   STAGING_ACCESS_PASSWORD?: string;
   /** Approved isolated portfolio demo origins (https only, comma/space separated). Only these may be framed. */
   PORTFOLIO_DEMO_ORIGINS?: string;
+  /** Remote-browser viewer (portfolio Mode B): "on" enables it where the bindings below exist. */
+  REMOTE_BROWSER?: string;
+  REMOTE_BROWSER_MAX_CONCURRENT?: string;
+  REMOTE_BROWSER_DAILY_MINUTES?: string;
+  REMOTE_BROWSER_MAX_SESSION_SECONDS?: string;
+  REMOTE_BROWSER_IDLE_SECONDS?: string;
+  REMOTE_BROWSER_RATE_PER_10MIN?: string;
+  /** Cloudflare Browser Run binding (wrangler [browser]). */
+  BROWSER?: { fetch(input: string, init?: RequestInit): Promise<Response> };
+  /** Durable Object namespace hosting one remote-browser session per object (src/durable/portfolio-browser.ts). */
+  PORTFOLIO_BROWSER?: { idFromName(name: string): unknown; get(id: unknown): { fetch(req: Request): Promise<Response> } };
+  /** Development and CI only: a local Chromium stands in for Browser Run (dev/remote-browser-local.ts). */
+  REMOTE_BROWSER_LOCAL?: unknown;
   /** Emergency re-lock: "required" turns the staging preview gate on (fails closed without a password). Unset = public. */
   PREVIEW_GATE?: string;
   /** "local-runner": AI drafts are served by the self-hosted model through the build runner (no paid API). */

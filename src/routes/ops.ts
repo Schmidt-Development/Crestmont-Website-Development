@@ -32,6 +32,8 @@ import { sendCertificationBatch, sendMailboxChecks, certParts, CERT_RUN_ID } fro
 import { consumeOpsChallenge, type OpsChallengePurpose } from "../services/ops-challenge.ts";
 import { runDatabaseBackup } from "../services/db-backup.ts";
 import { refreshAllEmbeds } from "../services/portfolio.ts";
+import { remoteBrowserConfig } from "../services/remote-browser/admission.ts";
+import { intakeForAcceptance } from "../services/portfolio-intake.ts";
 
 // ───────────── Signed automation ─────────────
 
@@ -336,9 +338,23 @@ export function register(r: Router): void {
     const raw = await readBody(ctx.req);
     const auth = await opsAuth(ctx, raw, "portfolio_embeds");
     if (auth instanceof Response) return auth;
-    const results = await refreshAllEmbeds(ctx.db, new URL(ctx.baseUrl).origin, ctx.env.overrides?.portfolioFetch ?? fetch);
+    const results = await refreshAllEmbeds(ctx.db, new URL(ctx.baseUrl).origin, ctx.env.overrides?.portfolioFetch ?? fetch, remoteBrowserConfig(ctx.env).enabled);
     await audit(ctx.db, { actorKind: "system", action: "portfolio.embeds_checked", subjectType: "portfolio_project", details: { results: results.map((r) => `${r.slug}:${r.status}`) } });
     return jsonResponse(ctx, 200, { origin: new URL(ctx.baseUrl).origin, results });
+  });
+  // Release acceptance of the automatic display system (src/services/portfolio-intake.ts): the staff Add steps for up
+  // to five public addresses (unpublished; never consent), then one-hour view-only preview links. Signed (staging) or a
+  // one-time database challenge (production). Returns slugs, modes, reasons and the preview links only.
+  r.post("/api/ops/portfolio-intake", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    const auth = await opsAuth(ctx, raw, "portfolio_intake");
+    if (auth instanceof Response) return auth;
+    const urls = Array.isArray(auth.body.urls) ? auth.body.urls.filter((x): x is string => typeof x === "string").slice(0, 5) : [];
+    if (!urls.length) return jsonResponse(ctx, 422, { error: "urls: one to five public https addresses" });
+    const origin = new URL(ctx.baseUrl).origin, remote = remoteBrowserConfig(ctx.env);
+    const results = await intakeForAcceptance(ctx.db, origin, ctx.env.overrides?.portfolioFetch ?? fetch, remote.enabled, urls);
+    await audit(ctx.db, { actorKind: "system", action: "portfolio.acceptance_intake", subjectType: "portfolio_project", details: { results: results.map((r) => `${r.slug}:${r.mode}${r.created ? "+created" : ""}`) } });
+    return jsonResponse(ctx, 200, { origin, remoteBrowser: { enabled: remote.enabled, maxConcurrent: remote.maxConcurrent, dailyMinutes: remote.dailyMinutes }, results }, { "cache-control": "no-store" });
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.

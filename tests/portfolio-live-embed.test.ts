@@ -145,7 +145,8 @@ test("[PORT-006] [PORT-007] enter a URL → confirm details → automatic live p
   assert.equal(lk.embed_status, "blocked");
   const lkh = await o.get(`/staff/portfolio/${lk.id}`);
   const lkt = await lkh.text();
-  assert.match(lkt, /Embedding refused by the site/);
+  assert.match(lkt, /Mode C — unavailable/, "no remote browser in this environment: the honest fallback");
+  assert.equal(lk.display_mode, "unavailable");
   assert.match(lkt, /X-Frame-Options: DENY/);
   assert.doesNotMatch(lkt, /data-frame-url="https:\/\/locked-site/);
   assert.doesNotMatch(lkh.headers.get("content-security-policy")!, /locked-site/);
@@ -206,7 +207,7 @@ test("[PORT-006] [PORT-007] migration 0108: Lead Haven Collective keeps its exis
   // Not publishable until the live check confirms embedding (it has no screenshots).
   assert.ok(publishBlockers(p).some((b) => /screenshot/.test(b)));
   const r = await refreshAllEmbeds(t.db, lhcOrigin, allow);
-  assert.deepEqual(r.find((x) => x.slug === "lead-haven-collective"), { slug: "lead-haven-collective", status: "allowed", detail: `Content-Security-Policy frame-ancestors allows ${CRESTMONT}`, published: true });
+  assert.deepEqual(r.find((x) => x.slug === "lead-haven-collective"), { slug: "lead-haven-collective", status: "allowed", mode: "embed", detail: `Content-Security-Policy frame-ancestors allows ${CRESTMONT}`, published: true });
   p = (await getBySlug(t.db, "lead-haven-collective"))!;
   assert.equal(p.published, 1);
   assert.equal(p.publish_when_ready, 0, "one time only: a later unpublish by the Owner stands");

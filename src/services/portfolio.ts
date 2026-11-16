@@ -30,6 +30,25 @@ export interface PortfolioProject {
   portfolio_consent_evidence?: string | null; portfolio_consent_recorded_by?: string | null; portfolio_consent_withdrawn_at?: string | null;
   /** Live-site embedding check (migration 0107). */
   embed_status?: EmbedStatus; embed_url?: string | null; embed_checked_at?: string | null; embed_detail?: string | null; publish_when_ready?: number;
+  /** Display method selected for the project (migration 0109): embed (Mode A), remote (Mode B), unavailable (Mode C). */
+  display_mode?: DisplayMode; display_reason?: string | null;
+}
+export type DisplayMode = "unchecked" | "embed" | "remote" | "unavailable";
+
+/**
+ * Selects how a project is shown, automatically, from the live check (Owner, 2026-11-16):
+ *   Mode A embed       — the site's own headers permit framing by this origin: the real site in the explorer's iframe;
+ *   Mode B remote      — framing is refused (frame-ancestors / X-Frame-Options) but the site is a reachable public page:
+ *                        Crestmont's remote browser renders it — no change to the destination site is ever needed;
+ *   Mode C unavailable — neither (unreachable, an error, a bot check Crestmont will not bypass, or the remote browser is
+ *                        not configured here): an honest notice and the live link.
+ */
+export function selectDisplayMode(r: Pick<EmbedCheck, "status" | "detail">, remoteEnabled: boolean): { mode: Exclude<DisplayMode, "unchecked">; reason: string } {
+  if (r.status === "allowed") return { mode: "embed", reason: `Native embed: ${r.detail}.` };
+  if (r.status === "blocked") return remoteEnabled
+    ? { mode: "remote", reason: `The site refuses framing (${r.detail}), so Crestmont's remote browser shows it — the site itself is not changed.` }
+    : { mode: "unavailable", reason: `The site refuses framing (${r.detail}) and the remote browser is not enabled in this environment.` };
+  return { mode: "unavailable", reason: `The live site could not be shown interactively: ${r.detail}.` };
 }
 export interface Testimonial { id: string; portfolio_project_id: string | null; author_name: string; body: string; verification_evidence: string; verified_by: string; published: number; created_at: string | null }
 
@@ -66,8 +85,9 @@ export function liveEmbed(p: Pick<PortfolioProject, "embed_status" | "embed_url"
 /** Reasons a project cannot be published right now (empty = publishable). */
 export function publishBlockers(p: PortfolioProject): string[] {
   const out: string[] = [];
-  // Screenshots are the fallback for a site that cannot be framed; a live, interactive entry does not need them.
-  if (!liveEmbed(p)) {
+  // Screenshots are the fallback for a site that cannot be shown interactively; an entry shown live — natively (Mode A)
+  // or through Crestmont's remote browser (Mode B) — does not need them.
+  if (!liveEmbed(p) && p.display_mode !== "remote") {
     const why = p.embed_status === "blocked" ? " (the live site does not permit embedding, so a screenshot is shown instead)" : p.embed_status === "allowed" ? "" : " (or a successful live-embedding check)";
     if (!p.desktop_screenshot_file_id && !p.poster_desktop_asset) out.push(`A genuine desktop screenshot of the live site has not been uploaded${why}.`);
     if (!p.mobile_screenshot_file_id && !p.poster_mobile_asset) out.push(`A genuine mobile screenshot of the live site has not been uploaded${why}.`);
@@ -126,15 +146,18 @@ const originOf = (u: string | null | undefined): string | null => { try { const 
 
 export type DemoState = { kind: "embed"; url: string; origin: string } | { kind: "unavailable"; reason: string } | { kind: "none" };
 /** What the explorer shows: the real live website, an isolated demo copy, or the genuine screenshot. */
-export type PreviewState = { kind: "live"; url: string; origin: string } | DemoState;
+export type PreviewState = { kind: "live"; url: string; origin: string } | { kind: "remote"; url: string } | DemoState;
 /** An Owner-verified isolated demo stays where one is ready (it runs the site's flows with sample data and was
  *  approved for those projects); every other project shows its real live website when the site permits it; the
  *  genuine screenshot is the fallback. Setting a project's demo to "None" switches it to its live website. */
-export function previewState(p: PortfolioProject, approvedDemos: Set<string>, now = Date.now()): PreviewState {
+export function previewState(p: PortfolioProject, approvedDemos: Set<string>, now = Date.now(), remoteEnabled = false): PreviewState {
   const demo = demoState(p, approvedDemos);
   if (demo.kind === "embed") return demo;
   const live = liveEmbed(p, now);
-  return live ? { kind: "live", ...live } : demo;
+  if (live) return { kind: "live", ...live };
+  // Mode B: the site refuses framing; Crestmont's remote browser renders it (only where the remote browser is enabled).
+  if (p.display_mode === "remote" && remoteEnabled) return { kind: "remote", url: p.embed_url || p.live_url };
+  return demo;
 }
 /** Whether a project's demo may be embedded right now: ready, verified, on an approved origin, not production. */
 export function demoState(p: Pick<PortfolioProject, "demo_url" | "demo_status" | "demo_verified_at" | "live_url">, approved: Set<string>): DemoState {
@@ -190,26 +213,27 @@ export async function setDemo(db: Db, actor: Actor, id: string, input: DemoInput
 }
 
 // ── Live embedding check (recorded per project; re-run daily and whenever the link changes) ──
-export async function recordEmbedCheck(db: Db, id: string, r: EmbedCheck, actorUserId: string | null = null) {
+export async function recordEmbedCheck(db: Db, id: string, r: EmbedCheck, actorUserId: string | null = null, remoteEnabled = false) {
   const at = nowIso();
+  const sel = selectDisplayMode(r, remoteEnabled);
   const prev = await db.prepare(`SELECT embed_status, embed_url, embed_checked_at FROM portfolio_projects WHERE id = ?`).bind(id).first<{ embed_status: string; embed_url: string | null; embed_checked_at: string | null }>();
   // A check that could not reach the site says nothing new about its permission: a recent "allowed" answer stands
   // (liveEmbed still expires it after EMBED_MAX_AGE_MS). Only a definite answer — allowed or refused — replaces it.
   if (r.status === "error" && prev && liveEmbed({ embed_status: prev.embed_status as EmbedStatus, embed_url: prev.embed_url, embed_checked_at: prev.embed_checked_at })) {
-    await db.prepare(`UPDATE portfolio_projects SET embed_detail = ? WHERE id = ?`).bind(`Last check ${at.slice(0, 16).replace("T", " ")} UTC could not reach the site (${r.detail}); the permission confirmed ${prev.embed_checked_at!.slice(0, 10)} stands until it is 8 days old.`.slice(0, 500), id).run();
+    await db.prepare(`UPDATE portfolio_projects SET display_mode = 'embed', embed_detail = ? WHERE id = ?`).bind(`Last check ${at.slice(0, 16).replace("T", " ")} UTC could not reach the site (${r.detail}); the permission confirmed ${prev.embed_checked_at!.slice(0, 10)} stands until it is 8 days old.`.slice(0, 500), id).run();
     return;
   }
-  const stmts = [db.prepare(`UPDATE portfolio_projects SET embed_status = ?, embed_url = ?, embed_checked_at = ?, embed_detail = ? WHERE id = ?`)
-    .bind(r.status, r.url, at, r.detail.slice(0, 500), id)];
+  const stmts = [db.prepare(`UPDATE portfolio_projects SET embed_status = ?, embed_url = ?, embed_checked_at = ?, embed_detail = ?, display_mode = ?, display_reason = ? WHERE id = ?`)
+    .bind(r.status, r.url, at, r.detail.slice(0, 500), sel.mode, sel.reason.slice(0, 500), id)];
   if (prev?.embed_status !== r.status) stmts.push(db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .bind(actorUserId, actorUserId ? "user" : "system", "portfolio.embed_checked", "portfolio_project", id, JSON.stringify({ status: r.status, url: r.url, detail: r.detail, httpStatus: r.httpStatus }), null, at));
+    .bind(actorUserId, actorUserId ? "user" : "system", "portfolio.embed_checked", "portfolio_project", id, JSON.stringify({ status: r.status, mode: sel.mode, url: r.url, detail: r.detail, httpStatus: r.httpStatus }), null, at));
   await db.batch(stmts);
 }
 
 /** Checks one project's live site for this environment's origin and records the answer. */
-export async function refreshEmbed(db: Db, p: Pick<PortfolioProject, "id" | "live_url">, siteOrigin: string, fetcher: typeof fetch = fetch, actorUserId: string | null = null): Promise<EmbedCheck> {
+export async function refreshEmbed(db: Db, p: Pick<PortfolioProject, "id" | "live_url">, siteOrigin: string, fetcher: typeof fetch = fetch, actorUserId: string | null = null, remoteEnabled = false): Promise<EmbedCheck> {
   const r = await checkEmbed(p.live_url, siteOrigin, fetcher);
-  await recordEmbedCheck(db, p.id, r, actorUserId);
+  await recordEmbedCheck(db, p.id, r, actorUserId, remoteEnabled);
   return r;
 }
 
@@ -218,11 +242,11 @@ export async function refreshEmbed(db: Db, p: Pick<PortfolioProject, "id" | "liv
  * once ready (publish_when_ready) and now meet every requirement. A project whose live site stopped permitting framing
  * simply falls back to its screenshot; nothing is unpublished automatically.
  */
-export async function refreshAllEmbeds(db: Db, siteOrigin: string, fetcher: typeof fetch = fetch): Promise<{ slug: string; status: string; detail: string; published?: boolean }[]> {
-  const out: { slug: string; status: string; detail: string; published?: boolean }[] = [];
+export async function refreshAllEmbeds(db: Db, siteOrigin: string, fetcher: typeof fetch = fetch, remoteEnabled = false): Promise<{ slug: string; status: string; mode: string; detail: string; published?: boolean }[]> {
+  const out: { slug: string; status: string; mode: string; detail: string; published?: boolean }[] = [];
   for (const p of await listActive(db)) {
-    const r = await refreshEmbed(db, p, siteOrigin, fetcher);
-    const row: { slug: string; status: string; detail: string; published?: boolean } = { slug: p.slug, status: r.status, detail: r.detail };
+    const r = await refreshEmbed(db, p, siteOrigin, fetcher, null, remoteEnabled);
+    const row: { slug: string; status: string; mode: string; detail: string; published?: boolean } = { slug: p.slug, status: r.status, mode: selectDisplayMode(r, remoteEnabled).mode, detail: r.detail };
     if (p.publish_when_ready && !p.published) {
       const fresh = (await getById(db, p.id))!;
       if (!publishBlockers(fresh).length) {

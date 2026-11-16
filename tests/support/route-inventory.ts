@@ -31,7 +31,7 @@ export type ResourceKind =
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
   | "member" | "notification" | "staffNotification" | "buildJob" | "websiteDelivery" | "siteDeployment" | "buildWorker" | "buildApproval" | "buildIntegration"
-  | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic" | "researchProspect" | "researchProspect2" | "salesCall" | "salesLinkToken" | "salesUnsubToken";
+  | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic" | "researchProspect" | "researchProspect2" | "salesCall" | "salesLinkToken" | "salesUnsubToken" | "portfolioPreviewToken";
 
 export type Access =
   | { kind: "public" }
@@ -91,6 +91,10 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/leads": { access: { kind: "public" }, api: true },
   "GET /api/assistant": { access: { kind: "public" }, api: true },
   "POST /api/assistant": { access: { kind: "public" }, api: true },
+  // Portfolio remote browser (Mode B): open to visitors for PUBLISHED remote-mode projects (or with a preview link);
+  // same-origin JSON only, rate-limited, concurrency- and budget-capped (src/routes/remote-browser.ts).
+  "POST /api/portfolio/remote-sessions": { access: { kind: "public" }, api: true },
+  "GET /api/portfolio/remote-sessions/status": { access: { kind: "public" }, api: true },
   "POST /api/readiness/evidence": signed("x-crestmont-signature"),
   "POST /api/readiness/github-snapshot": signed("x-crestmont-signature"),
   "POST /api/scheduled/run": signed("x-crestmont-scheduler-signature"),
@@ -116,6 +120,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/ops/integration-probe": signed("x-crestmont-signature"),
   "POST /api/ops/database-backup": signed("x-crestmont-signature"),
   "POST /api/ops/portfolio-embeds": signed("x-crestmont-signature"),
+  "POST /api/ops/portfolio-intake": signed("x-crestmont-signature"),
   "GET /api/ops/email-deliveries/:id": { ...signed("x-crestmont-signature"), params: { id: "emailDelivery" } },
   "GET /api/readiness/release-authorization": signed("x-crestmont-signature", { staffRead: true }),
   // AI Builds runner API (HMAC-signed with BUILD_RUNNER_SECRET; src/routes/builds.ts)
@@ -205,6 +210,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /pricing/compare": pub,
   "GET /portfolio": pub,
   "GET /portfolio/:slug": { access: { kind: "public" }, params: { slug: "portfolioSlug" } },
+  "GET /portfolio/preview/:token": token("short-lived portfolio preview link (staff editor or Owner-approved ops challenge; one project, view only)", { token: "portfolioPreviewToken" }),
   "GET /portfolio-media/:fileId": { access: { kind: "public" }, params: { fileId: "portfolioFile" } },
   "GET /about": pub,
   "GET /process": pub,

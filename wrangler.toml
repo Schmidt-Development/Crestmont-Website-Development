@@ -12,6 +12,14 @@ compatibility_date = "2026-10-01"
 # those were the Worker's own egress allowlist refusing the client hosts (src/lib/egress.ts; fixed in embed-check.ts).
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
+# Portfolio remote browser (Mode B, docs/frontend/PORTFOLIO.md §Display modes): Cloudflare Browser Run (Browser Rendering)
+# for isolated headless Chromium sessions, and one Durable Object per visitor session that relays the screencast and the
+# visitor's input. Included in Workers Paid; the REMOTE_BROWSER_* caps keep use inside the included allowance (costs in
+# PORTFOLIO.md). REMOTE_BROWSER = "on" enables it per environment; anything else = Mode C fallback for blocked sites.
+browser = { binding = "BROWSER" }
+durable_objects = { bindings = [{ name = "PORTFOLIO_BROWSER", class_name = "PortfolioBrowser" }] }
+migrations = [{ tag = "v1-portfolio-browser", new_sqlite_classes = ["PortfolioBrowser"] }]
+
 [vars]
 ENVIRONMENT = "development"
 
@@ -63,7 +71,11 @@ workers_dev = true            # staging is served at crestmont-platform-staging.
 # RECEPTIONIST_ORIGIN (Founder, 2026-11-11): Crestmont's own receptionist line is answered by production; the staging
 # Retell audit expects the agent, tools and number to point there (.github/workflows/production-receptionist-routing.yml).
 ai = { binding = "AI" }
-vars = { ENVIRONMENT = "staging", EMAIL_FROM = "Crestmont Website Development <support@crestmontwebsitedevelopment.com>", PAYMENT_SIMULATION_ENABLED = "true", APP_URL = "https://crestmont-platform-staging.partners-df4.workers.dev", RECEPTIONIST_ORIGIN = "https://crestmontwebsitedevelopment.com", AI_PROVIDER = "local-runner", ASSISTANT_PROVIDER = "workers-ai", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA", PORTFOLIO_DEMO_ORIGINS = "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev https://glassly-portfolio-demo.partners-df4.workers.dev https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev" }
+# Portfolio remote browser (Mode B): bindings repeated per environment (non-inheritable); caps in vars.
+browser = { binding = "BROWSER" }
+durable_objects = { bindings = [{ name = "PORTFOLIO_BROWSER", class_name = "PortfolioBrowser" }] }
+migrations = [{ tag = "v1-portfolio-browser", new_sqlite_classes = ["PortfolioBrowser"] }]
+vars = { ENVIRONMENT = "staging", EMAIL_FROM = "Crestmont Website Development <support@crestmontwebsitedevelopment.com>", PAYMENT_SIMULATION_ENABLED = "true", APP_URL = "https://crestmont-platform-staging.partners-df4.workers.dev", RECEPTIONIST_ORIGIN = "https://crestmontwebsitedevelopment.com", AI_PROVIDER = "local-runner", ASSISTANT_PROVIDER = "workers-ai", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA", PORTFOLIO_DEMO_ORIGINS = "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev https://glassly-portfolio-demo.partners-df4.workers.dev https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev", REMOTE_BROWSER = "on", REMOTE_BROWSER_MAX_CONCURRENT = "3", REMOTE_BROWSER_DAILY_MINUTES = "20" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-staging", database_id = "", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-staging" }]
 triggers = { crons = ["* * * * *", "*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
@@ -98,7 +110,11 @@ routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true },
 # Stripe checkout are open. The deploy (deploy-production.yml) refuses to release this unless the running Worker's
 # read-only probe verifies the live Stripe key, a charge-enabled account and the webhook endpoint with every handled
 # event (scripts/stripe-live-gate.ts); the post-deploy smoke test then checks that a new visitor reaches every package.
-vars = { ENVIRONMENT = "production", PORTFOLIO_DEMO_ORIGINS = "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev https://glassly-portfolio-demo.partners-df4.workers.dev https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev", EMAIL_FROM = "Crestmont Website Development <support@crestmontwebsitedevelopment.com>", APP_URL = "https://crestmontwebsitedevelopment.com", HSTS_MAX_AGE = "300", AI_BUILD_AUTOMATION = "off", PUBLIC_LAUNCH = "open", PAYMENTS_LIVE_AUTHORIZED = "yes" }
+vars = { ENVIRONMENT = "production", PORTFOLIO_DEMO_ORIGINS = "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev https://glassly-portfolio-demo.partners-df4.workers.dev https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev", EMAIL_FROM = "Crestmont Website Development <support@crestmontwebsitedevelopment.com>", APP_URL = "https://crestmontwebsitedevelopment.com", HSTS_MAX_AGE = "300", AI_BUILD_AUTOMATION = "off", PUBLIC_LAUNCH = "open", PAYMENTS_LIVE_AUTHORIZED = "yes", REMOTE_BROWSER = "on", REMOTE_BROWSER_MAX_CONCURRENT = "3", REMOTE_BROWSER_DAILY_MINUTES = "20" }
+# Portfolio remote browser (Mode B): bindings repeated per environment (non-inheritable); caps in vars.
+browser = { binding = "BROWSER" }
+durable_objects = { bindings = [{ name = "PORTFOLIO_BROWSER", class_name = "PortfolioBrowser" }] }
+migrations = [{ tag = "v1-portfolio-browser", new_sqlite_classes = ["PortfolioBrowser"] }]
 d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "c667f1a9-0802-4c52-a0e1-b512219a6eea", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
 triggers = { crons = ["* * * * *", "*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts

@@ -47,6 +47,8 @@ jobs:
       url: ${{ vars.PRODUCTION_URL }}
     outputs:
       deployed: ${{ steps.deploy.outcome }}
+      # Display-mode acceptance websites (slugs, modes and one-hour view-only preview links), for verify-live-portfolio.
+      portfolio_intake: ${{ steps.intake.outputs.json }}
     # F-24: no secret is set for the whole job. The Cloudflare token goes only to the steps that run wrangler and the
     # evidence secret only to the steps that sign evidence; npm install / typecheck / tests (third-party package code)
     # receive neither. tests/workflow-security.test.ts enforces this.
@@ -332,6 +334,28 @@ jobs:
           [ "$http" = "200" ] || { echo "::warning title=Live portfolio check::HTTP $http"; exit 1; }
           node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`### Live portfolio (framing permission for ${r.origin})`);for(const x of r.results)console.log(`- ${x.slug}: ${x.status}${x.published?" — published now (every requirement met)":""} — ${x.detail}`)' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Automatic display system on real websites (Owner, 2026-11-16): the three acceptance sites go through the same
+      # steps as Staff → Portfolio → Add a project (read the page, create UNPUBLISHED, check, select Mode A/B/C) — or are
+      # only re-checked when they already exist. Nothing is published, no consent is recorded, and the websites are not
+      # changed. The one-hour, view-only preview links are handed to verify-live-portfolio, which drives them.
+      - name: Portfolio display modes — add the acceptance websites through the Add service (unpublished)
+        id: intake
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          node --no-warnings scripts/ops-challenge.ts --purpose portfolio_intake --out-sql "$work/c.sql" --out-nonce "$work/nonce" > /dev/null
+          echo "::add-mask::$(cat "$work/nonce")"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
+          body=$(node -e 'console.log(JSON.stringify({ challenge: process.argv[1], urls: ["https://premiuminvoices.com/", "https://lendingforbeginners.com/", "https://leadhavencollective.com/"] }))' "$(cat "$work/nonce")")
+          http=$(curl -s -o "$work/r.json" -w '%{http_code}' --max-time 180 -X POST -H 'content-type: application/json' --data "$body" "$PRODUCTION_URL/api/ops/portfolio-intake" || echo 000)
+          [ "$http" = "200" ] || { echo "::warning title=Portfolio intake::HTTP $http"; exit 1; }
+          node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`### Portfolio display modes (remote browser ${r.remoteBrowser.enabled?"on":"OFF"}, ${r.remoteBrowser.maxConcurrent} concurrent, ${r.remoteBrowser.dailyMinutes} min/day)`);for(const x of r.results)console.log(`- ${x.url} → **${x.mode}** (${x.slug}${x.created?", added unpublished":", existing"}${x.published?", published":""}) — ${x.reason}`)' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "json=$(base64 -w0 "$work/r.json")" >> "$GITHUB_OUTPUT"
+
       - name: Post-deploy production checks (LAUNCH-003)
         id: checks
         run: >
@@ -495,7 +519,7 @@ jobs:
     needs: deploy
     if: needs.deploy.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
       # Job-wide, so the install step and the check use the same browser folder (run 43794884320 installed Chromium
@@ -529,4 +553,24 @@ jobs:
           cat accept.log
           { if [ "$rc" = 0 ]; then echo "## Feature verification: PASSED — live portfolio accepted on production"; else echo "## Feature verification: FAILED — the release is deployed, but the live portfolio was NOT accepted"; fi
             echo; grep -E '^(PASS|FAIL)' accept.log | grep -E 'FAIL|lead-haven|published projects' ; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      # The automatic display system on the three acceptance websites (Mode A / B / C chosen by the deploy job's intake
+      # step): blocked sites must be genuinely interactive through the remote browser — desktop, Android touch,
+      # iPhone-sized and tablet viewports (Chromium emulation, NOT Safari), scrolling without moving Crestmont's page,
+      # clicks and navigation, reload, device switching, private routes refused, several visitors at once, the capacity
+      # limit, idle cleanup and Resume. Runs even if the step above failed, and fails the run on its own.
+      - name: Display modes and remote browser on real websites (production) — mandatory
+        if: always()
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          INTAKE: ${{ needs.deploy.outputs.portfolio_intake }}
+        run: |
+          set +e
+          if [ -z "$INTAKE" ]; then echo "## Display modes: FAILED — the deploy job's intake step produced no result" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
+          printf '%s' "$INTAKE" | base64 -d > intake.json
+          node scripts/live-remote-acceptance.mjs "$PRODUCTION_URL" intake.json > remote.log 2>&1
+          rc=$?
+          cat remote.log
+          { if [ "$rc" = 0 ]; then echo "## Display modes: PASSED — automatic selection and the remote browser accepted on production"; else echo "## Display modes: FAILED — deployed, but NOT accepted"; fi
+            echo; grep -E '^(PASS|FAIL|SKIP|MODE|COST)' remote.log ; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"

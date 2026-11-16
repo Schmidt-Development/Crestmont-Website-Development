@@ -8,6 +8,7 @@
 // Without JavaScript the same markup is an accessible project list with links (nojs.css).
 import { html, safeUrl, type SafeHtml } from "../lib/html.ts";
 import type { AppContext } from "../app/context.ts";
+import { remoteBrowserConfig } from "../services/remote-browser/admission.ts";
 import { approvedDemoOrigins, allowLocalDemos, previewState, type PreviewState, type PortfolioProject } from "../services/portfolio.ts";
 
 const ARROW_L = html`<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -32,9 +33,9 @@ function visitorStatus(p: PortfolioProject, st: PreviewState): string {
   return st.kind === "unavailable" && p.demo_status === "unavailable" ? "The interactive demo is temporarily unavailable, so a screenshot is shown instead." : "";
 }
 
-export interface ExplorerOptions { variant: "home" | "portfolio" | "case"; headingLevel?: 2 | 3 }
+export interface ExplorerOptions { variant: "home" | "portfolio" | "case"; headingLevel?: 2 | 3; /** Short-lived preview link (unpublished projects): passed to the remote browser. */ previewToken?: string }
 
-const FLAG = { live: "Live website", embed: "Interactive demo", shot: "Screenshot" } as const;
+const FLAG = { live: "Live website", remote: "Live website · remote view", embed: "Interactive demo", shot: "Screenshot" } as const;
 const framed = (st: PreviewState): st is Extract<PreviewState, { kind: "live" | "embed" }> => st.kind === "live" || st.kind === "embed";
 
 /** Renders the explorer and registers exactly the origins it frames (live sites verified to permit this origin, and
@@ -42,7 +43,8 @@ const framed = (st: PreviewState): st is Extract<PreviewState, { kind: "live" | 
 export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[], opts: ExplorerOptions): SafeHtml {
   if (!projects.length) return html``;
   const approved = approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: allowLocalDemos(ctx.env.ENVIRONMENT) });
-  const states = projects.map((p) => previewState(p, approved));
+  const remoteOn = remoteBrowserConfig(ctx.env).enabled;
+  const states = projects.map((p) => previewState(p, approved, Date.now(), remoteOn));
   ctx.frameSrc = [...new Set([...(ctx.frameSrc ?? []), ...states.flatMap((s) => (framed(s) ? [s.origin] : []))])];
   const n = projects.length;
   const nameAt = (i: number) => projects[(i + n) % n].name;
@@ -50,16 +52,16 @@ export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[],
   const slides = projects.map((p, i) => {
     const st = states[i];
     const desk = posterOf(p, "desktop"), tab = posterOf(p, "tablet"), mob = posterOf(p, "mobile");
-    const host = framed(st) ? hostOf(st.url) : hostOf(p.live_url);
-    const kind = st.kind === "live" ? "live" : st.kind === "embed" ? "embed" : "shot";
+    const host = framed(st) || st.kind === "remote" ? hostOf(st.url) : hostOf(p.live_url);
+    const kind = st.kind === "live" ? "live" : st.kind === "remote" ? "remote" : st.kind === "embed" ? "embed" : "shot";
     return html`<li class="pfx__slide pfx__slide--${kind}" id="pfx-${p.slug}" data-pfx-slide data-index="${i}" data-name="${p.name}" data-kind="${kind}" data-live-url="${safeUrl(p.live_url)}"
- ${framed(st) ? html`data-frame-url="${st.url}" data-frame-origin="${st.origin}"` : ""} ${st.kind === "embed" ? html`data-demo-url="${st.url}" data-demo-origin="${st.origin}"` : ""} aria-roledescription="slide" aria-label="${`${i + 1} of ${n}: ${p.name}`}">
+ ${framed(st) ? html`data-frame-url="${st.url}" data-frame-origin="${st.origin}"` : ""} ${st.kind === "remote" ? html`data-remote-slug="${p.slug}" data-remote-host="${host}"` : ""} ${st.kind === "embed" ? html`data-demo-url="${st.url}" data-demo-origin="${st.origin}"` : ""} aria-roledescription="slide" aria-label="${`${i + 1} of ${n}: ${p.name}`}">
 <div class="pfx__viewport" data-pfx-viewport>
-  <div class="pfx__chrome" aria-hidden="true"><span class="pfx__dots"><i></i><i></i><i></i></span><span class="pfx__url" data-pfx-url>${host}</span><span class="pfx__flag pfx__flag--${kind}" data-pfx-flag>${kind === "live" ? html`<span class="pfx__pulse"></span>` : ""}${FLAG[kind]}</span></div>
+  <div class="pfx__chrome" aria-hidden="true"><span class="pfx__dots"><i></i><i></i><i></i></span><span class="pfx__url" data-pfx-url>${host}</span><span class="pfx__flag pfx__flag--${kind}" data-pfx-flag>${kind === "live" || kind === "remote" ? html`<span class="pfx__pulse"></span>` : ""}${FLAG[kind]}</span></div>
   <div class="pfx__screen" data-pfx-screen>
     <div class="pfx__stage" data-pfx-stage>
     ${desk ? html`<img class="pfx__poster pfx__poster--desktop" src="${desk}" alt="${`Screenshot of the ${p.name} website on a desktop screen${file(p, "desktop") ? "" : " (demonstration build with sample data)"}`}" width="1440" height="900" loading="${i === 0 ? "eager" : "lazy"}" decoding="async">`
-      : kind === "live" ? html`<div class="pfx__poster pfx__poster--loading" aria-hidden="true"><span class="pfx__spinner"></span><span class="pfx__loading-name">${p.name}</span><span class="pfx__loading-host">${host}</span></div>`
+      : kind === "live" || kind === "remote" ? html`<div class="pfx__poster pfx__poster--loading" aria-hidden="true"><span class="pfx__spinner"></span><span class="pfx__loading-name">${p.name}</span><span class="pfx__loading-host">${host}</span></div>`
       : html`<div class="pfx__poster pfx__poster--missing">Screenshot pending</div>`}
     ${tab ? html`<img class="pfx__poster pfx__poster--tablet" src="${tab}" alt="${`Screenshot of the ${p.name} website on a tablet (demonstration build with sample data)`}" width="820" height="1180" loading="lazy" decoding="async">` : ""}
     ${mob ? html`<img class="pfx__poster pfx__poster--mobile" src="${mob}" alt="${`Screenshot of the ${p.name} website on a phone${file(p, "mobile") ? "" : " (demonstration build with sample data)"}`}" width="390" height="844" loading="lazy" decoding="async">` : ""}
@@ -74,7 +76,7 @@ export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[],
     <p class="pfx__desc">${p.description.split("\n")[0]}</p>
   </div>
   <div class="pfx__links">
-    ${st.kind === "embed" ? html`<span class="pfx__label">Interactive demo — no real transactions</span>` : st.kind === "live" ? html`<span class="pfx__label pfx__label--live">The real, live website — fully interactive</span>` : ""}
+    ${st.kind === "embed" ? html`<span class="pfx__label">Interactive demo — no real transactions</span>` : st.kind === "live" ? html`<span class="pfx__label pfx__label--live">The real, live website — fully interactive</span>` : st.kind === "remote" ? html`<span class="pfx__label pfx__label--live">The real, live website, shown through Crestmont's remote browser — sign-in, forms and purchases are turned off</span>` : ""}
     ${opts.variant !== "case" ? html`<a class="pfx__link" href="/portfolio/${p.slug}">Case study</a>` : ""}
     ${st.kind === "embed" ? html`<a class="pfx__link pfx__link--demo" href="${safeUrl(st.url)}" target="_blank" rel="noopener noreferrer">Open demo in a new tab ${EXTERNAL}</a>` : ""}
     <a class="pfx__link pfx__link--live" href="${safeUrl(p.live_url)}" target="_blank" rel="noopener noreferrer">Visit live website ${EXTERNAL}<span class="visually-hidden"> (opens the operational ${p.name} website in a new tab)</span></a>
@@ -86,12 +88,13 @@ export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[],
   const many = n > 1;
   // CREST-GAP-047: without anything framed there is nothing to click inside or reload, so the Reload control is not
   // rendered and the hint describes what the visitor actually sees.
-  const anyLive = states.some((s) => s.kind === "live"), anyDemo = states.some((s) => s.kind === "embed");
+  const anyRemote = states.some((s) => s.kind === "remote");
+  const anyLive = states.some((s) => s.kind === "live") || anyRemote, anyDemo = states.some((s) => s.kind === "embed");
   const anyFrame = anyLive || anyDemo;
   const hint = anyFrame
     ? `Scroll and click inside the ${anyLive && !anyDemo ? "website" : anyLive ? "website or demo" : "demo"} to explore it${many ? "; the arrows switch projects" : ""}.${anyLive ? " Live websites are the real, working sites, exactly as their visitors see them." : ""}${anyDemo ? ` Demos are isolated demonstration copies with sample data — nothing you do ${anyLive ? "in a demo" : ""} reaches the real businesses.`.replace("  ", " ") : ""}`
     : `Screenshots of ${many ? "each website" : "the website"}${projects.every((p) => !p.desktop_screenshot_file_id) ? `${many ? "'s" : "'s"} demonstration build, which uses sample data` : ""}.${many ? " Use the arrows to switch projects, or" : ""} ${many ? "visit" : "Visit"} the live website to explore it.`;
-  return html`<div class="pfx pfx--${opts.variant}${many ? "" : " pfx--single"}" data-pfx data-mode="desktop" data-count="${n}" role="region" aria-roledescription="carousel" aria-label="Portfolio projects">
+  return html`<div class="pfx pfx--${opts.variant}${many ? "" : " pfx--single"}" data-pfx data-mode="desktop" data-count="${n}"${opts.previewToken ? html` data-preview="${opts.previewToken}"` : ""} role="region" aria-roledescription="carousel" aria-label="Portfolio projects">
 <p class="visually-hidden" aria-live="polite" data-pfx-live></p>
 <div class="pfx__row">
   ${many ? html`<button type="button" class="pfx__arrow pfx__arrow--prev" data-pfx-prev aria-label="${`Previous project: ${nameAt(n - 1)}`}">${ARROW_L}</button>` : ""}
@@ -102,6 +105,7 @@ export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[],
   ${many ? html`<div class="pfx__pages" role="group" aria-label="Choose a project">${projects.map((p, i) => html`<button type="button" class="pfx__page" data-pfx-go="${i}" aria-label="${`Show ${p.name} (${i + 1} of ${n})`}"${i === 0 ? html` aria-current="true"` : ""}><span>${p.name}</span></button>`)}</div>` : ""}
   <div class="pfx__tools" role="group" aria-label="Demo controls">
     <div class="pfx__seg" role="group" aria-label="Device viewport"><button type="button" class="pfx__tool" data-pfx-mode="desktop" aria-pressed="true">Desktop</button><button type="button" class="pfx__tool" data-pfx-mode="tablet" aria-pressed="false">Tablet</button><button type="button" class="pfx__tool" data-pfx-mode="mobile" aria-pressed="false">Mobile</button></div>
+    ${anyRemote ? html`<button type="button" class="pfx__tool" data-pfx-back aria-label="Back (remote view)">Back</button><button type="button" class="pfx__tool" data-pfx-forward aria-label="Forward (remote view)">Forward</button>` : ""}
     ${anyFrame ? html`<button type="button" class="pfx__tool" data-pfx-reset>${anyDemo && !anyLive ? "Reset demo" : "Reload"}</button>` : ""}
     <button type="button" class="pfx__tool" data-pfx-expand aria-pressed="false">Full screen</button>
   </div>
