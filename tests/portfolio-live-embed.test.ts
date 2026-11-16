@@ -231,3 +231,45 @@ test("[PORT-006] [PORT-007] migration 0108: Lead Haven Collective keeps its exis
   assert.equal(row.published, 0);
   n.close();
 });
+
+test("[PORT-006] [PORT-007] production wiring: the check passes through the Worker's egress allowlist — the checked host only, only for that request", async () => {
+  // Production installs guardFetch over the global fetch (src/worker.ts → installEgressGuard). Deploys 43759950375 and
+  // 43764297050 showed every live check "did not answer": the guard refused the client sites before any request left.
+  const { guardFetch, egressAllowed } = await import("../src/lib/egress.ts");
+  const seen: string[] = [];
+  const network: typeof fetch = async (input) => {
+    const u = String(input); seen.push(u);
+    if (u === "https://www.leadhavencollective.com/") return new Response(null, { status: 301, headers: { location: "https://leadhavencollective.com/" } });
+    return new Response("<title>Lead Haven Collective</title>", { headers: { "content-type": "text/html", "content-security-policy": LHC_CSP } });
+  };
+  const guarded = guardFetch(network);
+  // Without per-request permission the guard refuses — and the real cause is now reported, not a bare "network error".
+  const blocked = await (async () => { try { await guarded("https://leadhavencollective.com/"); return null; } catch (e) { return e as Error; } })();
+  assert.equal(blocked?.name, "EgressBlockedError");
+  // Through checkEmbed: allowed for each hop (www → apex redirect included), and removed again afterwards.
+  const r = await checkEmbed("https://www.leadhavencollective.com/", CRESTMONT, guarded);
+  assert.equal(r.status, "allowed", r.detail);
+  assert.deepEqual(seen, ["https://www.leadhavencollective.com/", "https://leadhavencollective.com/"]);
+  assert.equal(egressAllowed("https://leadhavencollective.com/"), false, "the host is not left on the allowlist");
+  assert.equal(egressAllowed("https://www.leadhavencollective.com/"), false);
+  // Crestmont's own provider hosts and paid AI APIs are never checked, even when entered as a live link.
+  for (const u of ["https://api.stripe.com/", "https://api.resend.com/", "https://api.anthropic.com/"]) {
+    const x = await checkEmbed(u, CRESTMONT, guarded);
+    assert.equal(x.status, "error"); assert.match(x.detail, /not a client website/);
+  }
+  assert.equal(seen.length, 2, "no request was made to a provider host");
+  // A genuine network failure keeps its cause in the recorded detail.
+  const down = await checkEmbed("https://leadhavencollective.com/", CRESTMONT, guardFetch(async () => { throw new TypeError("fetch failed"); }));
+  assert.match(down.detail, /did not answer \(TypeError: fetch failed\)/);
+
+  // End to end with the guard in place: the daily job publishes Lead Haven Collective (no screenshots needed).
+  // (The test app's origin is http://crestmont.test, so the stubbed site permits exactly that origin here.)
+  const appNet = guardFetch(async () => new Response("<title>LHC</title>", { headers: { "content-type": "text/html", "content-security-policy": "frame-ancestors http://crestmont.test" } }));
+  const t = await createTestApp({ overrides: { portfolioFetch: appNet } } as never);
+  const res = await runJobs(t.env, ["portfolio_embeds"]);
+  assert.match(res.portfolio_embeds.detail, /lead-haven-collective:allowed\+published/);
+  const lhc = (await getBySlug(t.db, "lead-haven-collective"))!;
+  assert.equal(lhc.embed_status, "allowed", lhc.embed_detail ?? "");
+  assert.equal(lhc.published, 1, "published once every requirement is met — no screenshot needed");
+  t.close();
+});
