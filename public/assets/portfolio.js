@@ -78,8 +78,17 @@
     const isLive = (s) => s.dataset.kind === "live";
     const urlLabel = (s, href) => { const el = s.querySelector("[data-pfx-url]"); if (el) el.textContent = href; };
 
+    // Scroll isolation (app.css): the stage of a shown frame is a 1px scroll container that stops a gesture leaving
+    // the frame; it must never stay scrolled, so any movement is undone at once.
+    const isolate = (s) => {
+      const st = s.querySelector("[data-pfx-stage]");
+      if (!st || st.dataset.isolated) return;
+      st.dataset.isolated = "1";
+      st.addEventListener("scroll", () => { if (st.scrollTop || st.scrollLeft) { st.scrollTop = 0; st.scrollLeft = 0; } }, { passive: true });
+    };
     const ready = (i, rec) => {
       const s = slides[i];
+      isolate(s);
       if (rec.ready) return;
       rec.ready = true; clearTimeout(rec.timer); s.classList.add("is-ready"); delete s.dataset.unavailable; status(s, "");
     };

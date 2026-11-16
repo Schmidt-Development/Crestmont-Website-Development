@@ -1185,6 +1185,15 @@ a.shot { display: block; cursor: zoom-in; }
 .pfx[data-mode="tablet"] .pfx__slide:not(:has(.pfx__poster--tablet)) .pfx__poster--desktop { display: block; }
 .pfx__frame { position: absolute; left: 0; top: 0; width: var(--pfx-dw, 100%); height: var(--pfx-fh, 100%); transform: scale(var(--pfx-s, 1)); transform-origin: 0 0; border: 0; background: #fff; opacity: 0; transition: opacity var(--t-med) var(--ease-out); }
 .pfx__slide.is-ready .pfx__frame { opacity: 1; }
+/* Scroll isolation for EVERY embedded website (Owner, 2026-11-16). A gesture the framed site cannot use any more (it is
+   at its top or bottom) is handed by the browser to the nearest scrollable ancestor of the frame. Browsers skip
+   overflow:hidden boxes there, so .pfx__screen's overscroll-behavior did not stop it, and phone swipes moved
+   Crestmont's page. While a frame is shown, its stage becomes a genuine scroll container — 1px of hidden slack
+   (::after), reset at once by portfolio.js — with overscroll-behavior: contain, so the gesture always ends here,
+   whatever the site does. Screenshot slides are untouched (scrolling over them scrolls the page). */
+.pfx__slide.is-ready .pfx__stage { overflow-x: hidden; overflow-y: scroll; overscroll-behavior: contain; scrollbar-width: none; -webkit-overflow-scrolling: auto; }
+.pfx__slide.is-ready .pfx__stage::-webkit-scrollbar { display: none; }
+.pfx__slide.is-ready .pfx__stage::after { content: ""; position: absolute; left: 0; top: 0; width: 1px; height: calc(100% + 1px); pointer-events: none; visibility: hidden; }
 .pfx__slide.is-ready .pfx__poster { opacity: 0; }
 /* Tablet and phone: a device bezel around the stage on a soft backdrop */
 .pfx:is([data-mode="tablet"], [data-mode="mobile"]) .pfx__screen { background: radial-gradient(60% 80% at 50% 40%, #171717, #070707); }
