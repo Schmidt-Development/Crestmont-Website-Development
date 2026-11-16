@@ -121,6 +121,16 @@ jobs:
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: node --no-warnings scripts/remote-browser-check.mjs http://localhost:8787 .dev/rb.db
+      # Performance gate (portfolio performance upgrade): on a throttled 5 Mbit/s visitor link, scroll and swipe must
+      # show quickly, an always-animating page must not flood the link or build a backlog, and Chromium must not
+      # render more pictures than are delivered. Fails if the stream regresses to its pre-upgrade behaviour.
+      - name: Performance gate (throttled visitor, static and animated fixture sites)
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: |
+          node --no-warnings scripts/portfolio-perf.mjs http://localhost:8787 --slug rb-fa-none --devices desktop5m,pixel5m --out perf-static.json --label "CI static"
+          node --no-warnings scripts/portfolio-perf.mjs http://localhost:8787 --slug rb-heavy-js --devices desktop5m --out perf-animated.json --label "CI animated"
+          node scripts/remote-browser-perf-gate.mjs perf-static.json perf-animated.json
       - name: Development server log (on failure)
         if: failure()
         run: tail -n 200 "$RUNNER_TEMP/dev.log"

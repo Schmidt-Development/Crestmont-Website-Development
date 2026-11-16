@@ -11,10 +11,12 @@ export const parseDevice = (d: unknown): Device => (typeof d === "string" && d i
 
 /** Validates a WebSocket connection request and returns what the browser side needs, or null (403). */
 export async function prepareConnection(db: Db, id: string, token: string, q: URLSearchParams, now: number, cfg: { maxSessionSeconds: number; idleSeconds: number }): Promise<ConnectInfo | null> {
-  const row = await claim(db, id, token, now);
-  if (!row) return null;
-  const p = await db.prepare(`SELECT live_url, embed_url, archived_at FROM portfolio_projects WHERE id = ?`).bind(row.project_id).first<{ live_url: string; embed_url: string | null; archived_at: string | null }>();
-  if (!p || p.archived_at) return null;
+  // The claim and the project lookup run in parallel (one round trip of start-up time instead of three).
+  const [row, p] = await Promise.all([
+    claim(db, id, token, now),
+    db.prepare(`SELECT p.id, p.live_url, p.embed_url, p.archived_at FROM remote_browser_sessions s JOIN portfolio_projects p ON p.id = s.project_id WHERE s.id = ?`).bind(id).first<{ id: string; live_url: string; embed_url: string | null; archived_at: string | null }>(),
+  ]);
+  if (!row || !p || p.id !== row.project_id || p.archived_at) return null;
   const url = p.embed_url || p.live_url, site = siteOf(url);
   if (!site) return null;
   return { id, url, site, device: parseDevice(q.get("device")), height: Number(q.get("h")) || 900, ...cfg };

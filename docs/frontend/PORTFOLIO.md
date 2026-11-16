@@ -188,6 +188,82 @@ daily budget is used up, visitors get Mode C ("Today's interactive viewing time 
   Android / iPhone-sized / tablet viewports; concurrency, cleanup, idle timeout, failure recovery and API refusals.
 - Production: `live-portfolio-acceptance.yml` after every release (see *Deployment status*).
 
+### Performance (Owner, 2026-11-16: "MASTER PORTFOLIO PERFORMANCE UPGRADE")
+
+Measured first, on production, with `scripts/portfolio-perf.mjs` (workflow *Portfolio performance*, read-only: one
+remote session per device, about 2–3 browser-minutes) against Get Every Invoice Paid in portfolio position #2, from a
+GitHub runner and on an emulated 5 Mbit/s visitor connection (Chrome network emulation, which throttles the WebSocket):
+
+| Before the upgrade (production, 2026-11-16) | Fast link | 5 Mbit/s link |
+|---|---|---|
+| Desktop: start → first picture | 4.2–5.4 s | 4.0 s |
+| Desktop: frames while the site only animates | 13 fps, 0.83 MB/s, 41–65 KB/frame | 8.6 fps — the link is full (550 KB/s) |
+| Desktop: wheel scroll → visible (median) | 317 ms | **855 ms** (up to 1.0 s); continuous scroll 2.4 s |
+| Phone: frames while idle | 60 fps, 1.3–1.4 MB/s | link full |
+| Phone: swipe → visible (median) | 169–268 ms | **1.1 s** (up to 1.4 s) |
+| Direct visit (no Crestmont) | TTFB 238–305 ms, load 486–565 ms, scroll visible in ~1 ms at 50 fps | |
+
+Root causes (confirmed by measurement, not assumed):
+
+1. **No flow control.** Every screencast frame was acknowledged to Chromium on arrival and forwarded at once, so the
+   stream ran at whatever rate Chromium could render and the visitor's link could not refuse it. A site that animates
+   all the time (Get Every Invoice Paid does) filled an ordinary connection on its own, and every scroll or click then
+   waited behind a queue of stale pictures — the "remote computer over a slow link" feel.
+2. **Three pictures rendered per picture shown** once the stream was paced: Chromium counts screencast acknowledgements
+   per screencast (not per frame) and keeps three frames in flight; acknowledging every frame let it render far ahead.
+   Rendering and encoding are the scarce resource in Browser Run (desktop frames topped out at ~13 fps, phone frames —
+   a quarter of the pixels — at 60 fps).
+3. **Frames larger than shown.** Desktop frames were captured at the full 1440 px whatever the visitor's canvas size.
+4. **Every request paused.** All of the page's requests (images, fonts, styles, scripts) waited for a policy decision in
+   the Durable Object, a round trip each, which slowed page loads and in-site navigation.
+5. **Start-up spent in sequential round trips**: ~6 database queries before the session is admitted, 3 more before the
+   WebSocket opens, ~12 sequential browser setup commands.
+
+What changed (shared code only — every current and future Mode B entry, on the homepage, /portfolio, /portfolio/:slug
+and staff previews, gets it; no website is modified):
+
+- `src/services/remote-browser/stream.ts` — **flow control**: the viewer acknowledges each picture it has drawn; at most
+  two frames are ever on their way; while one cannot be sent only the newest waits (stale ones are dropped, never
+  queued) and Chromium is not acknowledged, so it renders one picture per picture delivered (its in-flight limit is
+  learned if a browser version differs); **frame-rate caps**: 30 fps while the visitor interacts, 15 fps otherwise;
+  **input queue**: pointer moves and touch moves keep only the newest position, wheel steps add up, clicks and keys
+  keep their order, one dispatch at a time (no stale input backlog); native base64 decoding.
+- `src/services/remote-browser/session.ts` — frames captured no larger than the viewer's canvas is shown (device
+  pixels, up to the device width); JPEG quality 55; setup commands in parallel; statistics to the viewer every 2 s
+  (produced / sent / dropped frames, frame round trip, input dispatch time, capture width).
+- `src/services/remote-browser/policy.ts` `interceptPatterns()` — only requests that can navigate, write, beacon or open
+  a stream are paused (Document, XHR, Fetch, Ping, EventSource, CSPViolationReport, Other — the resource types Chromium
+  accepts in a fetch filter, verified against the running browser), plus EVERY request to plain http, private/loopback
+  IP ranges, IPv6 literals and internal or reserved names, which the policy refuses as before. Public https images,
+  styles, fonts and scripts load without a round trip. A type a browser version does not know is dropped and the call
+  repeated; if all else fails every request is paused, as before.
+- `public/assets/portfolio.js` — v2 hello (with the canvas's displayed size), frame headers, acknowledgement after each
+  drawn picture, newest-frame-only drawing scaled to the device size, wheel steps merged per animation frame, canvas
+  position read at most once per frame, one quiet retry of a failed start, the session released when the explorer
+  leaves the screen.
+- `src/services/remote-browser/admission.ts` / `connect.ts` — admission and the WebSocket claim in fewer, parallel
+  database round trips (the claim is one atomic `UPDATE … RETURNING`). Preview links (staff and the release pipeline)
+  are rate-limited per link instead of per address; public visitors keep the per-address limit.
+- Older cached viewers (no hello) keep the original behaviour until they reload.
+
+Budgets and cost are unchanged: 3 concurrent sessions, 20 browser-minutes a day, inside the Workers Paid allowance —
+the stream now uses roughly a third to half of the bandwidth for an animating site, and Browser Run renders a third of
+the frames it did.
+
+Regression protection: `tests/portfolio-remote-stream.test.ts` (a simulated Chromium and viewer: one render per
+delivered frame, ≤ 2 in flight, a slow viewer gets fresh frames, no stall, older viewers unchanged, input merging) and
+the CI performance gate (`scripts/remote-browser-perf-gate.mjs`, after the functional checks): on a throttled
+5 Mbit/s visitor link a scroll on a static page must show within 500 ms, a swipe within 700 ms, a scroll on an
+always-animating page within 600 ms (the pre-upgrade code did not show it within 1.6 s), Chromium may render at most
+1.5× the frames delivered, the frame round trip must stay ≤ 400 ms with ≤ 2 frames in flight, and idle animation is
+capped (≤ 17 fps, ≤ 400 KB/s). The pre-upgrade code fails this gate on four checks; the upgraded code passes it.
+
+Remaining limits (stated plainly): the picture is still a stream from a browser in Cloudflare — a scroll or click
+needs a network round trip plus one rendered frame, so it cannot match a native site's ~1 ms scroll response; desktop
+frame rates are bounded by Browser Run's software rendering of the full 1440 px page (raster happens at full size even
+when frames are captured smaller); start-up still includes acquiring a fresh isolated browser (seconds), which is not
+shared between visitors for isolation.
+
 ## Data model (migration 0038, additive; numbered 0037 on the retired frontend-preview branch)
 
 `portfolio_projects` gains these columns:
