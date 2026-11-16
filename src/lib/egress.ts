@@ -1,7 +1,8 @@
 // Central outbound-request allowlist (ASVS V12.6 / finding F-11). The deployed Worker wraps the global
 // fetch once (src/worker.ts) so every provider adapter, probe and job can only reach the hosts below.
-// Nothing in the platform fetches user-supplied URLs; the one dynamic case, the environment probe,
-// validates the Owner-configured URL and registers that single host for the duration of the call.
+// Dynamic hosts are registered only for the duration of one call, after validation: the environment probe (the
+// Owner-configured URL) and the live portfolio check (a staff-entered client website, src/services/embed-check.ts:
+// public https host names only, never one of the provider hosts below or a paid AI API).
 export const EGRESS_HOSTS: readonly string[] = [
   "api.stripe.com",               // payments, reconciliation, invoices
   "api.resend.com",               // transactional email

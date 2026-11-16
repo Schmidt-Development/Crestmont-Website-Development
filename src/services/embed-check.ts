@@ -7,6 +7,12 @@
 // Nothing here weakens or bypasses a site's choice: a site that refuses framing is shown with a genuine screenshot and
 // its "Visit live website" link instead. The check never sends cookies or credentials and only follows https redirects
 // to public host names.
+//
+// Egress (src/lib/egress.ts): the deployed Worker only reaches allow-listed provider hosts. For each request this check
+// makes, the one validated host is allowed for the duration of that request and removed again — the same mechanism the
+// environment probe uses. Crestmont's own provider hosts and paid AI APIs are never checked (untrustedHostAllowed).
+
+import { allowEgressHost, untrustedHostAllowed } from "../lib/egress.ts";
 
 export type EmbedStatus = "unchecked" | "allowed" | "blocked" | "error";
 export interface EmbedCheck { status: Exclude<EmbedStatus, "unchecked">; url: string | null; origin: string | null; detail: string; httpStatus: number | null; title: string | null; description: string | null; siteName: string | null }
@@ -133,13 +139,19 @@ export async function checkEmbed(liveUrl: string, ancestorOrigin: string, fetche
   try { ancestor = new URL(ancestorOrigin); } catch { return { status: "error", url: null, origin: null, detail: "This environment has no valid site address", httpStatus: null, ...none }; }
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     let res: Response;
+    if (!untrustedHostAllowed(url.hostname)) return { status: "error", url: url.toString(), origin: url.origin, detail: `${url.hostname} is a service Crestmont itself uses, not a client website, so it is not checked`, httpStatus: null, ...none };
+    const release = allowEgressHost(url.hostname);
     try {
       res = await fetcher(url.toString(), {
         method: "GET", redirect: "manual", signal: AbortSignal.timeout(timeoutMs),
         headers: { accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5", "user-agent": "Mozilla/5.0 (compatible; CrestmontPortfolioCheck/1.0; +https://crestmontwebsitedevelopment.com/portfolio)" },
       });
     } catch (e) {
-      return { status: "error", url: url.toString(), origin: url.origin, detail: `The site did not answer (${e instanceof Error && e.name === "TimeoutError" ? "timed out" : "network error"})`, httpStatus: null, ...none };
+      // Keep the real cause (name and message) so a failure is diagnosable from Staff → Portfolio and the release log.
+      const why = e instanceof Error ? (e.name === "TimeoutError" ? "timed out" : `${e.name}: ${e.message}`.replace(/\s+/g, " ").slice(0, 200)) : "network error";
+      return { status: "error", url: url.toString(), origin: url.origin, detail: `The site did not answer (${why})`, httpStatus: null, ...none };
+    } finally {
+      release();
     }
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
       await res.body?.cancel().catch(() => undefined);

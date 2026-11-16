@@ -6,10 +6,10 @@
 name = "crestmont-platform"
 main = "src/worker.ts"
 compatibility_date = "2026-10-01"
-# global_fetch_strictly_public: every outbound fetch goes over the public internet, exactly as a visitor's browser
-# would. Without it, a fetch to a site served by another Worker in this Cloudflare account (Lead Haven Collective's
-# custom domain) is routed straight to that zone's non-existent origin and fails — which made the live portfolio
-# check report "did not answer" (deploy 43759950375). The Worker only calls external providers otherwise.
+# global_fetch_strictly_public: outbound fetches go over the public internet, as a visitor's browser would, so the live
+# portfolio check sees each client site (several are Workers in this same Cloudflare account) exactly as the public
+# does. NOTE: this flag did NOT cause or fix the "did not answer" failures of deploys 43759950375 and 43764297050 —
+# those were the Worker's own egress allowlist refusing the client hosts (src/lib/egress.ts; fixed in embed-check.ts).
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
 [vars]

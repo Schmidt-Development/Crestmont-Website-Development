@@ -45,6 +45,8 @@ jobs:
     environment:
       name: production
       url: ${{ vars.PRODUCTION_URL }}
+    outputs:
+      deployed: ${{ steps.deploy.outcome }}
     # F-24: no secret is set for the whole job. The Cloudflare token goes only to the steps that run wrangler and the
     # evidence secret only to the steps that sign evidence; npm install / typecheck / tests (third-party package code)
     # receive neither. tests/workflow-security.test.ts enforces this.
@@ -238,6 +240,18 @@ jobs:
         id: deploy
         run: $WRANGLER deploy --env production --keep-vars --message "Release ${RELEASE_TAG} ${TARGET_COMMIT}"
 
+      # What is actually running: the deployed version and the compatibility date and flags Cloudflare holds for the
+      # production Worker (read back from the Cloudflare API, not from wrangler.toml). Reported only.
+      - name: Deployed Worker version and compatibility settings (read back from Cloudflare)
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          $WRANGLER deployments status --env production 2>/dev/null | grep -iE 'version|created|percentage' | head -6 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          node -e '(async()=>{const r=await fetch(`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts/crestmont-platform-production/settings`,{headers:{authorization:`Bearer ${process.env.CLOUDFLARE_API_TOKEN}`}});const j=await r.json();if(!j.success){console.log(`settings not readable: HTTP ${r.status}`);return}const x=j.result;console.log(`Running Worker: compatibility_date ${x.compatibility_date}; compatibility_flags [${(x.compatibility_flags||[]).join(", ")}]`)})()' | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Production binding preservation — verify nothing was lost
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -365,20 +379,6 @@ jobs:
           node scripts/live-layout-check.mjs "$PRODUCTION_URL" "$RUNNER_TEMP/review" | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}; rm -rf "$RUNNER_TEMP/review"; exit "$rc"
 
-      # The live portfolio in a real browser: every project is interactive (its live website or isolated demo, not the
-      # screenshot), scrolls inside the frame, navigates, reloads/resets and switches devices, on desktop and phone;
-      # Lead Haven Collective must show its REAL live website. Reported; never a rollback.
-      - name: Live interactive portfolio (desktop and phone, real browser)
-        if: always() && steps.deploy.outcome == 'success'
-        continue-on-error: true
-        env:
-          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
-          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
-        run: |
-          [ -f .pw/node_modules/playwright/index.mjs ] || { npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null && .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null; }
-          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 5 --live lead-haven-collective | tee -a "$GITHUB_STEP_SUMMARY"
-          exit "${PIPESTATUS[0]}"
-
       - name: Production data report (read-only; no personal data)
         if: always() && steps.deploy.outcome == 'success'
         continue-on-error: true
@@ -486,3 +486,45 @@ jobs:
         run: |
           node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment production --commit "$TARGET_COMMIT" --status failed --by "github-actions:${{ github.actor }}" || true
           echo "::error::wrangler deploy failed; the previous Worker version is still serving. If migrations were applied, they are additive (docs/BACKUP-RECOVERY.md §5)."
+
+  # Feature acceptance — separate from the deployment (Owner, 2026-11-16: "Distinguish clearly between a successful
+  # deployment and a verified feature"). It runs only after the deploy job succeeded, needs no secret and changes
+  # nothing. A failure here does NOT roll back a healthy release (the deploy job's own checks decide that), but it
+  # FAILS this workflow run, so a release whose mandatory portfolio acceptance did not pass is never shown as green.
+  verify-live-portfolio:
+    needs: deploy
+    if: needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+    steps:
+      # The default branch's own check scripts (trusted code; no ref from the triggering event is checked out here — this
+      # job has no environment protection, so it never runs code chosen by the event). It only drives a browser
+      # against the public production site.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Install Chromium (pinned Playwright)
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      # The live portfolio in a real browser: every published project is interactive (its live website or isolated
+      # demo, never only a screenshot), scrolls inside the frame without moving Crestmont's page, navigates, reloads /
+      # resets and switches devices, on desktop and phone; Lead Haven Collective must be published and show its REAL
+      # live website.
+      - name: Live portfolio acceptance (desktop and phone, real browser) — mandatory
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+        run: |
+          set +e
+          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 5 --live lead-haven-collective > accept.log 2>&1
+          rc=$?
+          cat accept.log
+          { if [ "$rc" = 0 ]; then echo "## Feature verification: PASSED — live portfolio accepted on production"; else echo "## Feature verification: FAILED — the release is deployed, but the live portfolio was NOT accepted"; fi
+            echo; grep -E '^(PASS|FAIL)' accept.log | grep -E 'FAIL|lead-haven|published projects' ; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
