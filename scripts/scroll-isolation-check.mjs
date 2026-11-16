@@ -69,9 +69,11 @@ for (const [label, viewport, touch] of VIEWPORTS) {
       const y0 = await outer();
       const scrollable = (await inner()).max > 0;
       // 1) A gesture inside the frame scrolls the site, never Crestmont's page.
-      const i0 = (await inner()).y;
+      // Scrolling anywhere inside the site counts (its page, or an inner scroll area under the pointer).
+      const moved = () => fr.evaluate(() => Math.round(scrollY) + [...document.querySelectorAll("*")].reduce((a, e) => a + e.scrollTop, 0));
+      const i0 = await moved();
       await gesture(300);
-      ok(!scrollable || (await inner()).y > i0, `${tag}: the site scrolls inside the frame (${i0} → ${(await inner()).y}px)`);
+      ok(!scrollable || (await moved()) > i0, `${tag}: the site scrolls inside the frame (${i0} → ${await moved()}px)`);
       ok((await outer()) === y0, `${tag}: Crestmont's page stays still while the site scrolls (${y0} → ${await outer()}px)`);
       // 2) At the site's bottom, keep going: slow drags and fast flings past the boundary.
       await fr.evaluate(() => scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" })); await sleep(200);

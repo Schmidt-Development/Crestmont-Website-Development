@@ -130,3 +130,21 @@ test("[PORT-006] explorer without approved origins (or unverified demos) shows g
   assert.match(html, /src="\/assets\/portfolio\/glassly-auto-glass-desktop\.webp"/);
   assert.doesNotMatch(res.headers.get("content-security-policy")!, /workers\.dev/);
 });
+
+test("[PORT-006] scroll isolation is built into the shared explorer for every embedded website (not per site)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const css = readFileSync("public/assets/app.css", "utf8"), js = readFileSync("public/assets/portfolio.js", "utf8");
+  // While a frame is shown its stage is a genuine scroll container that contains overscroll: a gesture leaving the
+  // framed site (at its top or bottom) ends there instead of scrolling Crestmont's page (CI: portfolio-scroll-isolation).
+  const rule = /\.pfx__slide\.is-ready \.pfx__stage \{([^}]*)\}/.exec(css)?.[1] ?? "";
+  assert.match(rule, /overflow-y: scroll/);
+  assert.match(rule, /overscroll-behavior: contain/);
+  assert.match(css, /\.pfx__slide\.is-ready \.pfx__stage::after \{[^}]*height: calc\(100% \+ 1px\)/, "1px of slack makes the stage a real scroller");
+  assert.match(js, /st\.scrollTop = 0/, "the slack is reset at once");
+  // Screenshot slides keep normal page scrolling (no is-ready stage rule applies to them).
+  assert.doesNotMatch(css, /\n\.pfx__stage \{[^}]*overflow-y: scroll/);
+  // The CI job exercises it with several kinds of site and phone/tablet/desktop viewports.
+  const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+  assert.match(ci, /scroll-isolation-check\.mjs/);
+  for (const f of ["plain-long", "short-page", "lenis-smooth", "busy-main-thread", "touch-handlers"]) assert.match(ci, new RegExp(f));
+});
