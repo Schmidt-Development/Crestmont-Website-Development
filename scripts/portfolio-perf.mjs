@@ -79,10 +79,13 @@ const changed = (a, b) => { let n = 0; for (let i = 0; i < a.length; i++) if (Ma
  *  Recognises scrolling on low-contrast pages and ignores animation that changes pixels in place. */
 function moved(a, b) {
   const W = 48, H = 27;
-  const err = (k) => { let s = 0, n = 0; for (let r = 0; r < H; r++) { const ra = r + k; if (ra < 0 || ra >= H) continue; for (let c = 0; c < W; c++) { s += Math.abs(a[ra * W + c] - b[r * W + c]); n++; } } return n ? s / n : Infinity; };
+  const rowErr = (ra, rb) => { let s = 0; for (let c = 0; c < W; c++) s += Math.abs(a[ra * W + c] - b[rb * W + c]); return s / W; };
+  // Rows that did not change (a fixed header, a sticky bar) are left out: they do not scroll and would hide the shift.
+  const fixed = new Set(); for (let r = 0; r < H; r++) if (rowErr(r, r) < 1.5) fixed.add(r);
+  const err = (k) => { let s = 0, n = 0; for (let r = 0; r < H; r++) { const ra = r + k; if (ra < 0 || ra >= H || fixed.has(r) || fixed.has(ra)) continue; s += rowErr(ra, r); n++; } return n >= 4 ? s / n : Infinity; };
   const e0 = err(0); let best = 0, be = e0;
-  for (let k = -21; k <= 21; k++) { if (!k || H - Math.abs(k) < 6) continue; const e = err(k); if (e < be) { be = e; best = k; } }
-  return best !== 0 && e0 > 1.5 && be < e0 * 0.6;
+  for (let k = -21; k <= 21; k++) { if (!k) continue; const e = err(k); if (e < be) { be = e; best = k; } }
+  return best !== 0 && Number.isFinite(e0) && e0 > 0.25 && be < e0 * 0.65;
 }
 /** Input → visible response. kind "scroll": the first frame whose content has moved vertically relative to the frame
  *  shown when the input was sent; settle = the last frame that still moved, after the input ended (a backlog of stale
@@ -97,7 +100,8 @@ function response(M, tIn, tEndInput = tIn, kind = "scroll", frac = 0.3) {
   if (before) for (const d of after) if (d.w === before.w && (kind === "scroll" ? moved(before.sig, d.sig) : changed(before.sig, d.sig) >= frac)) { visible = d.t - tIn; break; }
   let last = null, stale = 0;
   for (let i = 1; i < M.draws.length; i++) { const d = M.draws[i], p = M.draws[i - 1]; if (d.t > tEndInput && d.w === p.w && (kind === "scroll" ? moved(p.sig, d.sig) : changed(p.sig, d.sig) > 0.05)) { last = d.t; stale++; } }
-  return { visibleMs: r1(visible), settleMs: last == null ? 0 : r1(last - tEndInput), framesAfterInputEnded: stale };
+  const first = after[0] ? after[0].t - tIn : null; // the first new picture after the input, whatever it shows
+  return { visibleMs: r1(visible), firstFrameMs: r1(first), settleMs: last == null ? 0 : r1(last - tEndInput), framesAfterInputEnded: stale };
 }
 function frames(M, t0, t1) {
   const fr = M.msgs.filter((m) => m.k === "b" && m.t >= t0 && m.t < t1);
@@ -141,8 +145,8 @@ async function findTargets(url, w, h, mobile) {
       let link = null, text = null;
       for (const a of document.querySelectorAll("a[href]")) {
         let u; try { u = new URL(a.href); } catch { continue; }
-        if (u.protocol !== "https:" || !(u.hostname === site || u.hostname.endsWith("." + site)) || u.pathname === here.pathname || bad.test(u.pathname) || a.hasAttribute("download") || (a.target && a.target !== "_self")) continue;
-        const v = vis(a); if (v) { link = { ...v, path: u.pathname }; break; }
+        if (u.protocol !== "https:" || !(u.hostname === site || u.hostname.endsWith("." + site)) || (u.pathname === here.pathname && !u.hash) || bad.test(u.pathname) || a.hasAttribute("download") || (a.target && a.target !== "_self")) continue;
+        const v = vis(a); if (v) { link = { ...v, path: u.pathname + u.hash }; if (u.pathname !== here.pathname) break; }
       }
       for (const el of document.querySelectorAll("h1, h2, p")) { if (el.closest("a,button,label,[onclick],[role=button]")) continue; const v = vis(el); if (v) { text = v; break; } }
       return { link, text };
@@ -155,6 +159,10 @@ const DEV = {
   pixel: { label: "Android-sized (Pixel 7, Chromium emulation)", opts: devices["Pixel 7"], touch: true },
   iphone: { label: "iPhone-sized (iPhone 13 viewport, Chromium emulation — NOT Safari)", opts: devices["iPhone 13"], touch: true },
   ipad: { label: "Tablet (iPad Mini viewport, Chromium emulation)", opts: devices["iPad Mini"], touch: true },
+  // An ordinary visitor connection (Chrome network emulation, which also throttles the WebSocket): 5 Mbit/s down,
+  // 1.5 Mbit/s up, 60 ms added latency.
+  desktop5m: { label: "Desktop on a 5 Mbit/s connection", opts: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 }, touch: false, net: true },
+  pixel5m: { label: "Android-sized on a 5 Mbit/s connection", opts: devices["Pixel 7"], touch: true, net: true },
 };
 
 for (const key of DEVICES) {
@@ -165,6 +173,7 @@ for (const key of DEVICES) {
   const p = await ctx.newPage();
   const cdp = await ctx.newCDPSession(p);
   await cdp.send("Performance.enable");
+  if (D.net) { await cdp.send("Network.enable"); await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 60, downloadThroughput: 625000, uploadThroughput: 187500 }); }
   const R = { label: D.label };
   const sel = `.pfx__slide[data-remote-slug="${T.slug}"]`;
   try {
@@ -197,7 +206,7 @@ for (const key of DEVICES) {
         const tIn = await now(p); await p.mouse.wheel(0, 360); await sleep(1600);
         single.push(response(await getM(p), tIn));
       }
-      R.scrollSingle = { visibleMedMs: med(single.map((s) => s.visibleMs)), visibleMaxMs: Math.max(...single.map((s) => s.visibleMs ?? Infinity)), settleMedMs: med(single.map((s) => s.settleMs)), samples: single };
+      R.scrollSingle = { visibleMedMs: med(single.map((s) => s.visibleMs)), firstFrameMedMs: med(single.map((s) => s.firstFrameMs)), visibleMaxMs: Math.max(...single.map((s) => s.visibleMs ?? Infinity)), settleMedMs: med(single.map((s) => s.settleMs)), samples: single };
       // Continuous scrolling: 60 wheel events every 16 ms (≈1 s), then back up.
       t0 = await now(p);
       for (let i = 0; i < 60; i++) { await p.mouse.wheel(0, 90); await sleep(16); }
@@ -227,8 +236,10 @@ for (const key of DEVICES) {
       } else report.notes.push(`${key}: no visible same-site link in the first screen`);
     } else {
       // Touch swipes on the canvas (CDP touch events on the visitor's page), 3×, then a long continuous swipe.
+      // Fractions of the part of the canvas that is on screen (it can be taller than a phone's viewport).
+      const vis = await p.locator(`${sel} canvas.pfx__remote`).evaluate((c) => { const r = c.getBoundingClientRect(); return { top: Math.max(r.top, 0), bottom: Math.min(r.bottom, innerHeight), x: r.left + r.width / 2 }; });
       const swipe = async (fromF, toF, steps = 10, stepMs = 16) => {
-        const a = await at(Math.round(w / 2), Math.round(h * fromF)), b = await at(Math.round(w / 2), Math.round(h * toF));
+        const a = { x: vis.x, y: vis.top + (vis.bottom - vis.top) * fromF }, b = { x: vis.x, y: vis.top + (vis.bottom - vis.top) * toF };
         await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: a.x, y: a.y }] });
         for (let i = 1; i <= steps; i++) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: a.x, y: a.y + ((b.y - a.y) * i) / steps }] }); await sleep(stepMs); }
         await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
@@ -236,7 +247,7 @@ for (const key of DEVICES) {
       const sw = [];
       const outer0 = await p.evaluate(() => scrollY);
       for (let i = 0; i < 3; i++) { const tIn = await now(p); await swipe(0.75, 0.35); const tEnd = await now(p); await sleep(1800); sw.push({ ...response(await getM(p), tIn, tEnd) }); }
-      R.swipe = { visibleMedMs: med(sw.map((s) => s.visibleMs)), settleMedMs: med(sw.map((s) => s.settleMs)), samples: sw };
+      R.swipe = { visibleMedMs: med(sw.map((s) => s.visibleMs)), firstFrameMedMs: med(sw.map((s) => s.firstFrameMs)), settleMedMs: med(sw.map((s) => s.settleMs)), samples: sw };
       t0 = await now(p);
       for (let k = 0; k < 4; k++) await swipe(0.85, 0.15, 14, 16);
       const tEnd = await now(p); await sleep(3000);
@@ -250,7 +261,8 @@ for (const key of DEVICES) {
     if (key === "desktop") {
       for (const [m, wd] of [["mobile", 390], ["desktop", 1440]]) {
         const tIn = await now(p); await p.click(`[data-pfx-mode="${m}"]`);
-        const done = await p.waitForFunction(([s, wd]) => { const c = document.querySelector(s); return c && c.width === wd; }, [`${sel} canvas.pfx__remote`, wd], { timeout: 15000 }).then(() => true, () => false);
+        let done = false;
+        for (let k = 0; k < 150 && !done; k++) { done = (await p.evaluate((q) => document.querySelector(q)?.width ?? 0, `${sel} canvas.pfx__remote`)) === wd; if (!done) await sleep(100); }
         R[`switchTo_${m}`] = { ok: done, ms: r1((await now(p)) - tIn) };
         await sleep(1200);
       }

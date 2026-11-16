@@ -37,7 +37,7 @@ jobs:
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
       POSITION: ${{ inputs.position || '2' }}
-      DEVICES: ${{ inputs.devices || 'desktop,pixel,iphone,ipad' }}
+      DEVICES: ${{ inputs.devices || 'desktop,desktop5m,pixel5m,iphone' }}
       LABEL: ${{ inputs.label || 'branch measurement' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
