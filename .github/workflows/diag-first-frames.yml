@@ -4,7 +4,7 @@ name: Diagnostic — real websites through the shared remote browser (temporary)
 on:
   push:
     branches: ["claude/**"]
-    paths: ["scripts/diag-real-sites.mjs", ".github/workflows/diag-first-frames.yml"]
+    paths: ["scripts/diag-real-sites.mjs", "scripts/portfolio-perf.mjs", ".github/workflows/diag-first-frames.yml"]
 permissions:
   contents: read
 jobs:
@@ -35,8 +35,7 @@ jobs:
         run: node --no-warnings scripts/diag-real-sites.mjs http://localhost:8787 .dev/real.db https://geteveryinvoicepaid.com/ https://premiuminvoices.com/ https://lendingforbeginners.com/ | tee real.log
       - name: Performance (fast and 5 Mbit/s links) — Get Every Invoice Paid and Premium Invoices
         run: |
-          node --no-warnings scripts/portfolio-perf.mjs http://localhost:8787 --slug real-geteveryinvoicepaid --devices desktop,desktop5m,pixel5m,iphone,ipad --out diag-out/perf-geip.json --label "runner GEIP" 2>&1 | tail -60
-          node --no-warnings scripts/portfolio-perf.mjs http://localhost:8787 --slug real-premiuminvoices --devices desktop,pixel5m --out diag-out/perf-pi.json --label "runner PI" 2>&1 | tail -30
+          node --no-warnings scripts/portfolio-perf.mjs http://localhost:8787 --slug real-geteveryinvoicepaid --devices desktop --out diag-out/perf-geip.json --label "runner GEIP" 2>&1 | tail -12
       - name: Development server log (tail)
         if: always()
         run: tail -40 "$RUNNER_TEMP/dev.log"

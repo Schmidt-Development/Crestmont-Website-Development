@@ -41,7 +41,8 @@ for (const url of urls) {
   slugs.push(slug);
 }
 await staff.goto(BASE + "/staff/portfolio");
-await new Promise((r) => setTimeout(r, 3000));
+// The staff editor opened a preview session per site: wait until they are released before the visitor checks.
+for (let i = 0; i < 90; i++) { const st = await (await fetch(BASE + "/api/portfolio/remote-sessions/status")).json(); if (!st.active) break; if (i % 10 === 0) console.log(`waiting for ${st.active} staff preview session(s) to end`); await new Promise((r) => setTimeout(r, 1000)); }
 const sel = (slug) => `.pfx__slide[data-remote-slug="${slug}"]`;
 for (const [k, slug] of slugs.entries()) {
   for (const [label, opts] of [["desktop", { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 }], ["phone", { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }]]) {
@@ -50,6 +51,7 @@ for (const [k, slug] of slugs.entries()) {
     await p.goto(`${BASE}/portfolio/${slug}`); await p.locator(sel(slug)).scrollIntoViewIfNeeded();
     const ok = await p.waitForSelector(`${sel(slug)}[data-remote-state="live"].is-ready`, { timeout: 45000 }).then(() => true, () => false);
     const tl = Date.now() - t0;
+    if (!ok) console.log(`  status: ${await p.locator(`${sel(slug)} [data-pfx-status]`).innerText().catch(() => "")} | state ${await p.locator(sel(slug)).getAttribute("data-remote-state").catch(() => "")}`);
     const m = ok ? await p.locator(`${sel(slug)} canvas.pfx__remote`).evaluate((c) => { const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let lit = 0, n = 0; const b0 = d[0] + d[1] + d[2]; for (let i = 0; i < d.length; i += 4 * 97) { n++; if (Math.abs(d[i] + d[i + 1] + d[i + 2] - b0) > 30) lit++; } return { w: c.width, h: c.height, lit, n }; }) : null;
     console.log(`${m && m.lit >= 0.02 * m.n ? "PASS" : "FAIL"} ${urls[k]} ${label}: live after ${(tl / 1000).toFixed(1)} s, content at that moment ${m ? `${m.lit} of ${m.n} samples (${(100 * m.lit / m.n).toFixed(1)}%) at ${m.w}×${m.h}` : "— never live"}`);
     if (ok) await p.locator(`${sel(slug)} canvas.pfx__remote`).screenshot({ path: `diag-out/${slug}-${label}-at-live.png` });
