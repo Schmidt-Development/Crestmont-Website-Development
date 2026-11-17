@@ -1,0 +1,31 @@
+name: Diagnostic — first screencast frames (temporary)
+# TEMPORARY: local Chromium on the runner against the real websites (no production session, no browser-minutes).
+on:
+  push:
+    branches: ["claude/**"]
+    paths: ["scripts/diag-first-frames.mjs", ".github/workflows/diag-first-frames.yml"]
+permissions:
+  contents: read
+jobs:
+  frames:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      - env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: node scripts/diag-first-frames.mjs frames https://geteveryinvoicepaid.com/ https://premiuminvoices.com/ https://lendingforbeginners.com/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: first-frames
+          path: frames
