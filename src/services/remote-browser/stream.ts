@@ -3,8 +3,10 @@
 // (0.85–1.4 MB/s while a site merely animated) and every frame was pushed to the visitor whatever their connection
 // could carry. On an ordinary link the frames queued up and every scroll or click waited behind seconds of stale
 // pictures. This controller makes the stream demand-driven:
-//   • at most MAX_IN_FLIGHT frames are on their way to the visitor; the viewer confirms each picture it has drawn
-//     ({t:"ack", n}), so a slow link or a slow device slows the stream instead of building a backlog;
+//   • a bounded number of frames is on its way to the visitor; the viewer confirms each picture it has drawn
+//     ({t:"ack", n}), so a slow link or a slow device slows the stream instead of building a backlog. The bound adapts
+//     (1–6 frames): it grows while round trips stay near the shortest seen (no queue) and drops as soon as they grow
+//     (a queue forming) — a fixed two capped large desktop frames at ~11 fps on a link with 170 ms round trips;
 //   • while frames cannot be sent, only the NEWEST waits (older ones are dropped, never queued) and Chromium is not
 //     acknowledged, so it stops capturing and encoding pictures nobody will see. Chromium counts unacknowledged
 //     screencast frames per screencast (the sessionId names the screencast, not the frame) and keeps producing while
@@ -23,7 +25,8 @@
 //   • stall guard: a frame whose acknowledgement never comes (lost, tab frozen) is written off after STALL_MS.
 // A viewer that never says {t:"hello", v:2} (an older cached portfolio.js) keeps the original behaviour.
 
-export const MAX_IN_FLIGHT = 2;
+export const MAX_IN_FLIGHT = 6;
+export const START_IN_FLIGHT = 2;
 export const INTERACTIVE_INTERVAL_MS = 16; // ≈60 fps
 export const IDLE_INTERVAL_MS = 33;        // ≈30 fps
 export const INTERACTIVE_WINDOW_MS = 1500; // "interacting" = input within this window
@@ -41,7 +44,7 @@ export interface FlowHooks {
   clearTimer(handle: unknown): void;
 }
 
-export interface FlowStats { produced: number; sent: number; dropped: number; inFlight: number; chromeLimit: number; produceMs: number | null; lookAhead: boolean; rttMedMs: number | null; bytesSent: number; intervalMs: number; v2: boolean }
+export interface FlowStats { produced: number; sent: number; dropped: number; inFlight: number; inflightCap: number; minRttMs: number | null; chromeLimit: number; produceMs: number | null; lookAhead: boolean; rttMedMs: number | null; bytesSent: number; intervalMs: number; v2: boolean }
 
 export function frameHeader(seq: number, flags = 0): Uint8Array {
   const h = new Uint8Array(HEADER_BYTES);
@@ -69,6 +72,11 @@ export class FrameFlow {
   private timer: unknown = null;
   private sentAt = new Map<number, number>();
   private rtts: number[] = [];
+  /** Adaptive in-flight bound and the shortest recent round trip (the link without a queue). */
+  inflightCap = START_IN_FLIGHT;
+  private minRtt: number | null = null;
+  private minRttAt = 0;
+  private learn = { level: 0, count: 0 };
   produced = 0; sent = 0; dropped = 0; bytesSent = 0;
   private readonly h: FlowHooks;
   constructor(hooks: FlowHooks) { this.h = hooks; }
@@ -92,7 +100,12 @@ export class FrameFlow {
     if (!this.v2) { this.h.ackChrome(chromeId); this.sent++; this.bytesSent += bytes.length; this.h.send(bytes); return; }
     // A frame right after a guard acknowledgement: Chromium had been blocked at that level — that is its limit.
     // (Only when nothing else explains the frame: no input just before, and it came almost at once.)
-    if (this.guardAck && this.h.now() - this.guardAck.at < 60 && this.guardAck.at - this.lastInputAt > 600) this.limit = Math.max(1, Math.min(this.limit, this.guardAck.level));
+    // Never below 2 and only after three confirmations: production showed slow, irregular desktop frames on Browser Run
+    // can coincide with a guard acknowledgement (a false "limit 1" halved the frame rate).
+    if (this.guardAck && this.h.now() - this.guardAck.at < 60 && this.guardAck.at - this.lastInputAt > 600 && this.guardAck.level >= 2 && this.guardAck.level < this.limit) {
+      this.learn = this.learn.level === this.guardAck.level ? { level: this.learn.level, count: this.learn.count + 1 } : { level: this.guardAck.level, count: 1 };
+      if (this.learn.count >= 3) this.limit = this.learn.level;
+    }
     this.guardAck = null;
     if (this.blockedAckAt !== null) { const d = this.h.now() - this.blockedAckAt; this.produceMs = this.produceMs === null ? d : this.produceMs * 0.7 + d * 0.3; this.blockedAckAt = null; }
     this.inChrome++;
@@ -125,7 +138,14 @@ export class FrameFlow {
   ack(n: number, now = this.h.now()) {
     if (!Number.isInteger(n) || n <= this.acked || n > this.seq) return;
     const at = this.sentAt.get(n);
-    if (at !== undefined) { this.rtts.push(now - at); if (this.rtts.length > 60) this.rtts.shift(); }
+    if (at !== undefined) {
+      const rtt = now - at;
+      this.rtts.push(rtt); if (this.rtts.length > 60) this.rtts.shift();
+      // The link without a queue: the shortest round trip in the last 10 s.
+      if (this.minRtt === null || rtt <= this.minRtt || now - this.minRttAt > 10_000) { this.minRtt = rtt; this.minRttAt = now; }
+      if (rtt <= this.minRtt * 1.5 + 30) this.inflightCap = Math.min(MAX_IN_FLIGHT, this.inflightCap + 0.25);
+      else if (rtt > this.minRtt * 2 + 80) this.inflightCap = Math.max(1, this.inflightCap - 1);
+    }
     for (const k of this.sentAt.keys()) if (k <= n) this.sentAt.delete(k);
     this.acked = n;
     this.pump();
@@ -134,7 +154,7 @@ export class FrameFlow {
   private pump() {
     if (!this.pending) return;
     const now = this.h.now();
-    if (this.inFlight >= MAX_IN_FLIGHT) {
+    if (this.inFlight >= Math.floor(this.inflightCap)) {
       if (now - this.lastSentAt > STALL_MS) { this.acked = this.seq; this.sentAt.clear(); } // written off
       else { this.arm(STALL_MS - (now - this.lastSentAt) + 1); return; }
     }
@@ -160,7 +180,7 @@ export class FrameFlow {
 
   stats(): FlowStats {
     const s = [...this.rtts].sort((a, b) => a - b);
-    return { produced: this.produced, sent: this.sent, dropped: this.dropped, inFlight: this.inFlight, chromeLimit: this.limit, produceMs: this.produceMs === null ? null : Math.round(this.produceMs), lookAhead: this.lookAhead, rttMedMs: s.length ? Math.round(s[Math.floor((s.length - 1) / 2)]!) : null, bytesSent: this.bytesSent, intervalMs: this.intervalMs(), v2: this.v2 };
+    return { produced: this.produced, sent: this.sent, dropped: this.dropped, inFlight: this.inFlight, inflightCap: Math.floor(this.inflightCap), minRttMs: this.minRtt === null ? null : Math.round(this.minRtt), chromeLimit: this.limit, produceMs: this.produceMs === null ? null : Math.round(this.produceMs), lookAhead: this.lookAhead, rttMedMs: s.length ? Math.round(s[Math.floor((s.length - 1) / 2)]!) : null, bytesSent: this.bytesSent, intervalMs: this.intervalMs(), v2: this.v2 };
   }
 }
 

@@ -222,10 +222,13 @@ Root causes (confirmed by measurement, not assumed):
 What changed (shared code only — every current and future Mode B entry, on the homepage, /portfolio, /portfolio/:slug
 and staff previews, gets it; no website is modified):
 
-- `src/services/remote-browser/stream.ts` — **flow control**: the viewer acknowledges each picture it has drawn; at most
-  two frames are ever on their way; while one cannot be sent only the newest waits (stale ones are dropped, never
+- `src/services/remote-browser/stream.ts` — **flow control**: the viewer acknowledges each picture it has drawn; a
+  bounded number of frames is ever on its way (adaptive, 1–6: it grows while the measured round trip stays near its
+  minimum and shrinks as soon as a queue forms — a fixed two capped large desktop frames at ~11 fps on a 170 ms round
+  trip); while one cannot be sent only the newest waits (stale ones are dropped, never
   queued) and Chromium is not acknowledged, so it renders no more than it can deliver (its in-flight limit is learned
-  if a browser version differs); **look-ahead**: when Chromium takes longer to deliver a frame than the frame interval
+  if a browser version differs — never below 2 and only after three consistent observations, because a single
+  misreading on Browser Run's slower desktop rendering halved the frame rate); **look-ahead**: when Chromium takes longer to deliver a frame than the frame interval
   (measured per session — a full desktop page on Browser Run), it may prepare the next picture while the current one
   travels; **input boost**: input unblocks Chromium at once; **frame-rate caps**: 60 fps while the visitor interacts,
   30 fps otherwise (slow links are protected by the flow control, not by the cap);
@@ -271,16 +274,22 @@ First production measurement after the upgrade (release e677127, 2026-11-17 00:0
 The backlog on ordinary connections was gone, but on fast links the first version was worse: strict one-render-per-
 delivery made Browser Run wait for each desktop frame to arrive before rendering the next (its render-and-transfer time
 is far longer than the frame interval), and the 15/30 fps caps throttled fast links that did not need it. The
-follow-up keeps the flow control (≤ 2 in flight, newest wins, never a queue) and adds the look-ahead, the input boost
-and 60/30 fps caps described above.
+follow-up (#292) keeps the flow control (newest wins, never a queue) and adds the look-ahead, the input boost
+and 60/30 fps caps described above. Its production statistics (release 59175a1) showed two remaining flaws on desktop
+only: the limit learning had concluded Chromium allows one frame (it allows three — a misreading of Browser Run's
+~60 ms desktop rendering), and two frames in flight were too few for 46 KB frames on a 170 ms round trip. The third
+change makes the limit learning safe (≥ 2, three confirmations) and the in-flight bound adaptive. Server statistics
+sent to the viewer every 2 s: `produced`, `sent`, `dropped`, `inFlight`, `inflightCap`, `minRttMs`, `chromeLimit`,
+`produceMs`, `lookAhead`, `rttMedMs`, `bytesSent`, `intervalMs`, `inputMedMs`, `inputMerged`, `castWidth`, `quality`.
 
 Regression protection: `tests/portfolio-remote-stream.test.ts` (a simulated Chromium and viewer: one render per
-delivered frame, ≤ 2 in flight, a slow viewer gets fresh frames, no stall, older viewers unchanged, input merging) and
+delivered frame, a bounded number in flight, a slow viewer gets fresh frames, 46 KB desktop frames on a 1 MB/s link at
+≥ 12 fps with a 95th-percentile frame delay ≤ 250 ms, a 5 Mbit/s link used without a backlog, no stall, older viewers unchanged, input merging) and
 the CI performance gate (`scripts/remote-browser-perf-gate.mjs`, after the functional checks): on a throttled
 5 Mbit/s visitor link a scroll on a static page must show within 500 ms, a swipe within 700 ms, a scroll on an
 always-animating page within 600 ms (the pre-upgrade code did not show it within 1.6 s), Chromium may render at most
-2.2× the frames delivered (one look-ahead frame at most), the frame round trip must stay ≤ 400 ms with ≤ 2 frames in
-flight, and idle animation is capped (≤ 32 fps) and within the link. The pre-upgrade code fails this gate on four checks; the upgraded code passes it.
+2.2× the frames delivered (one look-ahead frame at most), the frame round trip must stay ≤ 400 ms with ≤ 6 frames in
+flight and a learned Chromium limit of at least 2, and idle animation is capped (≤ 32 fps) and within the link. The pre-upgrade code fails this gate on four checks; the upgraded code passes it.
 
 Remaining limits (stated plainly): the picture is still a stream from a browser in Cloudflare — a scroll or click
 needs a network round trip plus one rendered frame, so it cannot match a native site's ~1 ms scroll response; desktop
