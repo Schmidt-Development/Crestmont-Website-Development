@@ -51,7 +51,10 @@ async function openPreview(ctx, r) {
 const isLive = (p, slug, ms = 45000) => p.waitForSelector(`${sel(slug)}[data-remote-state="live"].is-ready`, { timeout: ms }).then(() => true, () => false);
 const canvasInfo = (p, slug) => p.locator(`${sel(slug)} canvas.pfx__remote`).evaluate((c) => {
   const g = c.getContext("2d"), d = g.getImageData(0, 0, c.width, c.height).data;
-  let h = 0, lit = 0; for (let i = 0; i < d.length; i += 4 * 97) { h = (h * 31 + d[i] + d[i + 1] * 7 + d[i + 2] * 13) >>> 0; if (d[i] + d[i + 1] + d[i + 2] > 30) lit++; }
+  // "lit" = samples that differ from the first one: a real picture has contrast even on a dark design; a blank canvas
+  // (nothing drawn) has none. (Counting bright samples failed on Get Every Invoice Paid's dark first screen.)
+  let h = 0, lit = 0; const b0 = d[0] + d[1] + d[2];
+  for (let i = 0; i < d.length; i += 4 * 97) { h = (h * 31 + d[i] + d[i + 1] * 7 + d[i + 2] * 13) >>> 0; if (Math.abs(d[i] + d[i + 1] + d[i + 2] - b0) > 30) lit++; }
   return { w: c.width, h: c.height, hash: h, lit };
 });
 async function aim(p, slug, x, y) {
@@ -116,7 +119,7 @@ for (const r of intake.results) {
     const p = await openPreview(ctx, r);
     if (!ok(await isLive(p, slug), `${slug} desktop: the live website is shown through the remote browser`)) { console.log(`  status: ${await p.locator(`${sel(slug)} [data-pfx-status]`).innerText().catch(() => "")}`); await ctx.close(); return; }
     let ci = await canvasInfo(p, slug);
-    ok(ci.w === 1440 && ci.lit > 50, `${slug} desktop: rendered at 1440 px (${ci.w}×${ci.h}, ${ci.lit} lit samples)`);
+    ok(ci.w === 1440 && ci.lit > 50, `${slug} desktop: rendered at 1440 px (${ci.w}×${ci.h}, ${ci.lit} samples with contrast)`);
     ok(/remote view/i.test(await p.locator(`${sel(slug)} [data-pfx-flag]`).innerText()), `${slug} desktop: labelled "Live website · remote view"`);
     // Scrolling: the remote page moves; Crestmont's page does not.
     const y0 = await outerY(p), before = ci.hash;
