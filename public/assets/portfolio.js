@@ -22,6 +22,13 @@
   if (!roots.length) return;
   const reduce = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
   const READY_TIMEOUT = 20000;
+  // A remote slide is shown only once its picture holds the website's content — not the browser's blank page, the
+  // site's bare background before it paints, or the empty first moments of an entrance animation (measured on
+  // production: Get Every Invoice Paid paints a dark empty page ~1 s before its content fades in; Premium Invoices
+  // shows a black frame before its first paint). Shown when at least CONTENT_SHARE of a coarse sample of the picture
+  // differs from its dominant colour, when Chromium reports the page's first meaningful paint, or after REVEAL_CAP_MS
+  // of frames whatever they show (a minimal page).
+  const CONTENT_SHARE = 0.03, REVEAL_CAP_MS = 6000;
   const DEVICES = { desktop: { w: 1440, pad: 0, label: "Desktop" }, tablet: { w: 820, pad: 14, label: "Tablet" }, mobile: { w: 390, pad: 14, label: "Phone" } };
 
   roots.forEach((root) => {
@@ -166,7 +173,7 @@
         c.setAttribute("aria-roledescription", "remote browser");
         c.setAttribute("aria-label", `The live ${s.dataset.name} website, shown through Crestmont's remote browser. Click, scroll, touch or type to use it; sign-in, forms and purchases are turned off.`);
         s.querySelector("[data-pfx-stage]").append(c);
-        rec = { c, g: c.getContext("2d", { alpha: false }), ws: null, ready: false, timer: 0, w: 0, h: 0, pending: null, drawing: false, starting: false, refused: false };
+        rec = { c, g: c.getContext("2d", { alpha: false }), ws: null, ready: false, timer: 0, w: 0, h: 0, pending: null, drawing: false, starting: false, refused: false, probe: null, firstAt: 0, painted: false, revealTimer: 0 };
         remotes.set(i, rec);
         bindRemoteInput(i, rec);
       }
@@ -174,7 +181,7 @@
     }
     async function connect(i, rec) {
       const s = slides[i];
-      rec.ready = false; rec.starting = true; rec.refused = false; rec.offscreen = false;
+      rec.ready = false; rec.starting = true; rec.refused = false; rec.offscreen = false; rec.firstAt = 0; rec.painted = false; clearTimeout(rec.revealTimer);
       s.classList.remove("is-ready"); delete s.dataset.unavailable; s.dataset.remoteState = "starting";
       flag(s, "Live website · remote view");
       status(s, `Starting a remote browser for the live ${s.dataset.name} website…`);
@@ -227,16 +234,35 @@
           const W = rec.w || bmp.width, H = rec.h || bmp.height;
           if (rec.c.width !== W || rec.c.height !== H) { rec.c.width = W; rec.c.height = H; }
           rec.g.drawImage(bmp, 0, 0, W, H);
+          const content = !rec.ready && hasContent(rec, bmp);
           if (bmp.close) bmp.close();
           if (bn) { rec.drawn = Math.max(rec.drawn, bn); tx(rec, { t: "ack", n: rec.drawn }); }
           if (!rec.ready) {
-            const s = slides[i];
-            rec.ready = true; rec.retried = false; clearTimeout(rec.timer); s.classList.add("is-ready"); s.dataset.remoteState = "live"; isolate(s); status(s, "");
+            if (!rec.firstAt) { rec.firstAt = performance.now(); rec.revealTimer = setTimeout(() => reveal(i, rec), REVEAL_CAP_MS); }
+            if (content || rec.painted) reveal(i, rec);
           }
           step();
         }, () => { if (bn) { rec.drawn = Math.max(rec.drawn, bn); tx(rec, { t: "ack", n: rec.drawn }); } step(); });
       };
       step();
+    }
+    // Whether a picture shows content: the share of a 64×36 sample that differs clearly from its median colour.
+    function hasContent(rec, bmp) {
+      try {
+        if (!rec.probe) { const p = document.createElement("canvas"); p.width = 64; p.height = 36; rec.probe = p.getContext("2d", { willReadFrequently: true }); }
+        rec.probe.drawImage(bmp, 0, 0, 64, 36);
+        const d = rec.probe.getImageData(0, 0, 64, 36).data, sums = new Array(d.length / 4);
+        for (let k = 0; k < sums.length; k++) sums[k] = d[k * 4] + d[k * 4 + 1] + d[k * 4 + 2];
+        const med = [...sums].sort((a, b) => a - b)[sums.length >> 1];
+        let differ = 0; for (const v of sums) if (Math.abs(v - med) > 30) differ++;
+        return differ / sums.length >= CONTENT_SHARE;
+      } catch { return true; } // a picture that cannot be inspected is shown rather than held back
+    }
+    function reveal(i, rec) {
+      if (rec.ready || !rec.ws || !rec.firstAt) return;
+      const s = slides[i];
+      clearTimeout(rec.revealTimer);
+      rec.ready = true; rec.retried = false; clearTimeout(rec.timer); s.classList.add("is-ready"); s.dataset.remoteState = "live"; isolate(s); status(s, "");
     }
     function onNotice(i, rec, text) {
       let m; try { m = JSON.parse(text); } catch { return; }
@@ -246,6 +272,7 @@
         rec.w = Number(m.w) || 0; rec.h = Number(m.h) || 0;
         if (m.t === "viewport") requestAnimationFrame(() => tx(rec, { t: "view", ...viewSize(rec) }));
       }
+      else if (m.t === "painted") { rec.painted = true; if (rec.firstAt) setTimeout(() => reveal(i, rec), 250); }
       else if (m.t === "url" && typeof m.href === "string") { try { const u = new URL(m.href); if (u.protocol === "https:") urlLabel(s, u.host + (u.pathname === "/" ? "" : u.pathname)); } catch { /* ignore */ } }
       else if (m.t === "blocked" && live) live.textContent = `${String(m.title || "That page")} — not available in the portfolio view.`;
       else if (m.t === "ended") stop(i, rec, String(m.reason || "ended"));

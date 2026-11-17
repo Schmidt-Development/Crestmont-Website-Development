@@ -48,14 +48,15 @@ async function openPreview(ctx, r) {
   await p.locator(".pfx").first().scrollIntoViewIfNeeded();
   return p;
 }
+const CONTENT_MIN = 0.02;
 const isLive = (p, slug, ms = 45000) => p.waitForSelector(`${sel(slug)}[data-remote-state="live"].is-ready`, { timeout: ms }).then(() => true, () => false);
 const canvasInfo = (p, slug) => p.locator(`${sel(slug)} canvas.pfx__remote`).evaluate((c) => {
   const g = c.getContext("2d"), d = g.getImageData(0, 0, c.width, c.height).data;
   // "lit" = samples that differ from the first one: a real picture has contrast even on a dark design; a blank canvas
   // (nothing drawn) has none. (Counting bright samples failed on Get Every Invoice Paid's dark first screen.)
-  let h = 0, lit = 0; const b0 = d[0] + d[1] + d[2];
-  for (let i = 0; i < d.length; i += 4 * 97) { h = (h * 31 + d[i] + d[i + 1] * 7 + d[i + 2] * 13) >>> 0; if (Math.abs(d[i] + d[i + 1] + d[i + 2] - b0) > 30) lit++; }
-  return { w: c.width, h: c.height, hash: h, lit };
+  let h = 0, lit = 0, n = 0; const b0 = d[0] + d[1] + d[2];
+  for (let i = 0; i < d.length; i += 4 * 97) { n++; h = (h * 31 + d[i] + d[i + 1] * 7 + d[i + 2] * 13) >>> 0; if (Math.abs(d[i] + d[i + 1] + d[i + 2] - b0) > 30) lit++; }
+  return { w: c.width, h: c.height, hash: h, lit, n };
 });
 async function aim(p, slug, x, y) {
   const c = p.locator(`${sel(slug)} canvas.pfx__remote`);
@@ -119,7 +120,9 @@ for (const r of intake.results) {
     const p = await openPreview(ctx, r);
     if (!ok(await isLive(p, slug), `${slug} desktop: the live website is shown through the remote browser`)) { console.log(`  status: ${await p.locator(`${sel(slug)} [data-pfx-status]`).innerText().catch(() => "")}`); await ctx.close(); return; }
     let ci = await canvasInfo(p, slug);
-    ok(ci.w === 1440 && ci.lit > 50, `${slug} desktop: rendered at 1440 px (${ci.w}×${ci.h}, ${ci.lit} samples with contrast)`);
+    // Content, not an empty page: at least 2% of the samples differ (measured: empty pages before their first paint or
+    // entrance animation 0–1.1% — Get Every Invoice Paid 40 of ~12,100, Premium Invoices 0 — real content 10–28%).
+    ok(ci.w === 1440 && ci.lit >= CONTENT_MIN * ci.n, `${slug} desktop: the website's content is on screen at 1440 px when it turns live (${ci.w}×${ci.h}, ${ci.lit} of ${ci.n} samples with contrast; ≥ ${Math.ceil(CONTENT_MIN * ci.n)})`);
     ok(/remote view/i.test(await p.locator(`${sel(slug)} [data-pfx-flag]`).innerText()), `${slug} desktop: labelled "Live website · remote view"`);
     // Scrolling: the remote page moves; Crestmont's page does not.
     const y0 = await outerY(p), before = ci.hash;
@@ -187,7 +190,7 @@ for (const r of intake.results) {
       const p = await openPreview(ctx, r);
       if (!ok(await isLive(p, slug), `${slug} ${label}: live through the remote browser`)) { await ctx.close(); return; }
       const ci = await until(async () => { const c = await canvasInfo(p, slug); return c.w === w ? c : null; }, 15000);
-      ok(!!ci, `${slug} ${label}: rendered at ${w} px`);
+      ok(!!ci && ci.lit >= CONTENT_MIN * ci.n, `${slug} ${label}: the website's content is on screen at ${w} px (${ci ? `${ci.lit} of ${ci.n} samples with contrast` : "not rendered at that width"})`);
       const y0 = await outerY(p), before = (await canvasInfo(p, slug)).hash;
       const cdp = await ctx.newCDPSession(p);
       // Within the part of the canvas that is on screen (on a phone it can be taller than the viewport).

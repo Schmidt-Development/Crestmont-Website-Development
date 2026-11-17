@@ -24,14 +24,20 @@ export function remoteBrowserConfig(env: { REMOTE_BROWSER?: string; REMOTE_BROWS
 }
 
 const STALE_SECONDS = 75; // a live session reports at least every 30 s; silence beyond this means it is gone
+// A reservation whose WebSocket never connected (the visitor left, or the staff editor was closed, while the remote
+// browser was starting) holds one of the few viewers until it is released: the viewer connects within a second or two,
+// so after this long it never will (measured: three such staff previews held all three viewers for a minute).
+const UNCLAIMED_SECONDS = 20;
 export type Admission = { ok: true; id: string; token: string } | { ok: false; status: number; code: "disabled" | "busy" | "budget" | "rate"; message: string };
 
 const iso = (ms: number) => new Date(ms).toISOString();
 const randomHex = (bytes: number) => [...crypto.getRandomValues(new Uint8Array(bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
 
-/** Marks sessions that stopped reporting as ended (a crashed or closed browser tab). Returns how many. */
+/** Marks sessions that stopped reporting (a crashed or closed browser tab) or were never connected as ended. Returns how many. */
 export async function expireStale(db: Db, now: number): Promise<number> {
-  const r = await db.prepare(`UPDATE remote_browser_sessions SET ended_at = ?, end_reason = 'abandoned' WHERE ended_at IS NULL AND last_seen_at < ?`).bind(iso(now), iso(now - STALE_SECONDS * 1000)).run();
+  const r = await db.prepare(`UPDATE remote_browser_sessions SET ended_at = ?, end_reason = 'abandoned'
+      WHERE ended_at IS NULL AND (last_seen_at < ? OR (started_at IS NULL AND created_at < ?))`)
+    .bind(iso(now), iso(now - STALE_SECONDS * 1000), iso(now - UNCLAIMED_SECONDS * 1000)).run();
   return (r.meta as { changes?: number } | undefined)?.changes ?? 0;
 }
 

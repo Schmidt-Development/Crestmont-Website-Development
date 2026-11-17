@@ -288,23 +288,31 @@ for (const key of DEVICES) {
     await p.goto(T.live, { waitUntil: "load", timeout: 60000 });
     const nav = await p.evaluate(() => { const n = performance.getEntriesByType("navigation")[0]; return { ttfbMs: n.responseStart, domContentLoadedMs: n.domContentLoadedEventEnd, loadMs: n.loadEventEnd }; });
     await sleep(1000);
-    const scroll = [];
+    const scroll = [], shift = [];
     await p.mouse.move(700, 450);
     for (let i = 0; i < 5; i++) {
       // Wheel event → the first rendered frame in which the page has moved (native: the next animation frame or two).
+      // Also the time until the page has moved by 1/27 of the viewport — the smallest movement the remote measurement
+      // (a 27-row picture signature) can see — so the two are compared like for like (a site that eases its scrolling
+      // takes longer to move that far, natively too).
       const pr = p.evaluate(() => new Promise((res) => {
-        const y0 = scrollY, start = performance.now(); let tw = null;
+        const y0 = scrollY, start = performance.now(), row = innerHeight / 27; let tw = null, first = null;
         addEventListener("wheel", () => { if (tw === null) tw = performance.now(); }, { capture: true, passive: true });
-        const f = () => { if (tw !== null && scrollY !== y0) res(performance.now() - tw); else if (performance.now() - start > 3000) res(null); else requestAnimationFrame(f); };
+        const f = () => {
+          if (tw !== null && first === null && scrollY !== y0) first = performance.now() - tw;
+          if (tw !== null && Math.abs(scrollY - y0) >= row) res({ first, shift: performance.now() - tw });
+          else if (performance.now() - start > 3000) res({ first, shift: null }); else requestAnimationFrame(f);
+        };
         requestAnimationFrame(f);
       }));
       await sleep(50); await p.mouse.wheel(0, 360);
       const ms = await pr;
-      scroll.push(typeof ms === "number" ? r1(ms) : null);
+      scroll.push(typeof ms.first === "number" ? r1(ms.first) : null);
+      shift.push(typeof ms.shift === "number" ? r1(ms.shift) : null);
       await sleep(600);
     }
     const fps = await p.evaluate(() => new Promise((res) => { let n = 0; const t = performance.now(); const f = () => { n++; if (performance.now() - t < 2000) requestAnimationFrame(f); else res(n / 2); }; requestAnimationFrame(f); }));
-    report.direct = { url: T.live, ...Object.fromEntries(Object.entries(nav).map(([k, v]) => [k, r1(v)])), scrollToVisibleMedMs: med(scroll), nativeFps: r1(fps) };
+    report.direct = { url: T.live, ...Object.fromEntries(Object.entries(nav).map(([k, v]) => [k, r1(v)])), scrollToVisibleMedMs: med(scroll), scrollToRowShiftMedMs: med(shift), nativeFps: r1(fps) };
   } catch (e) { report.direct = { url: T.live, error: String(e.message).split("\n")[0].slice(0, 200) }; }
   await ctx.close();
 }
@@ -320,7 +328,7 @@ for (const [k, R] of Object.entries(report.devices)) {
 const md = [`### Portfolio performance — ${LABEL} (${report.at})`, `Target: position ${POSITION} → **${T.name}** (${T.live})`, "",
   "| Device | Status | Start → first picture (ms) | Idle fps / KB/s | Scroll/swipe → visible (ms, median) | Settle after single (ms) | Continuous scroll: delivered | Settle after continuous (ms) | Click link → new page visible (ms) | Decode ms / visitor CPU |",
   "|---|---|---|---|---|---|---|---|---|---|", ...rows, "",
-  report.direct ? `Direct visit to ${report.direct.url}: TTFB ${report.direct.ttfbMs} ms, load ${report.direct.loadMs} ms, scroll → visible ${report.direct.scrollToVisibleMedMs} ms (native), ${report.direct.nativeFps} fps.` : "",
+  report.direct ? `Direct visit to ${report.direct.url}: TTFB ${report.direct.ttfbMs} ms, load ${report.direct.loadMs} ms, scroll → first movement ${report.direct.scrollToVisibleMedMs} ms, → moved 1/27 of the screen (what the remote measurement detects) ${report.direct.scrollToRowShiftMedMs} ms (native), ${report.direct.nativeFps} fps.` : "",
   ...report.notes.map((n) => `- ${n}`)].join("\n");
 console.log("\n" + md);
 if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, md + "\n", { flag: "a" });

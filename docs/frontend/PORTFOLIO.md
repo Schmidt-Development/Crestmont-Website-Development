@@ -296,6 +296,24 @@ always-animating page within 600 ms (the pre-upgrade code did not show it within
 2.2× the frames delivered (one look-ahead frame at most), the frame round trip must stay ≤ 400 ms with ≤ 6 frames in
 flight and a learned Chromium limit of at least 2, and idle animation is capped (≤ 32 fps) and within the link. The pre-upgrade code fails this gate on four checks; the upgraded code passes it.
 
+**First picture (2026-11-17, after the #293 release).** The production acceptance failed "rendered at 1440 px" on Get
+Every Invoice Paid (40 samples with contrast) and Premium Invoices (0). Recording the first screencast frames of the
+real websites after navigation (runner Chromium, the same commands as the session) showed a product defect, not a test
+artefact: the viewer turned a slide live on the first frame it drew — Chromium's blank page, then Get Every Invoice
+Paid's dark empty page (its `load` event fires ~1 s before its content fades in) or Premium Invoices' black frame
+before its first paint. Visitors saw an empty box labelled "Live website". The viewer (`portfolio.js`) now keeps the
+slide in its starting state until the picture has content (at least 3% of a 64×36 sample differs from its median
+colour), Chromium reports the page's first meaningful paint (`painted` notice from `session.ts`), or 6 s of frames have
+been drawn (a deliberately minimal page). The acceptance checks (local `remote-browser-check.mjs`, production
+`live-remote-acceptance.mjs`) require content at the moment a slide turns live — at least 2% of the samples differ
+(empty pages measured 0–1.1%, real content 10–28%) — on desktop, phones and tablet; the `late-paint` fixture (a dark
+page whose content fades in after 1.5 s) fails on the previous viewer and passes on this one. Measured on the real
+websites (GitHub runner, development server, the runner's Chromium — no production session): Get Every Invoice Paid
+turned live after 2.5 s with 8% content, Premium Invoices after 1.5 s with 11.5%, Lending for Beginners after 2.0 s
+with 9.8% (phones 24–32%). The same run showed a reservation whose WebSocket never connected (a staff editor closed
+while its preview was starting) holding a viewer for ~55 s; such reservations are now released after 20 s
+(`admission.ts`), so three abandoned previews no longer lock out every visitor for a minute.
+
 Remaining limits (stated plainly): the picture is still a stream from a browser in Cloudflare — a scroll or click
 needs a network round trip plus one rendered frame, so it cannot match a native site's ~1 ms scroll response; desktop
 frame rates are bounded by Browser Run's software rendering of the full 1440 px page (raster happens at full size even
