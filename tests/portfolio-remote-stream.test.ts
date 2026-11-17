@@ -21,27 +21,36 @@ function clock() {
 /** Chromium's screencast: renders a frame whenever its unacknowledged count allows (an always-animating page). A frame
  *  takes renderMs to capture (one at a time) and transferMs more to reach the Durable Object; acknowledgements take
  *  transferMs back. */
-function chrome(c: ReturnType<typeof clock>, limit = 3, renderMs = 10, transferMs = 0) {
+function chrome(c: ReturnType<typeof clock>, limit = 3, renderMs = 10, transferMs = 0, frameBytes = 1000) {
   const st = { inFlight: 0, produced: 0, flow: null as FrameFlow | null, busy: false };
   const tryRender = () => {
     if (st.busy || st.inFlight >= limit || !st.flow) return;
     st.busy = true; st.inFlight++;
-    c.setTimer(() => { st.busy = false; st.produced++; c.setTimer(() => st.flow!.frame(new Uint8Array(1000), 7), Math.max(1, transferMs)); tryRender(); }, renderMs);
+    c.setTimer(() => { st.busy = false; st.produced++; c.setTimer(() => st.flow!.frame(new Uint8Array(frameBytes), 7), Math.max(1, transferMs)); tryRender(); }, renderMs);
   };
   return { st, tryRender, ack: () => { c.setTimer(() => { st.inFlight = Math.max(0, st.inFlight - 1); tryRender(); }, Math.max(1, transferMs)); } };
 }
 
-/** A viewer on a link that delivers each frame after `delayMs` and acknowledges it after drawing. */
-function setup(opts: { limit?: number; delayMs?: number; v2?: boolean; renderMs?: number; transferMs?: number } = {}) {
-  const c = clock(); const ch = chrome(c, opts.limit ?? 3, opts.renderMs ?? 10, opts.transferMs ?? 0);
-  const delivered: { at: number; n: number }[] = [];
+/** A viewer on a link that delivers each frame after `delayMs` (one way) — through a queue at `bytesPerMs` when given —
+ *  and acknowledges it after drawing (the acknowledgement takes `delayMs` back). */
+function setup(opts: { limit?: number; delayMs?: number; v2?: boolean; renderMs?: number; transferMs?: number; frameBytes?: number; bytesPerMs?: number | ((t: number) => number); jitterMs?: number } = {}) {
+  const c = clock(); const ch = chrome(c, opts.limit ?? 3, opts.renderMs ?? 10, opts.transferMs ?? 0, opts.frameBytes ?? 1000);
+  const delivered: { at: number; n: number; sentAt: number }[] = [];
+  let linkFreeAt = 0;
+  let seed = 7; const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const oneWay = () => (opts.delayMs ?? 20) + (opts.jitterMs ? (rnd() - 0.5) * 2 * opts.jitterMs : 0);
   let flow!: FrameFlow;
   flow = new FrameFlow({
     now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer,
     ackChrome: () => ch.ack(),
     send: (bytes) => {
       const n = bytes[0] === 0x43 && bytes[1] === 0x4d ? new DataView(bytes.buffer, bytes.byteOffset).getUint32(4, true) : 0;
-      c.setTimer(() => { delivered.push({ at: c.now(), n }); if (n) flow.ack(n, c.now()); }, opts.delayMs ?? 20);
+      const sentAt = c.now();
+      // The link serialises frames at its speed (a queue forms when frames are sent faster than it carries them).
+      const rate = typeof opts.bytesPerMs === "function" ? opts.bytesPerMs(sentAt) : opts.bytesPerMs;
+      linkFreeAt = Math.max(sentAt, linkFreeAt) + (rate ? bytes.length / rate : 0);
+      const arrive = linkFreeAt + oneWay();
+      c.setTimer(() => { delivered.push({ at: c.now(), n, sentAt }); if (n) c.setTimer(() => flow.ack(n, c.now()), Math.max(1, oneWay())); }, Math.max(1, arrive - sentAt));
     },
   });
   if (opts.v2 !== false) flow.enableV2();
@@ -87,17 +96,69 @@ test("[PORT-006] stream: input unblocks Chromium at once (the answer to a click 
   assert.ok(ch.st.produced > before, `a frame was rendered within ${INTERACTIVE_INTERVAL_MS + 10} ms of the input`);
 });
 
-test("[PORT-006] stream: a slow viewer gets fewer, FRESH frames — never a backlog (at most 2 in flight)", () => {
-  const { c, flow, delivered } = setup({ delayMs: 400 }); // a congested link: every frame takes 0.4 s to arrive
+test("[PORT-006] stream: a slow, distant viewer gets fresh frames — never a backlog (in flight bounded)", () => {
+  const { c, flow, delivered } = setup({ delayMs: 200 }); // 0.4 s round trip
   let maxInFlight = 0;
   for (let i = 0; i < 600; i++) { c.advance(10); maxInFlight = Math.max(maxInFlight, flow.inFlight); }
   assert.ok(maxInFlight <= MAX_IN_FLIGHT, `in flight ≤ ${MAX_IN_FLIGHT} (saw ${maxInFlight})`);
-  // Input now: the next picture must arrive within one link delay + one interval, not after a queue of stale ones.
+  // Input now: the next picture must arrive within one round trip + one interval, not after a queue of stale ones.
   const t0 = c.now(); flow.input(t0);
   c.advance(2000);
   const after = delivered.filter((d) => d.at > t0);
-  assert.ok(after.length && after[0]!.at - t0 <= 400 + 400 + IDLE_INTERVAL_MS, `first frame after input in ${after[0]!.at - t0} ms`);
+  assert.ok(after.length && after[0]!.at - t0 <= 400 + IDLE_INTERVAL_MS, `first frame after input in ${after[0]!.at - t0} ms`);
   assert.ok(flow.stats().dropped > 0, "stale frames were dropped, not queued");
+});
+
+test("[PORT-006] stream: large desktop frames on a real link — more than two in flight when there is no queue (production: 46 KB, ~170 ms)", () => {
+  // Browser Run desktop page: ~60 ms to render a 46 KB frame; the visitor's link: 1 MB/s, 40 ms each way.
+  const { c, flow, delivered } = setup({ renderMs: 60, transferMs: 30, frameBytes: 46_000, bytesPerMs: 1000, delayMs: 40 });
+  c.advance(10_000);
+  const fps = delivered.filter((d) => d.at > 2000).length / 8;
+  const lat = delivered.filter((d) => d.at > 2000).map((d) => d.at - d.sentAt).sort((a, b) => a - b);
+  assert.ok(fps >= 12, `≥ 12 fps (${fps.toFixed(1)}; a fixed two in flight gave ~11 on production)`);
+  assert.ok(lat[Math.floor(lat.length * 0.95)]! <= 250, `95th percentile frame delay ${lat[Math.floor(lat.length * 0.95)]} ms (≤ 250: no queue)`);
+});
+
+test("[PORT-006] stream: a 5 Mbit/s link carries what it can and no backlog builds (the production failure before the upgrade)", () => {
+  // 625 KB/s, 30 ms each way, 30 KB frames from an always-animating page.
+  const { c, flow, delivered } = setup({ renderMs: 15, frameBytes: 30_000, bytesPerMs: 625, delayMs: 30 });
+  c.advance(10_000);
+  const late = delivered.filter((d) => d.at > 3000);
+  const lat = late.map((d) => d.at - d.sentAt).sort((a, b) => a - b);
+  const fps = late.length / 7;
+  assert.ok(fps >= 12, `the link is used: ${fps.toFixed(1)} fps of 30 KB (≈ ${Math.round(fps * 30)} of 625 KB/s)`);
+  assert.ok(lat[Math.floor(lat.length * 0.95)]! <= 300, `95th percentile frame delay ${lat[Math.floor(lat.length * 0.95)]} ms (≤ 300; before the upgrade it grew without bound)`);
+  assert.ok(flow.inflightCap <= MAX_IN_FLIGHT);
+});
+
+/** Frames per second and median / 95th-percentile frame delay (sent → arrived) of the frames that arrived in [from, to). */
+function window(delivered: { at: number; sentAt: number }[], from: number, to: number) {
+  const l = delivered.filter((d) => d.at >= from && d.at < to).map((d) => d.at - d.sentAt).sort((a, b) => a - b);
+  return { fps: l.length / ((to - from) / 1000), p50: l[l.length >> 1] ?? Infinity, p95: l[Math.floor(l.length * 0.95)] ?? Infinity };
+}
+
+test("[PORT-006] stream: when the link slows down mid-session, the backlog drains and never creeps back", () => {
+  // 5 Mbit/s → 2 Mbit/s after 5 s, 30 KB frames, 30 ms each way. On the slower link one frame takes 120 ms to send, so
+  // the queue-free frame delay is ~150 ms. Before this fix a round trip measured with frames queued became the
+  // reference after 10 s, the bound climbed back to 4 and frame delays settled at ~450 ms.
+  const { c, flow, delivered } = setup({ renderMs: 60, transferMs: 30, frameBytes: 30_000, bytesPerMs: (t) => (t < 5000 ? 625 : 250), delayMs: 30 });
+  c.advance(30_000);
+  for (const [from, to] of [[12_000, 18_000], [18_000, 24_000], [24_000, 30_000]] as const) {
+    const w = window(delivered, from, to);
+    assert.ok(w.p50 <= 250, `${from / 1000}–${to / 1000} s: median frame delay ${Math.round(w.p50)} ms (≤ 250: at most one frame queued)`);
+    assert.ok(w.p95 <= 400, `${from / 1000}–${to / 1000} s: 95th percentile ${Math.round(w.p95)} ms (≤ 400)`);
+    assert.ok(w.fps >= 6, `${from / 1000}–${to / 1000} s: ${w.fps.toFixed(1)} fps (the slower link stays in use)`);
+  }
+  assert.ok(flow.inflightCap <= 3, `in-flight bound ${flow.inflightCap} on the slow link`);
+});
+
+test("[PORT-006] stream: a fast but jittery phone link keeps its frame rate (jitter is not mistaken for a queue)", () => {
+  // 2 MB/s, 15 KB phone frames, 40 ms ± 35 ms each way, Chromium renders a phone frame in 15 ms.
+  const { c, delivered } = setup({ renderMs: 15, transferMs: 30, frameBytes: 15_000, bytesPerMs: 2000, delayMs: 40, jitterMs: 35 });
+  c.advance(20_000);
+  const w = window(delivered, 5000, 20_000);
+  assert.ok(w.fps >= 20, `${w.fps.toFixed(1)} fps (≥ 20)`);
+  assert.ok(w.p95 <= 150, `95th percentile frame delay ${Math.round(w.p95)} ms (≤ 150: jitter only, no queue)`);
 });
 
 test("[PORT-006] stream: a frame whose acknowledgement never comes does not freeze the stream", () => {

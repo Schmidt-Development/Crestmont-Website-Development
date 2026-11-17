@@ -21,7 +21,9 @@ if (s) {
   check(s.v2 === true, "the viewer and server negotiated flow control (v2)");
   check(s.produced <= s.sent * 2.2 + 5, `Chromium rendered ${s.produced} frames for ${s.sent} sent (≤ 2.2×: at most one look-ahead frame — was 3× before)`);
   check(num(s.rttMedMs) !== null && s.rttMedMs <= 400, `frame round trip (sent → drawn → acknowledged) ${s.rttMedMs} ms (≤ 400: no backlog)`);
-  check(s.inFlight <= 2, `frames in flight ${s.inFlight} (≤ 2)`);
+  check(s.inFlight <= 6, `frames in flight ${s.inFlight} (≤ 6: bounded — the bound adapts to the measured round trip)`);
+  check(num(s.inflightCap) !== null && s.inflightCap >= 1 && s.inflightCap <= 6, `adaptive in-flight bound ${s.inflightCap} (1–6)`);
+  check(num(s.chromeLimit) !== null && s.chromeLimit >= 2, `learned Chromium frame limit ${s.chromeLimit} (≥ 2 — a limit of 1 halved desktop frame rates on production)`);
 }
 // The backlog itself: on an animating page the old stream filled the link, so a scroll was not visible within 1.6 s.
 check(num(a?.scrollSingle?.visibleMedMs) !== null && a.scrollSingle.visibleMedMs <= 600, `animated page, 5 Mbit/s: wheel scroll → visible ${a?.scrollSingle?.visibleMedMs} ms (≤ 600 — not seen within 1.6 s before)`);
