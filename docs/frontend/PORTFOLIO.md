@@ -278,7 +278,12 @@ follow-up (#292) keeps the flow control (newest wins, never a queue) and adds th
 and 60/30 fps caps described above. Its production statistics (release 59175a1) showed two remaining flaws on desktop
 only: the limit learning had concluded Chromium allows one frame (it allows three — a misreading of Browser Run's
 ~60 ms desktop rendering), and two frames in flight were too few for 46 KB frames on a 170 ms round trip. The third
-change makes the limit learning safe (≥ 2, three confirmations) and the in-flight bound adaptive. Server statistics
+change makes the limit learning safe (≥ 2, three confirmations) and the in-flight bound adaptive. Its reference is
+the queue-free round trip, measured by frames that leave onto an idle link and re-measured (briefly one frame at a
+time) when no new minimum has been seen for 10 s; the bound grows only while round trips stay within 1.25× + 30 ms of
+it and shrinks above 1.5× + 60 ms. (Review before merge found that the first version reset its reference to whatever
+round trip it measured every 10 s — on a link that had slowed down, that included the queue, and frame delays crept
+back to ~450 ms in simulation; the regression tests now pin a mid-session 5 → 2 Mbit/s drop at ≤ 250 ms median.) Server statistics
 sent to the viewer every 2 s: `produced`, `sent`, `dropped`, `inFlight`, `inflightCap`, `minRttMs`, `chromeLimit`,
 `produceMs`, `lookAhead`, `rttMedMs`, `bytesSent`, `intervalMs`, `inputMedMs`, `inputMerged`, `castWidth`, `quality`.
 
