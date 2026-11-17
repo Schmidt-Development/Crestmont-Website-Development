@@ -169,14 +169,25 @@ test("[PORT-006] admission: concurrency cap, daily budget, per-visitor rate, one
   if (a2.ok) assert.equal(await claim(t.db, a2.id, a2.token, now0 + 121_000), null, "expired before connecting");
   // Abandoned sessions (no heartbeat) are ended, freeing capacity.
   assert.equal(await expireStale(t.db, now0 + 200_000), 2);
+  // A reservation that never connected frees its viewer after 20 s (not after the 75 s heartbeat window).
+  const u1 = await admit(t.db, cfg, { projectId: "pf_a", clientKey: "u1", access: "preview", now: now0 + 300_000 });
+  const u2 = await admit(t.db, cfg, { projectId: "pf_a", clientKey: "u2", access: "preview", now: now0 + 300_000 });
+  assert.ok(u1.ok && u2.ok);
+  const u3 = await admit(t.db, cfg, { projectId: "pf_a", clientKey: "u3", access: "public", now: now0 + 305_000 });
+  assert.equal(!u3.ok && u3.code, "busy", "still reserved 5 s later");
+  const u4 = await admit(t.db, cfg, { projectId: "pf_a", clientKey: "u4", access: "public", now: now0 + 321_000 });
+  assert.ok(u4.ok, "an unconnected reservation is released after 20 s");
+  if (u4.ok) assert.ok(await claim(t.db, u4.id, u4.token, now0 + 322_000), "the new visitor connects");
+  if (u1.ok) assert.equal(await claim(t.db, u1.id, u1.token, now0 + 322_000), null, "a released reservation cannot connect later");
+  await t.db.prepare(`UPDATE remote_browser_sessions SET ended_at = ?, end_reason = 'test' WHERE ended_at IS NULL`).bind(new Date(now0 + 322_000).toISOString()).run();
   assert.equal((await usage(t.db, now0 + 200_000)).active, 0);
   // Per-visitor rate.
   const r = [];
-  for (let i = 0; i < 4; i++) { const x = await admit(t.db, cfg, { projectId: "pf_a", clientKey: "same", access: "public", now: now0 + 201_000 }); r.push(x.ok ? "ok" : x.code); if (x.ok) await finish(t.db, x.id, now0 + 201_000, "test"); }
+  for (let i = 0; i < 4; i++) { const x = await admit(t.db, cfg, { projectId: "pf_a", clientKey: "same", access: "public", now: now0 + 401_000 }); r.push(x.ok ? "ok" : x.code); if (x.ok) await finish(t.db, x.id, now0 + 401_000, "test"); }
   assert.deepEqual(r, ["ok", "ok", "ok", "rate"]);
   // Daily budget: sessions that ran past the budget stop new ones.
   await t.db.prepare(`UPDATE remote_browser_sessions SET seconds = 400`).run();
-  const b = await admit(t.db, cfg, { projectId: "pf_a", clientKey: "v9", access: "public", now: now0 + 202_000 });
+  const b = await admit(t.db, cfg, { projectId: "pf_a", clientKey: "v9", access: "public", now: now0 + 402_000 });
   assert.equal(!b.ok && b.code, "budget");
   assert.equal((await admit(t.db, { ...cfg, enabled: false }, { projectId: "pf_a", clientKey: "v10", access: "public", now: now0 }) as { code?: string }).code, "disabled");
   t.close();

@@ -307,7 +307,12 @@ colour), Chromium reports the page's first meaningful paint (`painted` notice fr
 been drawn (a deliberately minimal page). The acceptance checks (local `remote-browser-check.mjs`, production
 `live-remote-acceptance.mjs`) require content at the moment a slide turns live — at least 2% of the samples differ
 (empty pages measured 0–1.1%, real content 10–28%) — on desktop, phones and tablet; the `late-paint` fixture (a dark
-page whose content fades in after 1.5 s) fails on the previous viewer and passes on this one.
+page whose content fades in after 1.5 s) fails on the previous viewer and passes on this one. Measured on the real
+websites (GitHub runner, development server, the runner's Chromium — no production session): Get Every Invoice Paid
+turned live after 2.5 s with 8% content, Premium Invoices after 1.5 s with 11.5%, Lending for Beginners after 2.0 s
+with 9.8% (phones 24–32%). The same run showed a reservation whose WebSocket never connected (a staff editor closed
+while its preview was starting) holding a viewer for ~55 s; such reservations are now released after 20 s
+(`admission.ts`), so three abandoned previews no longer lock out every visitor for a minute.
 
 Remaining limits (stated plainly): the picture is still a stream from a browser in Cloudflare — a scroll or click
 needs a network round trip plus one rendered frame, so it cannot match a native site's ~1 ms scroll response; desktop
