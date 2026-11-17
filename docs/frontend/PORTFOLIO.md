@@ -224,8 +224,11 @@ and staff previews, gets it; no website is modified):
 
 - `src/services/remote-browser/stream.ts` — **flow control**: the viewer acknowledges each picture it has drawn; at most
   two frames are ever on their way; while one cannot be sent only the newest waits (stale ones are dropped, never
-  queued) and Chromium is not acknowledged, so it renders one picture per picture delivered (its in-flight limit is
-  learned if a browser version differs); **frame-rate caps**: 30 fps while the visitor interacts, 15 fps otherwise;
+  queued) and Chromium is not acknowledged, so it renders no more than it can deliver (its in-flight limit is learned
+  if a browser version differs); **look-ahead**: when Chromium takes longer to deliver a frame than the frame interval
+  (measured per session — a full desktop page on Browser Run), it may prepare the next picture while the current one
+  travels; **input boost**: input unblocks Chromium at once; **frame-rate caps**: 60 fps while the visitor interacts,
+  30 fps otherwise (slow links are protected by the flow control, not by the cap);
   **input queue**: pointer moves and touch moves keep only the newest position, wheel steps add up, clicks and keys
   keep their order, one dispatch at a time (no stale input backlog); native base64 decoding.
 - `src/services/remote-browser/session.ts` — frames captured no larger than the viewer's canvas is shown (device
@@ -246,17 +249,38 @@ and staff previews, gets it; no website is modified):
   are rate-limited per link instead of per address; public visitors keep the per-address limit.
 - Older cached viewers (no hello) keep the original behaviour until they reload.
 
-Budgets and cost are unchanged: 3 concurrent sessions, 20 browser-minutes a day, inside the Workers Paid allowance —
-the stream now uses roughly a third to half of the bandwidth for an animating site, and Browser Run renders a third of
-the frames it did.
+Budgets and cost are unchanged: 3 concurrent sessions, 20 browser-minutes a day, inside the Workers Paid allowance.
+Bandwidth for an animating site is bounded by the 30 fps idle cap and by what the visitor's link can take (it was
+0.83–1.4 MB/s before regardless of the link). Known limit: on 2026-11-16 the 20 browser-minutes were used up by the
+day's measurements, release checks and visits, after which visitors saw the honest "today's viewing time has been used
+up" fallback until midnight UTC — a published Mode B entry consumes browser time for every visitor who opens it, so the
+daily budget may need raising as traffic grows (a cost decision for the Owner, see the cost table above).
+
+First production measurement after the upgrade (release e677127, 2026-11-17 00:01 UTC, same harness and device set):
+
+| Get Every Invoice Paid, slot #2 | Before | After e677127 |
+|---|---|---|
+| Desktop on 5 Mbit/s: scroll → visible (median) | 855 ms | **330 ms** |
+| Android-sized on 5 Mbit/s: swipe → visible | 1,095 ms | **298 ms** |
+| Desktop on 5 Mbit/s: continuous scroll | 2.4 s to show | 0.54 s settle |
+| Idle bandwidth (desktop / iPhone-sized, fast link) | 831 / 1,301 KB/s | 260 / 303 KB/s |
+| Desktop, fast link: idle animation | 13 fps | **5.8 fps (worse)** |
+| Desktop, fast link: scroll → visible | 317 ms | **405 ms (worse)** |
+| iPhone-sized, fast link: swipe → visible / animation | 169 ms / 60 fps | **322 ms / 15 fps (worse)** |
+
+The backlog on ordinary connections was gone, but on fast links the first version was worse: strict one-render-per-
+delivery made Browser Run wait for each desktop frame to arrive before rendering the next (its render-and-transfer time
+is far longer than the frame interval), and the 15/30 fps caps throttled fast links that did not need it. The
+follow-up keeps the flow control (≤ 2 in flight, newest wins, never a queue) and adds the look-ahead, the input boost
+and 60/30 fps caps described above.
 
 Regression protection: `tests/portfolio-remote-stream.test.ts` (a simulated Chromium and viewer: one render per
 delivered frame, ≤ 2 in flight, a slow viewer gets fresh frames, no stall, older viewers unchanged, input merging) and
 the CI performance gate (`scripts/remote-browser-perf-gate.mjs`, after the functional checks): on a throttled
 5 Mbit/s visitor link a scroll on a static page must show within 500 ms, a swipe within 700 ms, a scroll on an
 always-animating page within 600 ms (the pre-upgrade code did not show it within 1.6 s), Chromium may render at most
-1.5× the frames delivered, the frame round trip must stay ≤ 400 ms with ≤ 2 frames in flight, and idle animation is
-capped (≤ 17 fps, ≤ 400 KB/s). The pre-upgrade code fails this gate on four checks; the upgraded code passes it.
+2.2× the frames delivered (one look-ahead frame at most), the frame round trip must stay ≤ 400 ms with ≤ 2 frames in
+flight, and idle animation is capped (≤ 32 fps) and within the link. The pre-upgrade code fails this gate on four checks; the upgraded code passes it.
 
 Remaining limits (stated plainly): the picture is still a stream from a browser in Cloudflare — a scroll or click
 needs a network round trip plus one rendered frame, so it cannot match a native site's ~1 ms scroll response; desktop

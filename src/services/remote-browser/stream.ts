@@ -13,14 +13,19 @@
 //     for each picture delivered (measured before this change: three rendered for every one sent). If a browser
 //     version stops earlier, a frame that follows a guard acknowledgement at once reveals the lower limit, which is
 //     then used;
-//   • a frame-rate cap: 30 fps while the visitor is interacting, 15 fps otherwise (an animating site does not need
-//     more to look smooth in a portfolio preview, and it frees the shared browser for the visitor's input);
+//   • a frame-rate cap: 60 fps while the visitor is interacting, 30 fps otherwise (slow links are protected by the flow
+//     control above, not by the cap; production showed 15 fps made animations visibly choppier on fast links);
+//   • look-ahead: where Chromium takes longer to deliver a frame than the frame interval (measured per session: a full
+//     desktop page on Browser Run), it may prepare the next picture while the current one travels, instead of waiting
+//     for it — production measurement showed strict one-at-a-time halved the desktop frame rate;
+//   • input boost: visitor input unblocks Chromium at once, so the picture answering a click or scroll is rendered
+//     immediately rather than after the next scheduled frame;
 //   • stall guard: a frame whose acknowledgement never comes (lost, tab frozen) is written off after STALL_MS.
 // A viewer that never says {t:"hello", v:2} (an older cached portfolio.js) keeps the original behaviour.
 
 export const MAX_IN_FLIGHT = 2;
-export const INTERACTIVE_INTERVAL_MS = 33; // ≈30 fps
-export const IDLE_INTERVAL_MS = 66;        // ≈15 fps
+export const INTERACTIVE_INTERVAL_MS = 16; // ≈60 fps
+export const IDLE_INTERVAL_MS = 33;        // ≈30 fps
 export const INTERACTIVE_WINDOW_MS = 1500; // "interacting" = input within this window
 export const STALL_MS = 2000;
 /** v2 binary frame header: "CM", flags, reserved, then the frame number (uint32 little-endian). */
@@ -36,7 +41,7 @@ export interface FlowHooks {
   clearTimer(handle: unknown): void;
 }
 
-export interface FlowStats { produced: number; sent: number; dropped: number; inFlight: number; chromeLimit: number; rttMedMs: number | null; bytesSent: number; intervalMs: number; v2: boolean }
+export interface FlowStats { produced: number; sent: number; dropped: number; inFlight: number; chromeLimit: number; produceMs: number | null; lookAhead: boolean; rttMedMs: number | null; bytesSent: number; intervalMs: number; v2: boolean }
 
 export function frameHeader(seq: number, flags = 0): Uint8Array {
   const h = new Uint8Array(HEADER_BYTES);
@@ -56,6 +61,9 @@ export class FrameFlow {
   limit = 3;
   private guard: unknown = null;
   private guardAck: { at: number; level: number } | null = null;
+  /** Time from acknowledging a blocked Chromium to its next frame (render + transfer), smoothed. */
+  produceMs: number | null = null;
+  private blockedAckAt: number | null = null;
   private lastSentAt = -Infinity;
   private lastInputAt = -Infinity;
   private timer: unknown = null;
@@ -68,7 +76,13 @@ export class FrameFlow {
   get inFlight() { return this.seq - this.acked; }
   intervalMs(now = this.h.now()) { return now - this.lastInputAt < INTERACTIVE_WINDOW_MS ? INTERACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS; }
   /** Visitor input: the stream switches to the interactive rate at once. */
-  input(now = this.h.now()) { const wasIdle = this.intervalMs(now) === IDLE_INTERVAL_MS; this.lastInputAt = now; if (wasIdle) this.pump(); }
+  input(now = this.h.now()) {
+    this.lastInputAt = now;
+    if (!this.v2) return;
+    // Input boost: let Chromium render the answer to this input now (it may be blocked at its limit while idle).
+    if (!this.pending && this.inChrome >= this.limit) this.ackOnce();
+    this.pump();
+  }
   enableV2() { this.v2 = true; }
 
   /** A frame from Chromium (JPEG bytes) with its screencast session id. */
@@ -80,6 +94,7 @@ export class FrameFlow {
     // (Only when nothing else explains the frame: no input just before, and it came almost at once.)
     if (this.guardAck && this.h.now() - this.guardAck.at < 60 && this.guardAck.at - this.lastInputAt > 600) this.limit = Math.max(1, Math.min(this.limit, this.guardAck.level));
     this.guardAck = null;
+    if (this.blockedAckAt !== null) { const d = this.h.now() - this.blockedAckAt; this.produceMs = this.produceMs === null ? d : this.produceMs * 0.7 + d * 0.3; this.blockedAckAt = null; }
     this.inChrome++;
     this.armGuard();
     // Newest wins: an unsent older frame is dropped (it is never acknowledged on its own).
@@ -89,7 +104,13 @@ export class FrameFlow {
   }
   /** A new screencast (device or size change) starts with nothing in flight. */
   restarted() { this.inChrome = 0; this.guardAck = null; }
-  private ackOnce() { if (this.inChrome > 0) { this.inChrome--; this.h.ackChrome(this.chromeId); } }
+  private ackOnce() {
+    if (this.inChrome <= 0) return;
+    if (this.inChrome >= this.limit) this.blockedAckAt = this.h.now();
+    this.inChrome--; this.h.ackChrome(this.chromeId);
+  }
+  /** Chromium may prepare one frame ahead when it is slower than the frame interval. */
+  private get lookAhead() { return this.produceMs !== null && this.produceMs > this.intervalMs(); }
   /** If nothing arrives for a while with acknowledgements withheld, give one: a still page does not answer (nothing
    *  changed); a blocked browser answers at once with a frame, which teaches the limit (see frame()). */
   private armGuard() {
@@ -127,8 +148,9 @@ export class FrameFlow {
     this.lastSentAt = now; this.sentAt.set(n, now);
     this.sent++; this.bytesSent += bytes.length;
     this.h.send(out);
-    // Only now may Chromium capture the next picture: it is never ahead of what can be delivered.
+    // Only now may Chromium capture the next picture: never more than one (two with look-ahead) beyond what is delivered.
     if (this.inChrome >= this.limit) this.ackOnce();
+    if (this.lookAhead && this.inChrome >= this.limit - 1) this.ackOnce();
   }
   private arm(ms: number) {
     if (this.timer !== null) return;
@@ -138,7 +160,7 @@ export class FrameFlow {
 
   stats(): FlowStats {
     const s = [...this.rtts].sort((a, b) => a - b);
-    return { produced: this.produced, sent: this.sent, dropped: this.dropped, inFlight: this.inFlight, chromeLimit: this.limit, rttMedMs: s.length ? Math.round(s[Math.floor((s.length - 1) / 2)]!) : null, bytesSent: this.bytesSent, intervalMs: this.intervalMs(), v2: this.v2 };
+    return { produced: this.produced, sent: this.sent, dropped: this.dropped, inFlight: this.inFlight, chromeLimit: this.limit, produceMs: this.produceMs === null ? null : Math.round(this.produceMs), lookAhead: this.lookAhead, rttMedMs: s.length ? Math.round(s[Math.floor((s.length - 1) / 2)]!) : null, bytesSent: this.bytesSent, intervalMs: this.intervalMs(), v2: this.v2 };
   }
 }
 

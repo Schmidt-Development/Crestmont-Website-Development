@@ -23,7 +23,8 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
   try {
     const states = await checkLocation(p, base, "/portfolio", name, ok);
     const names = Object.keys(states);
-    ok(names.length === expected, `${name}: ${names.length} published projects on /portfolio (${names.join(", ")})`);
+    // At least the projects known at release time (a newly published project must not fail the release check).
+    ok(names.length >= expected, `${name}: ${names.length} published projects on /portfolio, at least ${expected} expected (${names.join(", ")})`);
     for (const [n, s] of Object.entries(states)) ok(s === "interactive", `${name} · ${n}: the INTERACTIVE website is shown (state ${s}), not the screenshot`);
     // Projects that must show their REAL live website: on /portfolio and on the case study, the frame is the live origin.
     for (const slug of mustBeLive) {

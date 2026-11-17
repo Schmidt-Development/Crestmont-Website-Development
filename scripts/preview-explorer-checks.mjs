@@ -22,7 +22,9 @@ async function settle(p) {
   for (;;) {
     const s = await p.evaluate(() => {
       const sl = document.querySelector(".pfx__slide:not([inert])");
-      if (!sl.dataset.frameUrl && !sl.dataset.demoUrl) return "no-demo";
+      if (!sl.dataset.frameUrl && !sl.dataset.demoUrl && !sl.dataset.remoteSlug) return "no-demo";
+      // Mode B (remote browser): interactive once the live picture is drawn; refused (busy, budget) is reported as such.
+      if (sl.dataset.remoteSlug && sl.dataset.remoteState === "unavailable") return "unavailable";
       if (sl.classList.contains("is-ready")) return "interactive";
       if (sl.dataset.unavailable === "true") return "unavailable";
       return "loading";
@@ -36,8 +38,8 @@ async function frameGeometry(p) {
   return p.evaluate(() => {
     const root = document.querySelector(".pfx"), sl = root.querySelector(".pfx__slide:not([inert])");
     const scr = sl.querySelector("[data-pfx-screen]").getBoundingClientRect(), st = sl.querySelector("[data-pfx-stage]").getBoundingClientRect();
-    const media = [...sl.querySelectorAll("[data-pfx-stage] > iframe, [data-pfx-stage] > img")].filter((e) => getComputedStyle(e).display !== "none" && getComputedStyle(e).visibility !== "hidden" && e.getBoundingClientRect().width > 0);
-    const top = sl.classList.contains("is-ready") ? media.find((m) => m.tagName === "IFRAME") : media.find((m) => m.tagName === "IMG");
+    const media = [...sl.querySelectorAll("[data-pfx-stage] > iframe, [data-pfx-stage] > canvas, [data-pfx-stage] > img")].filter((e) => getComputedStyle(e).display !== "none" && getComputedStyle(e).visibility !== "hidden" && e.getBoundingClientRect().width > 0);
+    const top = sl.classList.contains("is-ready") ? media.find((m) => m.tagName === "IFRAME" || m.tagName === "CANVAS") : media.find((m) => m.tagName === "IMG");
     const prev = root.querySelector("[data-pfx-prev]")?.getBoundingClientRect(), next = root.querySelector("[data-pfx-next]")?.getBoundingClientRect();
     const m = top?.getBoundingClientRect();
     return {

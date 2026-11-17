@@ -18,20 +18,22 @@ function clock() {
   };
 }
 
-/** Chromium's screencast: renders a frame whenever its unacknowledged count allows (an always-animating page). */
-function chrome(c: ReturnType<typeof clock>, limit = 3, renderMs = 10) {
+/** Chromium's screencast: renders a frame whenever its unacknowledged count allows (an always-animating page). A frame
+ *  takes renderMs to capture (one at a time) and transferMs more to reach the Durable Object; acknowledgements take
+ *  transferMs back. */
+function chrome(c: ReturnType<typeof clock>, limit = 3, renderMs = 10, transferMs = 0) {
   const st = { inFlight: 0, produced: 0, flow: null as FrameFlow | null, busy: false };
   const tryRender = () => {
     if (st.busy || st.inFlight >= limit || !st.flow) return;
-    st.busy = true;
-    c.setTimer(() => { st.busy = false; st.inFlight++; st.produced++; st.flow!.frame(new Uint8Array(1000), 7); tryRender(); }, renderMs);
+    st.busy = true; st.inFlight++;
+    c.setTimer(() => { st.busy = false; st.produced++; c.setTimer(() => st.flow!.frame(new Uint8Array(1000), 7), Math.max(1, transferMs)); tryRender(); }, renderMs);
   };
-  return { st, tryRender, ack: () => { st.inFlight = Math.max(0, st.inFlight - 1); tryRender(); } };
+  return { st, tryRender, ack: () => { c.setTimer(() => { st.inFlight = Math.max(0, st.inFlight - 1); tryRender(); }, Math.max(1, transferMs)); } };
 }
 
 /** A viewer on a link that delivers each frame after `delayMs` and acknowledges it after drawing. */
-function setup(opts: { limit?: number; delayMs?: number; v2?: boolean; renderMs?: number } = {}) {
-  const c = clock(); const ch = chrome(c, opts.limit ?? 3, opts.renderMs ?? 10);
+function setup(opts: { limit?: number; delayMs?: number; v2?: boolean; renderMs?: number; transferMs?: number } = {}) {
+  const c = clock(); const ch = chrome(c, opts.limit ?? 3, opts.renderMs ?? 10, opts.transferMs ?? 0);
   const delivered: { at: number; n: number }[] = [];
   let flow!: FrameFlow;
   flow = new FrameFlow({
@@ -47,22 +49,42 @@ function setup(opts: { limit?: number; delayMs?: number; v2?: boolean; renderMs?
   return { c, ch, flow, delivered };
 }
 
-test("[PORT-006] stream: one picture rendered per picture delivered — Chromium is never ahead of the viewer", () => {
-  const { c, ch, flow } = setup();
+test("[PORT-006] stream: one picture rendered per picture delivered when Chromium is fast — never ahead of the viewer", () => {
+  const { c, ch, flow } = setup({ renderMs: 5 });
   c.advance(5000);
   const s = flow.stats();
-  assert.ok(s.sent > 50, `frames flow (${s.sent})`);
-  assert.ok(ch.st.produced <= s.sent + 4, `rendered ${ch.st.produced} for ${s.sent} sent (was 3:1 before)`);
+  assert.ok(s.sent > 100, `frames flow (${s.sent})`);
+  assert.ok(ch.st.produced <= s.sent * 1.1 + 4, `rendered ${ch.st.produced} for ${s.sent} sent (was 3:1 before)`);
 });
 
-test("[PORT-006] stream: idle 15 fps, interacting 30 fps — an animating site does not flood the link", () => {
-  const { c, flow } = setup();
+test("[PORT-006] stream: a slow Chromium (a full desktop page) keeps its full frame rate — it prepares one frame ahead", () => {
+  // Measured on production: ~75 ms to render a 1440 px frame, plus transfer to the Durable Object.
+  const { c, ch, flow } = setup({ renderMs: 75, transferMs: 60 });
+  c.advance(10_000);
+  const s = flow.stats();
+  assert.ok(s.sent >= 100, `≥ 10 fps delivered (${s.sent / 10} fps; one-at-a-time gives ~1000/(75+2·60) ≈ 5 fps)`);
+  assert.equal(s.lookAhead, true, `look-ahead engaged (produce ${s.produceMs} ms > interval)`);
+  assert.ok(ch.st.produced <= s.sent * 2 + 4, `at most one extra render per frame (${ch.st.produced} for ${s.sent})`);
+});
+
+test("[PORT-006] stream: idle 30 fps, interacting 60 fps — an animating site does not flood the link", () => {
+  const { c, flow } = setup({ renderMs: 5 });
   c.advance(4000);
   const idle = flow.stats().sent;
-  assert.ok(idle >= 55 && idle <= 62, `idle: ${idle} frames in 4 s (cap ${1000 / IDLE_INTERVAL_MS} fps)`);
+  assert.ok(idle >= 110 && idle <= 124, `idle: ${idle} frames in 4 s (cap ${Math.round(1000 / IDLE_INTERVAL_MS)} fps)`);
   for (let i = 0; i < 40; i++) { flow.input(c.now()); c.advance(50); } // 2 s of input
   const busy = flow.stats().sent - idle;
-  assert.ok(busy >= 50 && busy <= 62, `interacting: ${busy} frames in 2 s (cap ${Math.round(1000 / INTERACTIVE_INTERVAL_MS)} fps)`);
+  assert.ok(busy >= 100 && busy <= 126, `interacting: ${busy} frames in 2 s (cap ${Math.round(1000 / INTERACTIVE_INTERVAL_MS)} fps)`);
+});
+
+test("[PORT-006] stream: input unblocks Chromium at once (the answer to a click is rendered immediately)", () => {
+  const { c, ch, flow } = setup({ renderMs: 5, delayMs: 20 });
+  c.advance(2000);
+  const before = ch.st.produced;
+  // A still moment: Chromium at its limit with nothing pending, then input.
+  flow.input(c.now());
+  c.advance(INTERACTIVE_INTERVAL_MS + 10); // one interactive interval + render + acknowledgement
+  assert.ok(ch.st.produced > before, `a frame was rendered within ${INTERACTIVE_INTERVAL_MS + 10} ms of the input`);
 });
 
 test("[PORT-006] stream: a slow viewer gets fewer, FRESH frames — never a backlog (at most 2 in flight)", () => {
