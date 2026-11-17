@@ -112,6 +112,9 @@ export class RemoteSession {
       });
       c.on("Page.navigatedWithinDocument", (p, sid) => { if (sid === s && p.frameId === this.target) this.notify({ t: "url", href: String(p.url ?? "") }); });
       c.on("Page.loadEventFired", (_p, sid) => { if (sid === s) this.notify({ t: "loaded" }); });
+      // The page's first meaningful paint: the viewer may show the picture (portfolio.js holds the slide back until
+      // the picture has content — "load" is no such signal: Get Every Invoice Paid fires it before its content appears).
+      c.on("Page.lifecycleEvent", (p, sid) => { if (sid === s && p.frameId === this.target && p.name === "firstMeaningfulPaint") this.notify({ t: "painted" }); });
       c.on("Page.javascriptDialogOpening", (_p, sid) => { if (sid === s) void c.send("Page.handleJavaScriptDialog", { accept: false }, s).catch(() => undefined); });
       c.on("Inspector.targetCrashed", (_p, sid) => { if (sid === s) void this.end("crashed"); });
       // Everything the policy needs is in place before the first request (guard script, interception, emulation).
@@ -119,6 +122,7 @@ export class RemoteSession {
       // images, styles, fonts and scripts from public https hosts load without a round trip to Crestmont.
       await Promise.all([
         c.send("Page.enable", {}, s),
+        c.send("Page.setLifecycleEventsEnabled", { enabled: true }, s).catch(() => undefined),
         c.send("Page.addScriptToEvaluateOnNewDocument", { source: GUARD_SCRIPT }, s),
         c.send("Page.setInterceptFileChooserDialog", { enabled: true }, s).catch(() => undefined),
         this.enableInterception(),

@@ -91,7 +91,7 @@ async function publish(name) {
 }
 
 // ── 1. Automatic mode selection in the normal Add workflow ──
-for (const name of ["fa-none", "xfo-deny", "heavy-js", "allowed", "unavailable"]) {
+for (const name of ["fa-none", "xfo-deny", "heavy-js", "late-paint", "allowed", "unavailable"]) {
   await check(`add ${name}: automatic mode = ${EXPECTED_MODE[name]}`, async () => {
     const r = await addProject(name);
     assert.equal(r.mode, EXPECTED_MODE[name], `display mode recorded (${r.reason.slice(0, 200)})`);
@@ -113,7 +113,7 @@ for (const name of ["fa-none", "xfo-deny", "heavy-js", "allowed", "unavailable"]
 }
 // Leave the staff editor so its preview session is released before the visitor checks.
 await staff.goto(BASE + "/staff/portfolio");
-await check("publish the blocked sites through the normal requirements (no screenshots needed in Mode B)", async () => { for (const n of ["fa-none", "xfo-deny", "heavy-js"]) await publish(n); await staff.goto(BASE + "/staff/portfolio"); });
+await check("publish the blocked sites through the normal requirements (no screenshots needed in Mode B)", async () => { for (const n of ["fa-none", "xfo-deny", "heavy-js", "late-paint"]) await publish(n); await staff.goto(BASE + "/staff/portfolio"); });
 await until("staff preview sessions released", async () => ({ ok: (await activeSessions()) === 0, v: await activeSessions() }), 20000).catch(() => undefined);
 
 // ── Visitor helpers ──
@@ -128,6 +128,12 @@ async function aim(page, slug, x, y) {
 }
 const live = (page, slug, ms = 40000) => page.waitForSelector(`${slideSel(slug)}[data-remote-state="live"].is-ready`, { timeout: ms });
 const outerY = (page) => page.evaluate(() => Math.round(window.scrollY));
+// The production acceptance's measure (scripts/live-remote-acceptance.mjs): samples that differ from the first one.
+const contrastSamples = (page, slug) => page.locator(`${slideSel(slug)} canvas.pfx__remote`).evaluate((c) => {
+  const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let lit = 0, n = 0; const b0 = d[0] + d[1] + d[2];
+  for (let i = 0; i < d.length; i += 4 * 97) { n++; if (Math.abs(d[i] + d[i + 1] + d[i + 2] - b0) > 30) lit++; }
+  return { lit, n };
+});
 async function visitor(opts = { viewport: { width: 1280, height: 900 } }) { const c = await browser.newContext(opts); return { c, p: await c.newPage() }; }
 async function openCase(page, slug) {
   await page.goto(`${BASE}/portfolio/${slug}`);
@@ -212,6 +218,21 @@ await check("closed visitors are cleaned up (sessions ended, browsers closed)", 
   await until("no active sessions", async () => ({ ok: (await activeSessions()) === 0, v: await activeSessions() }), 15000);
   await until("no local browsers", async () => { const r = await json("/__dev/remote-fixtures/browsers"); return { ok: r.running === 0, v: r }; }, 15000);
 });
+
+// ── 2b. A website that paints late (production: Get Every Invoice Paid paints a dark empty page ~1 s before its
+// content fades in; Premium Invoices a black frame before its first paint). The slide must not be shown as live until
+// its content is on screen — the visitor never sees an empty box labelled "Live website".
+{
+  const { c, p } = await visitor({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+  await check("a website that paints late is shown live only once its content is on screen (desktop, 1440 px)", async () => {
+    await p.goto(`${BASE}/portfolio/rb-late-paint`);
+    await p.locator(slideSel("rb-late-paint")).scrollIntoViewIfNeeded();
+    await live(p, "rb-late-paint");
+    const { lit, n } = await contrastSamples(p, "rb-late-paint");
+    assert.ok(lit >= 0.02 * n, `content on screen at the moment the slide turned live (${lit} of ${n} samples with contrast, ≥ 2%; the empty dark page has ~1%)`);
+  });
+  await c.close();
+}
 
 // ── 3. Heavy JavaScript animation and a long page ──
 {

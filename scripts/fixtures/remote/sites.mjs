@@ -8,11 +8,13 @@
 //   fa-none       Content-Security-Policy: frame-ancestors 'none'        → Mode B (remote)
 //   xfo-deny      X-Frame-Options: DENY, a long page                     → Mode B (remote)
 //   heavy-js      frame-ancestors 'none', continuous JS + CSS animation  → Mode B (remote)
+//   late-paint    frame-ancestors 'none', a dark empty page whose content fades in after 1.5 s (as Get Every Invoice
+//                 Paid does on production)                                → Mode B (remote)
 //   allowed       frame-ancestors <Crestmont origin>                     → Mode A (native embed)
 //   unavailable   does not answer                                        → Mode C (honest fallback)
 export const FIXTURE_DOMAIN = "fixture-portfolio.com";
-export const FIXTURES = ["fa-none", "xfo-deny", "heavy-js", "allowed", "unavailable"];
-export const EXPECTED_MODE = { "fa-none": "remote", "xfo-deny": "remote", "heavy-js": "remote", allowed: "embed", unavailable: "unavailable" };
+export const FIXTURES = ["fa-none", "xfo-deny", "heavy-js", "late-paint", "allowed", "unavailable"];
+export const EXPECTED_MODE = { "fa-none": "remote", "xfo-deny": "remote", "heavy-js": "remote", "late-paint": "remote", allowed: "embed", unavailable: "unavailable" };
 
 // Fixed, known positions (CSS px of the remote page) so the check can aim at them at any device width (≥ 390).
 export const LAYOUT = {
@@ -36,6 +38,7 @@ const page = (name, path, opts) => `<!doctype html><html lang="en"><head><meta c
   #pw{position:absolute;left:230px;top:160px;width:140px;height:40px}
   main{padding-top:300px;min-height:${opts.long ? 9000 : 4000}px;background:linear-gradient(#f4f1ea,#a8dadc)}
   #end{position:absolute;left:10px;top:${opts.long ? 8900 : 3900}px} #layout{position:absolute;left:230px;top:85px}
+  ${opts.late ? "html,body{background:#0b1220} body>*{opacity:0} body.in>*{opacity:1;transition:opacity .4s}" : ""}
   ${opts.anim ? "#spin{position:absolute;left:230px;top:220px;width:60px;height:60px;background:#2a9d8f;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}} #anim{position:absolute;left:0;top:300px;width:100%;height:200px}" : ""}
 </style></head><body>
 <header><a id="about" href="/about">About</a><a id="login" href="/login">Sign in</a><a id="external" href="https://elsewhere.fixture-portfolio.net/">Partner</a><a id="download" href="/files/brochure.pdf" download>Brochure</a></header>
@@ -56,6 +59,7 @@ const page = (name, path, opts) => `<!doctype html><html lang="en"><head><meta c
   addEventListener("touchstart", () => { S.touches++; report(); }, { passive: true });
   addEventListener("resize", () => { S.w = innerWidth; report(); });
   ${opts.anim ? `const c = document.getElementById("anim").getContext("2d"); const loop = (ts) => { S.raf++; c.fillStyle = "hsl(" + ((ts / 8) % 360) + ",70%,50%)"; c.fillRect(0, 0, 1440, 200); for (let i = 0; i < 2000; i++) Math.sqrt(i * ts); if (S.raf % 30 === 0) report(); requestAnimationFrame(loop); }; requestAnimationFrame(loop);` : ""}
+  ${opts.late ? 'setTimeout(() => document.body.classList.add("in"), 1500);' : ""}
   report();
 </script></body></html>`;
 
@@ -78,8 +82,8 @@ export function fixtureResponse(url, origin) {
     state.set(u.hostname, { ...prev, privateReached: u.pathname });
   }
   const headers = { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" };
-  if (name === "fa-none" || name === "heavy-js") headers["content-security-policy"] = "frame-ancestors 'none'";
+  if (name === "fa-none" || name === "heavy-js" || name === "late-paint") headers["content-security-policy"] = "frame-ancestors 'none'";
   if (name === "xfo-deny") headers["x-frame-options"] = "DENY";
   if (name === "allowed") headers["content-security-policy"] = `frame-ancestors 'self' ${origin}`;
-  return { status: 200, headers, body: page(name, u.pathname, { long: name === "xfo-deny", anim: name === "heavy-js" }) };
+  return { status: 200, headers, body: page(name, u.pathname, { long: name === "xfo-deny", anim: name === "heavy-js", late: name === "late-paint" }) };
 }
