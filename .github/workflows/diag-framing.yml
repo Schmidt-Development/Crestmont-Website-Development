@@ -1,0 +1,27 @@
+name: Diagnostic — framing headers of the portfolio websites (temporary, read-only)
+on:
+  push:
+    branches: ["claude/**"]
+    paths: [".github/workflows/diag-framing.yml"]
+permissions:
+  contents: read
+jobs:
+  headers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Response headers (GET, no cookies; nothing submitted)
+        run: |
+          probe() { # url
+            out=$(curl -s -o /dev/null -D - --max-time 20 -A "Mozilla/5.0 (Crestmont portfolio framing check)" "$1" | tr -d '\r')
+            code=$(echo "$out" | head -1 | awk '{print $2}')
+            loc=$(echo "$out" | grep -i '^location:' | head -1 | cut -d' ' -f2-)
+            xfo=$(echo "$out" | grep -i '^x-frame-options:' | head -1 | cut -d' ' -f2-)
+            fa=$(echo "$out" | grep -i '^content-security-policy:' | grep -o "frame-ancestors[^;]*" | head -1)
+            srv=$(echo "$out" | grep -iE '^(server|x-vercel-id|cf-ray|x-powered-by):' | cut -d: -f1 | tr '\n' ' ')
+            echo "$code | $1 | XFO=${xfo:-—} | ${fa:-no frame-ancestors} | ${loc:+→ $loc} | $srv"
+          }
+          for host in geteveryinvoicepaid.com www.geteveryinvoicepaid.com betterlansingmechanics.com www.betterlansingmechanics.com glasslyautoglass.com www.glasslyautoglass.com lansingcarrentals.com www.lansingcarrentals.com mentorship.lansingcarrentals.com leadhavencollective.com; do
+            echo "### $host"
+            for path in / /login /signup /account /admin /owner /app /checkout /billing /book /quote /privacy /api/health; do probe "https://$host$path"; done
+          done
