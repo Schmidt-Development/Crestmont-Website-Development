@@ -7,6 +7,20 @@
       "expires": "2026-12-18",
       "approvedBy": "Owner, 2026-11-18",
       "reason": "picomatch ReDoS (affects <=4.0.7; 4.0.7 is the latest release, no patched version exists). Present only in this dev-only test fixture's build toolchain (vite -> tinyglobby -> fdir/picomatch); the fixture is built by the weekly design-locked builder e2e and never deployed. Downgrading vite introduces other high advisories (GHSA-93m4-6634-74q7, GHSA-fx2h-pf6j-xcff). Remove this entry once picomatch publishes a fix."
+    },
+    {
+      "advisory": "GHSA-fc5q-39xc-vjpf",
+      "path": "runner/test/fixtures/riverbend-library-frontend",
+      "expires": "2026-12-18",
+      "approvedBy": "Owner, 2026-11-18 (extended to the other two design-locked fixtures)",
+      "reason": "picomatch ReDoS (affects <=4.0.7; 4.0.7 is the latest release, no patched version exists). Present only in this dev-only test fixture's (the design-locked builder e2e's riverbend-library artifact) build toolchain (vite -> tinyglobby -> fdir/picomatch); the fixture is built by the weekly design-locked builder e2e and never deployed. Downgrading vite introduces other high advisories (GHSA-93m4-6634-74q7, GHSA-fx2h-pf6j-xcff). Remove this entry once picomatch publishes a fix."
+    },
+    {
+      "advisory": "GHSA-fc5q-39xc-vjpf",
+      "path": "runner/test/fixtures/summit-haul-frontend",
+      "expires": "2026-12-18",
+      "approvedBy": "Owner, 2026-11-18 (extended to the other two design-locked fixtures)",
+      "reason": "picomatch ReDoS (affects <=4.0.7; 4.0.7 is the latest release, no patched version exists). Present only in this dev-only test fixture's (the design-locked builder e2e's summit-haul artifact) build toolchain (vite -> tinyglobby -> fdir/picomatch); the fixture is built by the weekly design-locked builder e2e and never deployed. Downgrading vite introduces other high advisories (GHSA-93m4-6634-74q7, GHSA-fx2h-pf6j-xcff). Remove this entry once picomatch publishes a fix."
     }
   ]
 }
