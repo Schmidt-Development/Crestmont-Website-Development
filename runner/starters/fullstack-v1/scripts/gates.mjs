@@ -27,6 +27,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runFrontend } from "./lib/frontend.mjs";
+import { syncHeaders } from "./lib/embedding.mjs";
 import { migratedDb } from "./lib/d1.mjs";
 import { validateConfig, inServiceArea } from "./lib/config-check.mjs";
 
@@ -285,6 +286,14 @@ if (features.admin || features.customer_accounts) { require(F, "auth", "authenti
 if (features.admin) require(F, "authorization", "role-based authorization");
 if (features.payments) require(F, "webhooks", "webhook signatures");
 for (const e of fe.errors.filter((x) => x.area === "security")) fail(F, `${e.file}: ${e.message}`);
+// Native-embedding standard (scripts/lib/embedding.mjs): public/_headers lets only the public pages be shown in
+// Crestmont's portfolio and keeps every other page refusing framing. The managed block is regenerated from the built
+// pages here (deterministic, like a lockfile); a conflicting rule fails the gate.
+{
+  const emb = syncHeaders(path.join(ROOT, "public"), { write: true });
+  for (const p of emb.problems) fail(F, `embedding: ${p}`);
+  out.embedding = { publicPaths: emb.paths, updated: !emb.inSync && !emb.problems.length };
+}
 
 // ── G performance ──
 const G = gate("G", "performance");

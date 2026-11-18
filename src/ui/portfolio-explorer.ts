@@ -1,9 +1,10 @@
 // Horizontal portfolio explorer (PORT-006 extension): one shared component for the homepage work section,
 // /portfolio and case-study pages. Data comes only from published portfolio records; arrows, selector and counts
 // are derived from them. Each project shows, in this order (services/portfolio.ts previewState):
-//   1. an isolated demonstration copy from an approved, verified demo origin, where the Owner set one up;
-//   2. otherwise the REAL live website, when its own headers recently permitted this origin to frame it (embed-check.ts);
-//   3. the genuine screenshot, with an honest label and the Visit live website link.
+//   1. the REAL live website in a native frame, when its own headers recently permitted this origin (embed-check.ts) —
+//      for entries added from 2026-11-18 only after a real browser verified it (services/native/);
+//   2. for existing entries only: the real website through Crestmont's remote browser when it refuses framing;
+//   3. an Owner-verified isolated demo, or the genuine screenshot, with an honest label and the Visit live website link.
 // The label always says which one the visitor is looking at; a screenshot is never presented as interactive.
 // Without JavaScript the same markup is an accessible project list with links (nojs.css).
 import { html, safeUrl, type SafeHtml } from "../lib/html.ts";
@@ -30,6 +31,8 @@ export const PFX_DEVICES = { desktop: [1440, 900], tablet: [820, 1180], mobile: 
 /** Visitor-facing status over the screenshot. Internal reasons (origin not approved here, not yet verified) stay in
  *  Staff → Portfolio; a visitor only hears about a demo that is normally offered and is temporarily down. */
 function visitorStatus(p: PortfolioProject, st: PreviewState): string {
+  // A new (native-required) entry is only ever the verified live website; if that is not possible right now, say so.
+  if (p.native_required && st.kind !== "live") return "Native embedding unavailable right now — please visit the live website directly.";
   return st.kind === "unavailable" && p.demo_status === "unavailable" ? "The interactive demo is temporarily unavailable, so a screenshot is shown instead." : "";
 }
 
@@ -76,7 +79,7 @@ export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[],
     <p class="pfx__desc">${p.description.split("\n")[0]}</p>
   </div>
   <div class="pfx__links">
-    ${st.kind === "embed" ? html`<span class="pfx__label">Interactive demo — no real transactions</span>` : st.kind === "live" ? html`<span class="pfx__label pfx__label--live">The real, live website — fully interactive</span>` : st.kind === "remote" ? html`<span class="pfx__label pfx__label--live">The real, live website, shown through Crestmont's remote browser — sign-in, forms and purchases are turned off</span>` : ""}
+    ${st.kind === "embed" ? html`<span class="pfx__label">Interactive demo — no real transactions</span>` : st.kind === "live" ? html`<span class="pfx__label pfx__label--live">${p.native_required ? "The real, live website — native, verified in a real browser" : "The real, live website — fully interactive"}</span>` : st.kind === "remote" ? html`<span class="pfx__label pfx__label--live">The real, live website, shown through Crestmont's remote browser — sign-in, forms and purchases are turned off</span>` : ""}
     ${opts.variant !== "case" ? html`<a class="pfx__link" href="/portfolio/${p.slug}">Case study</a>` : ""}
     ${st.kind === "embed" ? html`<a class="pfx__link pfx__link--demo" href="${safeUrl(st.url)}" target="_blank" rel="noopener noreferrer">Open demo in a new tab ${EXTERNAL}</a>` : ""}
     <a class="pfx__link pfx__link--live" href="${safeUrl(p.live_url)}" target="_blank" rel="noopener noreferrer">Visit live website ${EXTERNAL}<span class="visually-hidden"> (opens the operational ${p.name} website in a new tab)</span></a>

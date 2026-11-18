@@ -55,14 +55,15 @@ test("[PORT-006] remote browser is enabled only with REMOTE_BROWSER=on AND its b
 });
 
 // ── The normal Add workflow, end to end in the app ──
-test("[PORT-006] [PORT-007] add by URL: frame-ancestors 'none' and X-Frame-Options DENY → Mode B; allowed → A; unreachable / bot check → C", async () => {
+test("[PORT-006] [PORT-007] add by URL (new entries, 2026-11-18): a site that refuses framing is NEVER handed to the remote browser — native readiness says what is needed; allowed → native; unreachable / bot check → unavailable", async () => {
   const t0 = await createTestApp(); const origin = new URL(t0.env.APP_URL!).origin; t0.close();
   const t = await createTestApp({ ...REMOTE_ON, overrides: { portfolioFetch: sites(origin) } } as never);
   const owner = await createStaff(t.db, "owner");
   const o = await t.client().login(owner.email, TEST_PASSWORD);
   const step2 = await (await o.post("/staff/portfolio/new", { live_url: "fa-none.fixture-portfolio.com" })).text();
-  assert.match(step2, /Remote interactive browser selected \(Mode B\)/);
-  assert.match(step2, /no change to the website is needed/);
+  assert.doesNotMatch(step2, /Mode B/, "the remote browser is not offered for a new entry");
+  assert.match(step2, /does not permit native embedding yet/);
+  assert.match(step2, /not shown through the remote browser instead/);
   const add = async (slug: string, host: string) => {
     const r = await o.post("/staff/portfolio", { name: slug, slug, industry: "Testing", live_url: `https://${host}/`, description: `${slug} is a TEST DATA website.`, features: "", technology_summary: "", relationship: "Relationship documentation pending" });
     assert.equal(r.status, 303);
@@ -73,9 +74,46 @@ test("[PORT-006] [PORT-007] add by URL: frame-ancestors 'none' and X-Frame-Optio
   const ok = await add("allowed", "allowed.fixture-portfolio.com");
   const down = await add("down", "down.fixture-portfolio.com");
   const bot = await add("challenge", "challenge.fixture-portfolio.com");
-  assert.deepEqual([fa.display_mode, xfo.display_mode, ok.display_mode, down.display_mode, bot.display_mode], ["remote", "remote", "embed", "unavailable", "unavailable"]);
-  assert.match(bot.display_reason!, /does not bypass/);
-  // Staff see the mode, its reason and its limitations, and get an immediate interactive preview (preview link).
+  assert.deepEqual([fa.display_mode, xfo.display_mode, ok.display_mode, down.display_mode, bot.display_mode], ["unavailable", "unavailable", "embed", "unavailable", "unavailable"]);
+  // No connection and no verification browser in this test environment: each says exactly why.
+  assert.deepEqual([fa.native_state, xfo.native_state, ok.native_state, down.native_state, bot.native_state], ["authorization_required", "authorization_required", "checking", "unavailable", "unavailable"]);
+  assert.match(ok.native_reason!, /No verification browser is available/);
+  assert.match(bot.native_reason!, /does not bypass/);
+  const ed = await o.get(`/staff/portfolio/${fa.id}`);
+  const edh = await ed.text();
+  assert.match(edh, /data-native-state="authorization_required"/);
+  assert.doesNotMatch(edh, /Mode B — remote interactive browser/);
+  assert.doesNotMatch(edh, /data-kind="remote"/);
+  assert.doesNotMatch(edh, /data-preview=/, "no remote-browser preview session for a new entry");
+  assert.doesNotMatch(ed.headers.get("content-security-policy")!, /fa-none\.fixture/, "a blocked site is never framed");
+  // Never publishable while not verified native; once forced published, no public surface shows a remote view.
+  assert.ok(publishBlockers(fa).some((b) => /not verified as a native embed/.test(b)));
+  await t.db.prepare(`UPDATE portfolio_projects SET published = 1 WHERE id IN (?, ?)`).bind(fa.id, ok.id).run();
+  // The remote-browser API refuses it as well — even if its display mode were ever recorded as remote.
+  await t.db.prepare(`UPDATE portfolio_projects SET display_mode = 'remote' WHERE id = ?`).bind(fa.id).run();
+  const api = await t.client().request("POST", "/api/portfolio/remote-sessions", { body: JSON.stringify({ slug: "fa-none" }), headers: { origin: "http://crestmont.test", "content-type": "application/json" } });
+  assert.equal(api.status, 409);
+  for (const path of ["/portfolio/fa-none", "/portfolio", "/"]) {
+    const h = await (await t.client().get(path)).text();
+    assert.doesNotMatch(h, /data-remote-slug="fa-none"/, path);
+    assert.doesNotMatch(h, /data-frame-url="https:\/\/fa-none/, path);
+    assert.doesNotMatch(h, /data-frame-url="https:\/\/allowed\.fixture/, `${path}: an unverified native frame is never shown`);
+  }
+  t.close();
+});
+
+test("[PORT-006] [PORT-007] existing (legacy) entries keep the automatic display modes: refused → Mode B with its limits; publishing and every public surface unchanged", async () => {
+  const t0 = await createTestApp(); const origin = new URL(t0.env.APP_URL!).origin; t0.close();
+  const t = await createTestApp({ ...REMOTE_ON, overrides: { portfolioFetch: sites(origin) } } as never);
+  const owner = await createStaff(t.db, "owner");
+  const o = await t.client().login(owner.email, TEST_PASSWORD);
+  await o.post("/staff/portfolio", { name: "fa-none", slug: "fa-none", industry: "Testing", live_url: "https://fa-none.fixture-portfolio.com/", description: "fa-none is a TEST DATA website.", features: "", technology_summary: "", relationship: "Relationship documentation pending" });
+  // An entry that existed before native readiness (migration 0110 marks those native_required = 0).
+  await t.db.prepare(`UPDATE portfolio_projects SET native_required = 0, native_state = 'legacy' WHERE slug = 'fa-none'`).run();
+  const id = (await getBySlug(t.db, "fa-none"))!.id;
+  await o.post(`/staff/portfolio/${id}/embed-check`, {});
+  const fa = (await getBySlug(t.db, "fa-none"))!;
+  assert.equal(fa.display_mode, "remote");
   const ed = await o.get(`/staff/portfolio/${fa.id}`);
   const edh = await ed.text();
   assert.match(edh, /data-display-mode="remote"/);
@@ -85,34 +123,30 @@ test("[PORT-006] [PORT-007] add by URL: frame-ancestors 'none' and X-Frame-Optio
   assert.match(edh, /data-preview="[0-9a-f]{48}"/);
   assert.doesNotMatch(ed.headers.get("content-security-policy")!, /fa-none\.fixture/, "a blocked site is never framed");
   assert.equal(ed.headers.get("cache-control"), "no-store");
-  // Publishing: no screenshot needed in Mode B; authorization requirements unchanged.
   assert.deepEqual(publishBlockers(fa).filter((b) => /screenshot/i.test(b)), []);
   assert.ok(publishBlockers(fa).some((b) => /opt-in/.test(b)), "owner consent still required");
-  assert.equal((await o.post(`/staff/portfolio/${fa.id}/publish`, {})).status, 409);
   await o.post(`/staff/portfolio/${fa.id}/verify-link`, { verified_on: new Date().toISOString().slice(0, 10) });
   await o.post(`/staff/portfolio/${fa.id}/relationship`, { relationship: "TEST DATA fixture", evidence: "TEST DATA engagement letter on file" });
   await o.post(`/staff/portfolio/${fa.id}/consent`, { given_by: "Test Owner", method: "written", given_on: new Date().toISOString().slice(0, 10), evidence: "TEST DATA consent email on file" });
   assert.equal((await o.post(`/staff/portfolio/${fa.id}/publish`, {})).status, 303);
-  // Every public surface renders it through the same explorer as a remote view.
   for (const path of ["/portfolio/fa-none", "/portfolio", "/"]) {
     const h = await (await t.client().get(path)).text();
     assert.match(h, /data-kind="remote"[^>]*data-remote-slug="fa-none"/, path);
     assert.match(h, /Live website · remote view/, path);
     assert.doesNotMatch(h, /data-frame-url="https:\/\/fa-none/, path);
   }
-  // Mode C is honest: no live claim.
-  await t.db.prepare(`UPDATE portfolio_projects SET published = 1 WHERE id = ?`).bind(down.id).run();
-  const dh = await (await t.client().get("/portfolio/down")).text();
-  assert.doesNotMatch(dh, /data-kind="(remote|live)"/);
   t.close();
 });
 
-test("[PORT-006] remote browser off in an environment: refused sites fall back to Mode C with the live link", async () => {
+test("[PORT-006] remote browser off in an environment: refused legacy sites fall back to Mode C with the live link", async () => {
   const t0 = await createTestApp(); const origin = new URL(t0.env.APP_URL!).origin; t0.close();
   const t = await createTestApp({ overrides: { portfolioFetch: sites(origin) } } as never);
   const owner = await createStaff(t.db, "owner");
   const o = await t.client().login(owner.email, TEST_PASSWORD);
   await o.post("/staff/portfolio", { name: "fa", slug: "fa", industry: "Testing", live_url: "https://fa-none.fixture-portfolio.com/", description: "fa is a TEST DATA website that refuses framing.", features: "", technology_summary: "", relationship: "Relationship documentation pending" });
+  await t.db.prepare(`UPDATE portfolio_projects SET native_required = 0, native_state = 'legacy' WHERE slug = 'fa'`).run();
+  const id = (await getBySlug(t.db, "fa"))!.id;
+  await o.post(`/staff/portfolio/${id}/embed-check`, {});
   const p = (await getBySlug(t.db, "fa"))!;
   assert.equal(p.display_mode, "unavailable");
   const h = await (await o.get(`/staff/portfolio/${p.id}`)).text();
@@ -197,7 +231,7 @@ test("[PORT-006] admission: concurrency cap, daily budget, per-visitor rate, one
 test("[PORT-006] API: sessions only for published Mode B projects (or a preview link), same-origin JSON, WebSocket token checked", async () => {
   const t = await createTestApp({ ...REMOTE_ON, REMOTE_BROWSER_MAX_CONCURRENT: "1" } as never);
   const at = new Date().toISOString();
-  const ins = (id: string, slug: string, published: number, mode: string) => t.db.prepare(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, position, published, updated_at, created_at, display_mode) VALUES (?,?,?,'T',?,'TEST','TEST','[]',1,?,?,?,?)`).bind(id, slug, slug, `https://${slug}.fixture-portfolio.com/`, published, at, at, mode).run();
+  const ins = (id: string, slug: string, published: number, mode: string) => t.db.prepare(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, position, published, updated_at, created_at, display_mode, native_required, native_state) VALUES (?,?,?,'T',?,'TEST','TEST','[]',1,?,?,?,?,0,'legacy')`).bind(id, slug, slug, `https://${slug}.fixture-portfolio.com/`, published, at, at, mode).run();
   await ins("pf_pub", "pub", 1, "remote"); await ins("pf_draft", "draft", 0, "remote"); await ins("pf_embed", "emb", 1, "embed");
   const c = t.client();
   const post = (body: unknown, origin = "http://crestmont.test", type = "application/json") => c.request("POST", "/api/portfolio/remote-sessions", { body: JSON.stringify(body), headers: { origin, "content-type": type } });

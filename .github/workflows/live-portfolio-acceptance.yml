@@ -26,7 +26,7 @@ concurrency:
 jobs:
   accept:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     env:
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
@@ -64,6 +64,23 @@ jobs:
           { if [ "$rc" = 0 ]; then echo "## Five widths: PASSED"; else echo "## Five widths: FAILED"; fi
             echo; grep -E '^FAIL' viewports.log ; tail -1 viewports.log ; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+      - name: Native vs direct — rendering, WebGL (Lead Haven's Earth), scroll, click, animation (read-only)
+        if: always()
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: |
+          set +e
+          node scripts/live-native-visual.mjs "$PRODUCTION_URL" native-visual > visual.log 2>&1
+          rc=$?
+          cat visual.log
+          { if [ "$rc" = 0 ]; then echo "## Native vs direct: PASSED"; else echo "## Native vs direct: FAILED"; fi; echo; grep -E '^FAIL' visual.log ; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-visual
+          path: native-visual
+          retention-days: 30
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

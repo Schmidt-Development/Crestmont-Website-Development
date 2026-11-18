@@ -38,7 +38,8 @@ export function register(r: Router): void {
       if ((await previewTokenProject(ctx.db, body.preview, Date.now())) === p.id) access = "preview";
     } else if (p.published) access = "public";
     if (!access) return jsonResponse(ctx, 404, { code: "not_found", message: "Project not found" });
-    if (p.display_mode !== "remote") return jsonResponse(ctx, 409, { code: "not_remote", message: "This project is not shown through the remote browser." });
+    // New entries (native readiness, 2026-11-18) are never shown through the remote browser, whatever else is recorded.
+    if (p.native_required || p.display_mode !== "remote") return jsonResponse(ctx, 409, { code: "not_remote", message: "This project is not shown through the remote browser." });
     // Public visitors are rate-limited per (hashed) address. A preview link — issued only by staff with
     // portfolio.manage or the Owner-approved release pipeline — is limited per link instead, so a release check that
     // opens several sessions from one runner is not refused; concurrency and the daily budget apply to everyone.

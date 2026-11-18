@@ -39,6 +39,9 @@ export async function intakeForAcceptance(db: Db, origin: string, fetcher: typeo
       const description = (check.description ?? "").trim().length >= 20 ? check.description!.trim().slice(0, 4000)
         : `${name} — the live website at ${site}. Added for review; the description and features are to be confirmed by staff before publishing.`;
       ({ id } = await pf.createProject(db, SYSTEM, { name, slug, industry: "To be confirmed by staff", live_url: check.url ?? u.toString(), description, features: "", technology_summary: "", relationship: "Relationship documentation pending" }));
+      // Release-acceptance entries exist to exercise the automatic display modes, including the remote browser, on
+      // third-party test sites; they are never published, so they keep the legacy selection (not native-required).
+      await db.prepare(`UPDATE portfolio_projects SET native_required = 0, native_state = 'legacy' WHERE id = ?`).bind(id).run();
       await pf.recordEmbedCheck(db, id, check, null, remoteEnabled);
       created = true;
     }

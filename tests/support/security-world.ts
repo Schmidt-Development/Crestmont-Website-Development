@@ -236,6 +236,8 @@ async function buildStaffRecords(w: World) {
   ids.cmsRevision = (await one<{ id: string }>(db, `SELECT id FROM cms_revisions ORDER BY created_at DESC LIMIT 1`)).id;
   await ok(o.post("/staff/portfolio", { name: "Matrix Portfolio", slug: "matrix-portfolio", industry: "Retail", live_url: "https://portfolio.matrix.example", description: "A verified description of the live website.", features: "Contact form", technology_summary: "", relationship: "Relationship documentation pending" }), "portfolio");
   ids.portfolio = (await one<{ id: string }>(db, `SELECT id FROM portfolio_projects WHERE slug = 'matrix-portfolio'`)).id;
+  // The matrix exercises screenshot-based publishing (an existing-style entry); native onboarding has its own tests.
+  await db.prepare(`UPDATE portfolio_projects SET native_required = 0, native_state = 'legacy' WHERE id = ?`).bind(ids.portfolio).run();
   ids.portfolioSlug = "matrix-portfolio";
   await ok(o.post(`/staff/portfolio/${ids.portfolio}/screenshot`, { kind: "desktop", captured_on: "2026-10-26", screenshot: png("matrix.png") }), "portfolio screenshot");
   ids.portfolioFile = (await one<{ id: string }>(db, `SELECT desktop_screenshot_file_id AS id FROM portfolio_projects WHERE id = ?`, ids.portfolio)).id;

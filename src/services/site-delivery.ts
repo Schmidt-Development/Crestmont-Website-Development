@@ -257,9 +257,11 @@ export async function completeDeployment(db: Db, b: Record<string, unknown>, mai
   const verification = v ? {
     url: okHttps(v.url), httpStatus: typeof v.httpStatus === "number" ? v.httpStatus : null, expectedSha256: okSha(v.expectedSha256),
     actualSha256: okSha(v.actualSha256), matched: typeof v.matched === "boolean" ? v.matched : null, attempts: typeof v.attempts === "number" ? Math.min(100, v.attempts) : 0,
+    // Native-embedding standard on the live site (runner/src/embedding.ts); older runners do not send it.
+    ...(v.embedding && typeof v.embedding === "object" && typeof (v.embedding as { ok?: unknown }).ok === "boolean" ? { embedding: { ok: (v.embedding as { ok: boolean }).ok, detail: String((v.embedding as { detail?: unknown }).detail ?? "").slice(0, 300) } } : {}),
   } : null;
   const deployed = b.result === "deployed";
-  const verified = deployed && !!verification && verification.httpStatus === 200 && (verification.matched === true || (verification.matched === null && verification.expectedSha256 === null));
+  const verified = deployed && !!verification && verification.httpStatus === 200 && (verification.matched === true || (verification.matched === null && verification.expectedSha256 === null)) && (verification as { embedding?: { ok: boolean } }).embedding?.ok !== false;
   const to: DeploymentState = verified ? "live" : deployed ? "verification_failed" : "failed";
   const error = typeof b.error === "string" ? sanitize(b.error, 2000) : null;
   await db.prepare(`UPDATE site_deployments SET state = ?, state_reason = ?, lease_token_hash = NULL, lease_expires_at = NULL, deployed_at = ?, verified_at = ?, finished_at = ?, deployed_url = ?, content_sha256 = ?, verification_json = ?, error = ?, updated_at = ? WHERE id = ?`)

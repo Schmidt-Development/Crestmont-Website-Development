@@ -4,15 +4,13 @@
 // session's parameters; this object acquires a browser, runs the shared session (session.ts) and closes the browser when
 // the session ends.
 import type { Env } from "../app/context.ts";
-import { Cdp, chunkedSocket, type SocketLike } from "../services/remote-browser/cdp.ts";
+import { Cdp, type SocketLike } from "../services/remote-browser/cdp.ts";
+import { acquireBrowserRun, type BrowserBinding } from "../services/remote-browser/acquire.ts";
 import { RemoteSession } from "../services/remote-browser/session.ts";
 import { finish, heartbeat } from "../services/remote-browser/admission.ts";
 import { holdEarlyMessages } from "../services/remote-browser/stream.ts";
 import type { ConnectInfo } from "../services/remote-browser/connect.ts";
 
-const BR = "https://fake.host"; // Browser Run binding endpoint (the host is ignored by the binding)
-
-interface BrowserBinding { fetch(input: string, init?: RequestInit): Promise<Response & { webSocket?: (SocketLike & { accept(): void }) | null }> }
 
 export class PortfolioBrowser {
   private readonly env: Env;
@@ -40,26 +38,10 @@ export class PortfolioBrowser {
     };
     if (!browser) return fail("no-browser-binding");
     try {
-      // A fresh browser for this session; keep_alive only bridges brief gaps — the session closes it explicitly.
-      // Browser Run's standard DevTools endpoint (plain CDP JSON); the binding's older acquire/connectDevtools pair
-      // (chunked binary frames) is the fallback, so either platform interface works.
-      let socket: SocketLike | null = null, how = "";
-      const acq = await browser.fetch(`${BR}/v1/devtools/browser?keep_alive=60000`, { method: "POST" });
-      if (acq.status === 200) {
-        browserSession = String(((await acq.json()) as { sessionId?: string }).sessionId ?? "");
-        const up = await browser.fetch(`${BR}/v1/devtools/browser/${browserSession}`, { headers: { Upgrade: "websocket" } });
-        if (up.webSocket) { up.webSocket.accept(); socket = up.webSocket; }
-        how = `devtools ${up.status}`;
-      } else how = `devtools ${acq.status}`;
-      if (!socket) {
-        const legacy = await browser.fetch(`${BR}/v1/acquire?keep_alive=60000`);
-        if (legacy.status === 200) {
-          browserSession = String(((await legacy.json()) as { sessionId?: string }).sessionId ?? "");
-          const up = await browser.fetch(`${BR}/v1/connectDevtools?browser_session=${encodeURIComponent(browserSession)}`, { headers: { Upgrade: "websocket" } });
-          if (up.webSocket) { up.webSocket.accept(); socket = chunkedSocket(up.webSocket); }
-          how += `; connectDevtools ${up.status}`;
-        } else how += `; acquire ${legacy.status}`;
-      }
+      // A fresh browser for this session (src/services/remote-browser/acquire.ts, shared with the native verification).
+      const got = await acquireBrowserRun(browser);
+      const socket = got.socket, how = got.how;
+      browserSession = got.session;
       if (!socket) return fail(`no-browser: ${how}`);
       console.log(JSON.stringify({ level: "info", msg: "remote browser session started", session: info.id, via: how.split(";").pop()!.trim() }));
       const cdp = new Cdp(socket);

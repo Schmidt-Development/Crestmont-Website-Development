@@ -413,7 +413,9 @@ export interface SiteDeployment {
   sourceCommit: string;
 }
 export interface DeploymentClaimResponse { deployment: SiteDeployment | null }
-export interface DeploymentVerification { url: string | null; httpStatus: number | null; expectedSha256: string | null; actualSha256: string | null; matched: boolean | null; attempts: number }
+export interface DeploymentVerification { url: string | null; httpStatus: number | null; expectedSha256: string | null; actualSha256: string | null; matched: boolean | null; attempts: number;
+  /** Native-embedding standard on the live site (runner/src/embedding.ts); absent for releases built before it. */
+  embedding?: { ok: boolean; detail: string } }
 export interface DeploymentCompleteRequest {
   deploymentId: string;
   leaseToken: string;
