@@ -146,7 +146,7 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
     if (!cf && !vc) return done({ state: "authorization_required", reason: `${check.detail}. ${host} is not served by any connected account (${notes.join("; ")}). If you own it, connect the account that hosts it; Crestmont does not change websites it cannot prove you control.`, provider: null, target: null });
 
     // 1. A proxied Cloudflare zone: Cloudflare's own header rule, no code change, instant, reversible.
-    if (cf && !conflict) {
+    if (cf?.ruleCapable && !conflict) {
       const r = await applyCloudflareRule(d.fetchApi, d.conn.cloudflare!, cf, host, paths, frameAncestorsValue(d.siteOrigin));
       const ch: Change = { kind: "cloudflare-rule", zoneId: cf.zoneId, rulesetId: r.rulesetId, ruleId: r.ruleId, ref: r.ref, host, paths: r.paths, appliedAt: nowIso(), action: r.action };
       return done({ state: "preparing", reason: `${describeChange(ch)} Waiting for the site's public pages to answer with the new header.`, provider: `cloudflare-zone (${cf.serving})`, target: cf, change: ch });
@@ -165,7 +165,7 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
     const body = `Crestmont Website Development shows this website in its portfolio as the real, live site in a native frame.\n\nThis change lets **only these public, read-only pages** be framed by ${frameAncestorsValue(d.siteOrigin).replace("frame-ancestors ", "")}:\n\n${paths.map((x) => `- \`${x}\``).join("\n")}\n\nIt adds \`Content-Security-Policy: ${frameAncestorsValue(d.siteOrigin)}\` on those paths only${repoTarget.provider === "cloudflare-pages" ? " and detaches `X-Frame-Options` there" : ""}. Sign-in, accounts, booking, checkout, payment, API and every other page are not listed and keep refusing framing. No other header, rule or file is changed.\n\nProposed automatically by Crestmont's portfolio onboarding for ${host}.`;
     const pr = await proposeChange(d.fetchApi, d.conn.github, repoTarget.repo, repoTarget.branch, file.path, content, title, body, !!access.protectedReviews);
     const ch: Change = { kind: "github-pr", provider: repoTarget.provider, pr };
-    return followChange(d, { ...p, native_state: "preparing" }, check, ch, now, (o) => done({ ...o, provider: repoTarget.provider, target: vc ?? cf, change: ch }));
+    return followChange(d, { ...p, native_state: "preparing", native_target: JSON.stringify(vc ?? cf) }, check, ch, now, (o) => done({ ...o, provider: repoTarget.provider, target: vc ?? cf, change: ch }));
   } catch (e) {
     const msg = e instanceof ProviderError || e instanceof EditError ? e.message : `Unexpected error: ${(e as Error).message}`;
     const auth = e instanceof ProviderError && (e.status === 401 || e.status === 403);

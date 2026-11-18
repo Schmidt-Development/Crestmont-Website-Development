@@ -35,7 +35,7 @@ export const HEADERS_END = "# crestmont-native-embedding:end";
  *  X-Frame-Options set by an earlier rule and adds the frame-ancestors CSP. Sensitive paths are never listed. */
 export function editPagesHeaders(current: string | null, paths: string[], frameAncestors: string): string {
   const text = (current ?? "").replace(/\r\n/g, "\n");
-  const s = text.indexOf(HEADERS_START), e = text.indexOf(HEADERS_END);
+  const s = text.indexOf("# crestmont-native-embedding:start"), e = text.indexOf(HEADERS_END);
   if ((s === -1) !== (e === -1) || (s !== -1 && e < s)) throw new EditError("_headers has an incomplete Crestmont block, so Crestmont did not change it");
   const before = s === -1 ? text : text.slice(0, s), after = s === -1 ? "" : text.slice(e + HEADERS_END.length).replace(/^\n/, "");
   const list = [...new Set(paths)].filter((p) => SAFE_PATH.test(p)).sort();

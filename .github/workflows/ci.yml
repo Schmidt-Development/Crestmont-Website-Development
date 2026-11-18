@@ -99,6 +99,14 @@ jobs:
         run: |
           node --no-warnings scripts/scroll-isolation-seed.mjs .dev/scroll.db live-multipage,live-onepage,live-nonav,live-chatty,live-appshell,live-focus,live-short,live-leaky
           node scripts/live-site-nav-check.mjs http://localhost:8787
+      # Native readiness end to end (2026-11-18): a NEW owned website that refuses framing is added, prepared through the
+      # (hermetic) provider connection, and verified by the real verifier in this real Chromium — content, WebGL, scroll,
+      # click, phone width, protected pages — plus the real-browser negatives (WebGL never draws, blank page, frame
+      # refused by the browser). TEST DATA only; nothing external is contacted.
+      - name: Native onboarding end to end — real Chromium
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: node --no-warnings --test tests/portfolio-native-browser.test.ts
 
   # Automatic portfolio display system (docs/frontend/PORTFOLIO.md §Display modes): the staff Add flow picks Mode A / B / C
   # by itself for frame-ancestors 'none', X-Frame-Options DENY, an allowed site and an unreachable one, and the remote

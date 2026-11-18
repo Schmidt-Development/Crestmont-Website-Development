@@ -171,7 +171,7 @@ test("[PORT-006] [PORT-007] enter a URL → confirm details → native verificat
   assert.equal(pub.status, 200);
   assert.match(html, /class="pfx__flag pfx__flag--live"/);
   assert.match(html, /Live website<\/span>/);
-  assert.match(html, /The real, live website — fully interactive/);
+  assert.match(html, /The real, live website — native, verified in a real browser/);
   assert.match(html, /data-pfx-expand[^>]*>Full screen</);
   assert.match(html, /Visit live website/);
   assert.match(html, /"@type":"CreativeWork"/);

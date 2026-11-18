@@ -48,7 +48,7 @@ export function renderBlock(paths) {
 export function syncHeaders(publicDir, { write = false } = {}) {
   const file = join(publicDir, "_headers");
   const current = existsSync(file) ? readFileSync(file, "utf8").replace(/\r\n/g, "\n") : "";
-  const s = current.indexOf(START), e = current.indexOf(END);
+  const s = current.indexOf("# crestmont-native-embedding:start"), e = current.indexOf(END);
   const problems = [];
   if ((s === -1) !== (e === -1) || (s !== -1 && e < s)) problems.push("public/_headers has an incomplete Crestmont block");
   const paths = publicPages(publicDir);

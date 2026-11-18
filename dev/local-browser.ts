@@ -8,10 +8,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SocketLike } from "../src/services/remote-browser/cdp.ts";
 
-export async function launchLocalBrowser(executable: string): Promise<{ ws: SocketLike; close: () => void }> {
+/** `extraArgs`: e.g. software WebGL for the native verification ("--enable-unsafe-swiftshader"). */
+export async function launchLocalBrowser(executable: string, extraArgs: string[] = []): Promise<{ ws: SocketLike; close: () => void }> {
   const dir = mkdtempSync(join(tmpdir(), "crestmont-rb-"));
   const proc = spawn(executable, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check",
-    "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking", "--disable-extensions", "--mute-audio", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+    "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking", "--disable-extensions", "--mute-audio", ...extraArgs, "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
   const close = () => { try { proc.kill("SIGKILL"); } catch { /* gone */ } setTimeout(() => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* busy */ } }, 500); };
   const url = await new Promise<string>((resolve, reject) => {
     let err = "";

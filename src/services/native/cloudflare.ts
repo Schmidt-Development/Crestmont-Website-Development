@@ -9,13 +9,29 @@
 // already exactly right.
 import { call, type NativeConnections } from "./connections.ts";
 
-export interface CloudflareTarget { kind: "cloudflare"; accountId: string; zoneId: string; zone: string; serving: string; pages?: { project: string; repo: string | null; branch: string | null; destination: string; root: string; buildCommand: string } }
+export interface CloudflareTarget { kind: "cloudflare"; accountId: string; zoneId: string; zone: string; serving: string;
+  /** A zone rule can set this host's headers (it is in a connected zone and proxied by Cloudflare). */
+  ruleCapable: boolean; pages?: { project: string; repo: string | null; branch: string | null; destination: string; root: string; buildCommand: string } }
 interface Zone { id: string; name: string; status: string; account: { id: string } }
 interface Rule { id?: string; ref?: string; expression: string; action: string; action_parameters?: unknown; description?: string; enabled?: boolean }
 interface Ruleset { id: string; rules?: Rule[] }
 type Env<T> = { success?: boolean; result: T; result_info?: { total_pages?: number } };
 
 const zoneCandidates = (host: string) => { const l = host.split("."); const out: string[] = []; for (let i = 0; i <= l.length - 2; i++) out.push(l.slice(i).join(".")); return out; };
+
+type PagesInfo = NonNullable<CloudflareTarget["pages"]>;
+async function findPages(f: typeof fetch, token: string, account: string, host: string): Promise<PagesInfo | null> {
+  for (let page = 1; page <= 5; page++) {
+    const r = await call<Env<{ name: string; domains?: string[]; source?: { type?: string; config?: { owner?: string; repo_name?: string; production_branch?: string } }; build_config?: { destination_dir?: string; root_dir?: string; build_command?: string } }[]>>(f, "cloudflare", token, `/accounts/${account}/pages/projects`, { query: { page: String(page), per_page: "50" } }).catch(() => null);
+    const hit = r?.result?.find((p) => (p.domains ?? []).includes(host));
+    if (hit) {
+      const gh = hit.source?.type === "github" && hit.source.config?.owner && hit.source.config.repo_name ? `${hit.source.config.owner}/${hit.source.config.repo_name}` : null;
+      return { project: hit.name, repo: gh, branch: hit.source?.config?.production_branch ?? null, destination: hit.build_config?.destination_dir ?? "", root: hit.build_config?.root_dir ?? "", buildCommand: hit.build_config?.build_command ?? "" };
+    }
+    if (!r?.result?.length || page >= (r.result_info?.total_pages ?? 1)) break;
+  }
+  return null;
+}
 
 export async function discoverCloudflare(f: typeof fetch, conn: NonNullable<NativeConnections["cloudflare"]>, host: string): Promise<{ target: CloudflareTarget | null; detail: string }> {
   let zone: Zone | null = null;
@@ -24,7 +40,15 @@ export async function discoverCloudflare(f: typeof fetch, conn: NonNullable<Nati
     const z = r?.result?.find((x) => x.name === name && x.status === "active" && (!conn.accounts.length || conn.accounts.includes(x.account.id)));
     if (z) { zone = z; break; }
   }
-  if (!zone) return { target: null, detail: `${host} is not in any Cloudflare zone this connection can read` };
+  if (!zone) {
+    // A Pages project belongs to the account, wherever its domain's DNS is: look there before giving up.
+    const accounts = conn.accounts.length ? conn.accounts : ((await call<Env<{ id: string }[]>>(f, "cloudflare", conn.token, "/accounts").catch(() => null))?.result ?? []).map((a) => a.id).slice(0, 10);
+    for (const acct of accounts) {
+      const pages = await findPages(f, conn.token, acct, host);
+      if (pages) return { target: { kind: "cloudflare", accountId: acct, zoneId: "", zone: "", serving: `Pages project ${pages.project} (its domain is not in a connected zone)`, ruleCapable: false, pages }, detail: `${host} is a custom domain of the Cloudflare Pages project ${pages.project}${pages.repo ? ` (repository ${pages.repo}, branch ${pages.branch ?? "?"})` : " (not linked to GitHub)"}` };
+    }
+    return { target: null, detail: `${host} is not in any Cloudflare zone or Pages project this connection can read` };
+  }
   const acct = zone.account.id;
   const serving: string[] = [];
   const dns = await call<Env<{ name: string; type: string; proxied?: boolean }[]>>(f, "cloudflare", conn.token, `/zones/${zone.id}/dns_records`, { query: { name: host } });
@@ -35,20 +59,10 @@ export async function discoverCloudflare(f: typeof fetch, conn: NonNullable<Nati
   const routes = await call<Env<{ pattern: string; script?: string }[]>>(f, "cloudflare", conn.token, `/zones/${zone.id}/workers/routes`).catch(() => null);
   const route = routes?.result?.find((r) => r.pattern.split("/")[0] === host || (r.pattern.startsWith("*.") && host.endsWith(r.pattern.split("/")[0].slice(1))));
   if (route) serving.push(`Workers route ${route.pattern}${route.script ? ` (${route.script})` : ""}`);
-  let pages: CloudflareTarget["pages"];
-  for (let page = 1; page <= 5; page++) {
-    const r = await call<Env<{ name: string; domains?: string[]; source?: { type?: string; config?: { owner?: string; repo_name?: string; production_branch?: string } }; build_config?: { destination_dir?: string; root_dir?: string; build_command?: string } }[]>>(f, "cloudflare", conn.token, `/accounts/${acct}/pages/projects`, { query: { page: String(page), per_page: "50" } }).catch(() => null);
-    const hit = r?.result?.find((p) => (p.domains ?? []).includes(host));
-    if (hit) {
-      const gh = hit.source?.type === "github" && hit.source.config?.owner && hit.source.config.repo_name ? `${hit.source.config.owner}/${hit.source.config.repo_name}` : null;
-      pages = { project: hit.name, repo: gh, branch: hit.source?.config?.production_branch ?? null, destination: hit.build_config?.destination_dir ?? "", root: hit.build_config?.root_dir ?? "", buildCommand: hit.build_config?.build_command ?? "" };
-      serving.push(`Pages project ${hit.name}`);
-      break;
-    }
-    if (!r?.result?.length || page >= (r.result_info?.total_pages ?? 1)) break;
-  }
+  const pages = await findPages(f, conn.token, acct, host);
+  if (pages) serving.push(`Pages project ${pages.project}`);
   if (!serving.length) return { target: null, detail: `${host} is in the Cloudflare zone ${zone.name}, but it is not proxied by Cloudflare (DNS only), so zone rules cannot set its headers` };
-  return { target: { kind: "cloudflare", accountId: acct, zoneId: zone.id, zone: zone.name, serving: serving.join(", "), pages }, detail: `${host} is served through Cloudflare zone ${zone.name} (${serving.join(", ")})` };
+  return { target: { kind: "cloudflare", accountId: acct, zoneId: zone.id, zone: zone.name, serving: serving.join(", "), ruleCapable: true, pages: pages ?? undefined }, detail: `${host} is served through Cloudflare zone ${zone.name} (${serving.join(", ")})` };
 }
 
 const hex = async (s: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))].map((b) => b.toString(16).padStart(2, "0")).join("");
