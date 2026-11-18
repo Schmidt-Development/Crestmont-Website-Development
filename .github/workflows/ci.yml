@@ -37,7 +37,9 @@ jobs:
           for pj in $(git ls-files '*package.json' | grep -v node_modules); do
             dir=$(dirname "$pj")
             if [ -f "$dir/package-lock.json" ] && node -e 'const l=require(process.argv[1]);process.exit(Object.keys(l.packages||{}).filter(k=>k).length?0:1)' "$PWD/$dir/package-lock.json"; then
-              echo "::group::npm audit $dir"; (cd "$dir" && npm audit --audit-level=high --omit=optional); echo "::endgroup::"; audited=$((audited+1))
+              # A failing audit passes only where security/audit-exceptions.json holds an unexpired, Owner-approved
+              # exception for exactly that advisory in exactly this directory (scripts/audit-exceptions.mjs).
+              echo "::group::npm audit $dir"; (cd "$dir" && npm audit --audit-level=high --omit=optional) || node scripts/audit-exceptions.mjs "$dir"; echo "::endgroup::"; audited=$((audited+1))
             elif node -e 'const p=require(process.argv[1]);process.exit(Object.keys({...p.dependencies,...p.devDependencies,...p.optionalDependencies}).length?0:1)' "$PWD/$pj"; then
               echo "::warning file=$pj::$dir declares dependencies but has no committed lockfile with packages; it was not audited."
             fi
