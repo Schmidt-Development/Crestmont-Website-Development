@@ -3,7 +3,8 @@
 // from what the fake providers actually hold: a Cloudflare rule only changes them when it is in the zone (and
 // `ruleTakesEffect`), a repository change only after it is merged AND the provider's deployment of that commit is
 // READY. So a test can only reach "native verified" through the same steps a real website would.
-export const CRESTMONT_ALLOW = "frame-ancestors http://crestmont.test";
+export const CRESTMONT_ORIGIN = new URL("http://crestmont.test").origin;
+export const CRESTMONT_ALLOW = `frame-ancestors ${CRESTMONT_ORIGIN}`;
 
 export interface Site {
   host: string;
@@ -87,7 +88,8 @@ export class NativeWorld {
     }
     const fa = csp.flatMap((c) => c.split(";").map((d) => d.trim()).filter((d) => d.startsWith("frame-ancestors")));
     // Exact source tokens, as a browser compares them (never a substring of the directive).
-    const allow = fa.length ? fa.every((d) => d.split(/\s+/).slice(1).includes("http://crestmont.test")) : !xfo;
+    const isCrestmont = (tok: string) => { try { return new URL(tok).origin === CRESTMONT_ORIGIN; } catch { return false; } };
+    const allow = fa.length ? fa.every((d) => d.split(/\s+/).slice(1).some(isCrestmont)) : !xfo;
     return { allow, xfo, csp };
   }
   /** The site's response for a URL (headers derived from the providers' state). */
