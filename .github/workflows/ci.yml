@@ -97,7 +97,7 @@ jobs:
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: |
-          node --no-warnings scripts/scroll-isolation-seed.mjs .dev/scroll.db live-multipage,live-onepage,live-nonav,live-chatty,live-appshell,live-short,live-leaky
+          node --no-warnings scripts/scroll-isolation-seed.mjs .dev/scroll.db live-multipage,live-onepage,live-nonav,live-chatty,live-appshell,live-focus,live-short,live-leaky
           node scripts/live-site-nav-check.mjs http://localhost:8787
 
   # Automatic portfolio display system (docs/frontend/PORTFOLIO.md §Display modes): the staff Add flow picks Mode A / B / C

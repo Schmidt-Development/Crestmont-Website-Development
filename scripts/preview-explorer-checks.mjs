@@ -162,11 +162,15 @@ export async function checkInteractive(p, label, ok, { touch = false, headersOf 
     }
     await sleep(400);
   };
-  const start = await inner();
+  // A live page can still be growing after load (late content): if it shows nothing to scroll, try a gesture first and
+  // measure again before recording that it fits.
+  const first = await inner();
+  let start = first;
+  if (info.live && first.max <= 0) { await gesture(600, 2); start = await inner(); }
   let end = start;
   for (let k = 0; k < (touch ? 80 : 30) && end.y < end.max - 2; k++) { await gesture(600, 3); end = await inner(); }
-  if (info.live && start.max <= 0) ok(true, `${tag}: the live page fits the frame at this size — nothing to scroll (no scrollable container); gestures below check Crestmont stays still`);
-  else ok(end.y > start.y && end.y >= end.max - 2, `${tag}: ${touch ? "touch" : "wheel"} scrolling reaches the end of the ${info.live ? `live site (${start.where})` : "demo page"} (${start.y} → ${end.y} of ${end.max}px)`);
+  if (info.live && end.max <= 0) ok(true, `${tag}: the live page fits the frame at this size — nothing to scroll (no scrollable container, also after a gesture); gestures below check Crestmont stays still`);
+  else ok(end.y > first.y && end.y >= end.max - 2, `${tag}: ${touch ? "touch" : "wheel"} scrolling reaches the end of the ${info.live ? `live site (${end.where})` : "demo page"} (${first.y} → ${end.y} of ${end.max}px)`);
   ok((await outerY(p)) === y0, `${tag}: Crestmont's page stays still while the demo scrolls`);
   await gesture(600, 4);
   ok((await outerY(p)) === y0, `${tag}: still stationary when the gesture continues past the demo's bottom`);
@@ -394,8 +398,19 @@ export async function checkLiveSite(p, fr, info, tag, ok, inner, headersOf) {
       const dAfter = (await inner()).y, yAfter = await outerY(p);
       // Evidence for a Crestmont movement: what the site did after the click (focus moved into a field, which the browser
       // reveals in every scrolling ancestor, or a plain fragment jump).
-      const why = yAfter === yBefore ? "" : await f.evaluate(() => { const a = document.activeElement; return `; focus now on <${a?.tagName.toLowerCase()}${a?.id ? "#" + a.id : ""}${a?.getAttribute?.("type") ? ` type=${a.getAttribute("type")}` : ""}>, location ${location.hash || "(no hash)"}`; }).catch(() => "");
-      ok(dAfter !== d0 && yAfter === yBefore && p.url() === topUrl, `${tag}: in-page link ${anchor} moves the live site only (site ${d0} → ${dAfter}px; Crestmont ${yBefore} → ${yAfter}px${why})`);
+      const focus = yAfter === yBefore ? null : await f.evaluate(() => { const a = document.activeElement, r = a?.getBoundingClientRect(); return { field: !!a && a.matches("input, select, textarea, [contenteditable='true']"), desc: `<${a?.tagName.toLowerCase()}${a?.id ? "#" + a.id : ""}>`, top: r ? r.top : 0, bottom: r ? r.bottom : 0 }; }).catch(() => null);
+      // The one accepted Crestmont movement: the site moved focus into a form field in answer to the visitor's click, and
+      // the browser revealed that field in every scrolling ancestor (standard focus behaviour, not a scroll gesture
+      // leaking). It must be smaller than the frame and leave the field visible. Anything else fails.
+      let revealed = false;
+      if (focus?.field) {
+        const box = await p.locator(".pfx__slide:not([inert]) iframe.pfx__frame").boundingBox(), vh = p.viewportSize()?.height ?? 0;
+        const k = box ? box.width / (await f.evaluate(() => innerWidth)) : 1;
+        const fieldTop = box ? box.y + focus.top * k : -1, fieldBottom = box ? box.y + focus.bottom * k : -1;
+        revealed = !!box && Math.abs(yAfter - yBefore) < box.height && fieldTop >= 0 && fieldBottom <= vh;
+      }
+      const why = focus ? `; the site moved focus to ${focus.desc}${revealed ? " and the browser revealed that field — focus behaviour, not a scroll leak" : ""}` : "";
+      ok(dAfter !== d0 && (yAfter === yBefore || revealed) && p.url() === topUrl, `${tag}: in-page link ${anchor} moves the live site${yAfter === yBefore ? " only" : ""} (site ${d0} → ${dAfter}px; Crestmont ${yBefore} → ${yAfter}px${why})`);
     } else {
       // Nothing public to navigate to: say so (never invent a link or enter a sensitive route) and show that a visitor's
       // click genuinely reaches the site — a real pointer click on non-interactive content inside the frame.

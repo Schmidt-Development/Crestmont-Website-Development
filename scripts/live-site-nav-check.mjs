@@ -10,12 +10,13 @@
 //   • live-nonav     — no public page and no in-page link: recorded, and a real click is shown to reach the site;
 //   • live-chatty    — a live site that posts Crestmont demo messages itself: the label never follows it;
 //   • live-appshell  — the document never scrolls, its own full-height container does: that container is scrolled;
+//   • live-focus     — its in-page link focuses a form field: the browser may reveal that field, nothing more;
 //   • live-short     — the page fits every frame: recorded as nothing to scroll, Crestmont still stays still;
 //   • live-leaky     — NEGATIVE CONTROL: its /login permits framing by Crestmont and it has no framed-mode link handler
 //                      → the security check and the protected-tap check must both FAIL.
 // Every other check (scrolling, isolation, reload, devices) must pass for every fixture.
 //   PLAYWRIGHT_MODULE=… node scripts/live-site-nav-check.mjs http://localhost:8787
-// (after: node scripts/scroll-isolation-seed.mjs .dev/x.db live-multipage,live-onepage,live-nonav,live-chatty,live-appshell,live-short,live-leaky)
+// (after: node scripts/scroll-isolation-seed.mjs .dev/x.db live-multipage,live-onepage,live-nonav,live-chatty,live-appshell,live-focus,live-short,live-leaky)
 const pw = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const { chromium } = pw.chromium ? pw : pw.default;
 const { checkInteractive } = await import("./preview-explorer-checks.mjs");
@@ -51,6 +52,9 @@ const SITES = {
   "live-appshell": { // the document never scrolls; a full-height <main> does (Glassly's mobile layout since 2026-11-18)
     "/": [PUBLIC, page(`<main id="shell" style="position:fixed;inset:0;overflow-y:auto;padding:16px"><h1>App-shell fixture</h1>${filler(40)}</main>`, "<style>html,body{height:100%;overflow:hidden}</style>")],
   },
+  "live-focus": { // its "Get a quote" link jumps to a form and focuses its first field (Glassly's #schedule)
+    "/": [PUBLIC, page(`<nav><a href="#quote" id="go">Get a quote</a></nav><h1>Focus fixture</h1>${filler(30)}<form id="quote"><label>Address <input id="address"></label></form>${filler(3)}`, `<script>addEventListener("DOMContentLoaded", () => document.getElementById("go").addEventListener("click", (e) => { e.preventDefault(); document.getElementById("address").focus(); }));</script>`)],
+  },
   "live-short": { // fits any frame: nothing to scroll
     "/": [PUBLIC, page("<h1>Short fixture</h1><p>TEST DATA: one short paragraph that fits every frame size.</p>")],
   },
@@ -73,6 +77,7 @@ const EXPECT = {
   "live-nonav": { pass: [/sensitive route \/quote still refuses framing/, /no public in-site link to follow \(recorded, not invented\) — a real click reaches the live site/], fail: [] },
   "live-chatty": { pass: [/public navigation to \/about loads inside the frame/, /label stays the live site's host; forged messages .* are ignored/], fail: [] },
   "live-appshell": { pass: [/scrolling reaches the end of the live site \(its scroll container <main#shell>\)/, /stays still while the demo scrolls/, /a real click reaches the live site/], fail: [] },
+  "live-focus": { pass: [/in-page link #quote moves the live site/], fail: [] },
   "live-short": { pass: [/the live page fits the frame at this size — nothing to scroll/, /a real click reaches the live site/], fail: [] },
   "live-leaky": { pass: [/public navigation to \/services loads inside the frame/], fail: [/sensitive route \/login PERMITS framing by Crestmont — must refuse/, /protected link \/login never loads inside the frame .*no new tab opened/] },
 };

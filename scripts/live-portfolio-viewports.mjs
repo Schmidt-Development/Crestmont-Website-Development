@@ -73,7 +73,7 @@ for (const [label, viewport, touch] of WIDTHS) {
         const box = await iframe.boundingBox();
         const cx = Math.round(box.x + box.width / 2), cy = Math.round(box.y + box.height / 2);
         const outerY = () => p.evaluate(() => Math.round(scrollY));
-        const innerY = () => fr.evaluate(() => Math.round(scrollY) + [...document.querySelectorAll("*")].reduce((a, e) => a + e.scrollTop, 0));
+        const innerY = () => fr.evaluate(() => Math.round(scrollY) + [...document.querySelectorAll("body *")].reduce((a, e) => a + e.scrollTop, 0));
         const y0 = await outerY(), i0 = await innerY();
         if (touch) {
           const cdp = await ctx.newCDPSession(p), d = Math.round(box.height * 0.35);
