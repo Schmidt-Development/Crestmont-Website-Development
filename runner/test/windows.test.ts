@@ -136,8 +136,15 @@ test("[AIB-RUNNER] PowerShell scripts pass a light static lint and are ASCII-onl
   for (const f of ["Discover-Hardware.ps1", "Install-CrestmontRunner.ps1", "Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "SquidConf.ps1", "Test-WindowsScripts.ps1"]) {
     assert.ok(scripts.includes(f), `${f} present`);
   }
-  for (const f of scripts) {
-    const bytes = readFileSync(path.join(WIN, f));
+  // The research worker's kit is linted here too: it dot-sources the same BackgroundTask.ps1 and is parsed by the
+  // same CI jobs, so a bracket imbalance or a "$name:" trap in it is the same class of defect.
+  const RESEARCH_WIN = path.join(REPO_ROOT, "research-worker", "windows");
+  const all = [
+    ...scripts.map((f) => ({ f, dir: WIN })),
+    ...readdirSync(RESEARCH_WIN).filter((f) => f.endsWith(".ps1")).map((f) => ({ f, dir: RESEARCH_WIN })),
+  ];
+  for (const { f, dir } of all) {
+    const bytes = readFileSync(path.join(dir, f));
     // Windows PowerShell 5.1 reads BOM-less files as ANSI: UTF-8 punctuation (e.g. an em dash, E2 80 94) becomes
     // characters such as U+201D that PowerShell treats as a quote, which can break string parsing.
     assert.equal(bytes.findIndex((b) => b > 127), -1, `${f} must be ASCII-only`);
