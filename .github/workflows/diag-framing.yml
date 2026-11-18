@@ -1,4 +1,4 @@
-name: Diagnostic — preview and live framing headers (temporary, read-only)
+name: Diagnostic — live framing headers after the site releases (temporary, read-only)
 on:
   push:
     branches: ["claude/**"]
@@ -8,23 +8,26 @@ permissions:
 jobs:
   headers:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Response headers (GET, no cookies; nothing submitted)
+      - name: Live response headers (GET, no cookies; nothing submitted)
         run: |
+          WANT="frame-ancestors https://crestmontwebsitedevelopment.com https://www.crestmontwebsitedevelopment.com"
+          fa() { curl -s -o /dev/null -D - --max-time 20 -H 'cache-control: no-cache' "$1" | tr -d '\r' | grep -i '^content-security-policy:' | grep -o "frame-ancestors[^;]*" | head -1; }
           probe() {
-            out=$(curl -s -o /dev/null -D - --max-time 20 "$1" | tr -d '\r')
+            out=$(curl -s -o /dev/null -D - --max-time 20 -H 'cache-control: no-cache' "$1" | tr -d '\r')
             code=$(echo "$out" | head -1 | awk '{print $2}')
             xfo=$(echo "$out" | grep -i '^x-frame-options:' | head -1 | cut -d' ' -f2-)
-            fa=$(echo "$out" | grep -i '^content-security-policy:' | grep -o "frame-ancestors[^;]*" | tr '\n' '|')
-            echo "$code | $1 | XFO=${xfo:-—} | ${fa:-no frame-ancestors}"
+            f=$(echo "$out" | grep -i '^content-security-policy:' | grep -o "frame-ancestors[^;]*" | tr '\n' '|')
+            echo "$code | $1 | XFO=${xfo:-—} | ${f:-no frame-ancestors}"
           }
-          echo "### GEIP preview (PR #1)"
-          for p in / /developers /security /privacy /login /signup /app /owner /api/health /p/x /billing-simulator/checkout; do probe "https://get-every-invoice-paid-git-claude-portfoli-76b866-noahschmidt10.vercel.app$p"; done
-          echo "### Glassly preview (PR #15)"
-          for p in / /quote /q/abc /ops /api/health /index.html /assets/css/styles.css; do probe "https://glassly-git-claude-portfolio-framing-noahschmidt10.vercel.app$p"; done
-          echo "### lansingcarrentals.com — which build is live?"
-          html=$(curl -s --max-time 20 https://lansingcarrentals.com/)
-          echo "brand__name present: $(echo "$html" | grep -c 'brand__name')"
-          echo "asset versions: $(echo "$html" | grep -o '?v=[0-9]*' | sort -u | tr '\n' ' ')"
-          echo "scripts: $(echo "$html" | grep -o '<script src="[^"]*"' | tr '\n' ' ')"
+          for site in https://geteveryinvoicepaid.com https://glasslyautoglass.com https://betterlansingmechanics.com https://mentorship.lansingcarrentals.com; do
+            for i in $(seq 1 40); do [ "$(fa "$site/")" = "$WANT" ] && break; sleep 15; done
+            echo "### $site (public page settled after ~$(( (i-1) * 15 )) s)"
+          done
+          echo "### GEIP";    for p in / /developers /security /support /privacy /terms /login /signup /forgot-password /app /owner /api/health /p/x; do probe "https://geteveryinvoicepaid.com$p"; done
+          echo "### Glassly"; for p in / /quote /q/abc /ops /api/health; do probe "https://glasslyautoglass.com$p"; done; probe "https://quotes.glasslyautoglass.com/quote"
+          echo "### BLM";     for p in / /services /about /es /book /login /portal /owner /manage-booking /api/public/slots; do probe "https://betterlansingmechanics.com$p"; done
+          echo "### Mentorship"; for p in / /book /booking/confirmed /owner /healthz /api/availability; do probe "https://mentorship.lansingcarrentals.com$p"; done
+          echo "### Rentals (changes in Crestmont's release)"; for p in / /privacy /partner/apply /owner/login; do probe "https://lansingcarrentals.com$p"; done
+          echo "### Lead Haven (reference)"; for p in / /account/ /privacy/; do probe "https://leadhavencollective.com$p"; done
