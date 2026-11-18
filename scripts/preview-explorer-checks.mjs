@@ -128,7 +128,24 @@ export async function checkInteractive(p, label, ok, { touch = false, headersOf 
   const box = await iframe.boundingBox();
   const cx = box.x + box.width / 2, cy = touch ? box.y + box.height / 2 : box.y + Math.min(box.height / 2, 200);
   const y0 = await outerY(p);
-  const inner = () => fr.evaluate(() => ({ y: Math.round(scrollY), max: Math.round(document.documentElement.scrollHeight - innerHeight) }));
+  // The demo's page scroll. A native live site may instead scroll inside its own container (an "app shell": the document
+  // does not scroll, a full-height element does) — then that container is what a visitor scrolls (live sites only).
+  const inner = () => fr.evaluate((live) => {
+    const d = { y: Math.round(scrollY), max: Math.round(document.documentElement.scrollHeight - innerHeight), where: "page" };
+    if (!live) return d;
+    // The viewport scrolls unless overflow hides it (html, or body propagated when html is visible) — as browsers decide.
+    const ov = (e) => getComputedStyle(e).overflowY, h = ov(document.documentElement);
+    const pageScrolls = d.max > 0 && !/hidden|clip/.test(h) && !(h === "visible" && document.body && /hidden|clip/.test(ov(document.body)));
+    if (pageScrolls) return d;
+    let best = null;
+    for (const e of document.querySelectorAll("body *")) {
+      if (!/(auto|scroll|overlay)/.test(getComputedStyle(e).overflowY)) continue;
+      const m = e.scrollHeight - e.clientHeight;
+      if (m > 2 && (!best || m > best.m)) best = { e, m };
+    }
+    if (!best) return { ...d, max: 0, where: "nothing scrollable" };
+    return { y: Math.round(best.e.scrollTop), max: Math.round(best.m), where: `its scroll container <${best.e.tagName.toLowerCase()}${best.e.id ? "#" + best.e.id : ""}>` };
+  }, info.live);
   const cdp = touch ? await p.context().newCDPSession(p) : null;
   const gesture = async (dy, times) => {
     for (let i = 0; i < times; i++) {
@@ -148,7 +165,8 @@ export async function checkInteractive(p, label, ok, { touch = false, headersOf 
   const start = await inner();
   let end = start;
   for (let k = 0; k < (touch ? 80 : 30) && end.y < end.max - 2; k++) { await gesture(600, 3); end = await inner(); }
-  ok(end.y > start.y && end.y >= end.max - 2, `${tag}: ${touch ? "touch" : "wheel"} scrolling reaches the end of the demo page (${start.y} → ${end.y} of ${end.max}px)`);
+  if (info.live && start.max <= 0) ok(true, `${tag}: the live page fits the frame at this size — nothing to scroll (no scrollable container); gestures below check Crestmont stays still`);
+  else ok(end.y > start.y && end.y >= end.max - 2, `${tag}: ${touch ? "touch" : "wheel"} scrolling reaches the end of the ${info.live ? `live site (${start.where})` : "demo page"} (${start.y} → ${end.y} of ${end.max}px)`);
   ok((await outerY(p)) === y0, `${tag}: Crestmont's page stays still while the demo scrolls`);
   await gesture(600, 4);
   ok((await outerY(p)) === y0, `${tag}: still stationary when the gesture continues past the demo's bottom`);
@@ -374,7 +392,10 @@ export async function checkLiveSite(p, fr, info, tag, ok, inner, headersOf) {
       const yBefore = await outerY(p), d0 = (await inner()).y;
       await f.locator("[data-pfx-probe]").first().click().catch(() => {}); await sleep(1200);
       const dAfter = (await inner()).y, yAfter = await outerY(p);
-      ok(dAfter !== d0 && yAfter === yBefore && p.url() === topUrl, `${tag}: in-page link ${anchor} moves the live site only (site ${d0} → ${dAfter}px; Crestmont ${yBefore} → ${yAfter}px)`);
+      // Evidence for a Crestmont movement: what the site did after the click (focus moved into a field, which the browser
+      // reveals in every scrolling ancestor, or a plain fragment jump).
+      const why = yAfter === yBefore ? "" : await f.evaluate(() => { const a = document.activeElement; return `; focus now on <${a?.tagName.toLowerCase()}${a?.id ? "#" + a.id : ""}${a?.getAttribute?.("type") ? ` type=${a.getAttribute("type")}` : ""}>, location ${location.hash || "(no hash)"}`; }).catch(() => "");
+      ok(dAfter !== d0 && yAfter === yBefore && p.url() === topUrl, `${tag}: in-page link ${anchor} moves the live site only (site ${d0} → ${dAfter}px; Crestmont ${yBefore} → ${yAfter}px${why})`);
     } else {
       // Nothing public to navigate to: say so (never invent a link or enter a sensitive route) and show that a visitor's
       // click genuinely reaches the site — a real pointer click on non-interactive content inside the frame.

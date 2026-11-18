@@ -86,7 +86,10 @@ for (const [label, viewport, touch] of WIDTHS) {
         } else { await p.mouse.move(cx, cy); await p.mouse.wheel(0, 500); }
         await sleep(700);
         const i1 = await innerY(), y1 = await outerY();
-        ok(i1 > i0 && y1 === y0, `${tag}: ${touch ? "swipe" : "wheel"} scrolls the site inside the frame (${i0} → ${i1}px) while Crestmont stays still (${y0} → ${y1}px)`);
+        // A page that fits its frame has nothing to scroll: record which, from the page itself.
+        const room = await fr.evaluate(() => { const ov = (e) => getComputedStyle(e).overflowY, hv = ov(document.documentElement); const hidden = /hidden|clip/.test(hv) || (hv === "visible" && /hidden|clip/.test(ov(document.body))); const doc = hidden ? 0 : document.documentElement.scrollHeight - innerHeight; let el = 0; for (const e of document.querySelectorAll("body *")) if (/(auto|scroll|overlay)/.test(getComputedStyle(e).overflowY)) el = Math.max(el, e.scrollHeight - e.clientHeight); return { doc: Math.round(doc), el: Math.round(el), h: innerHeight }; }).catch(() => ({ doc: 1, el: 0, h: 0 }));
+        if (room.doc <= 0 && room.el <= 2) ok(y1 === y0, `${tag}: the page fits its ${room.h}px frame — nothing to scroll; Crestmont stays still (${y0} → ${y1}px)`);
+        else ok(i1 > i0 && y1 === y0, `${tag}: ${touch ? "swipe" : "wheel"} scrolls the site inside the frame (${i0} → ${i1}px; room: page ${room.doc}px, container ${room.el}px) while Crestmont stays still (${y0} → ${y1}px)`);
         // Measured idle (the scroll above has settled), over 2 s — the same conditions as the direct visit below.
         await sleep(1000);
         const sample = () => fr.evaluate(() => new Promise((res) => { let n = 0; const t = performance.now(); const g = () => { n++; if (performance.now() - t < 2000) requestAnimationFrame(g); else res({ fps: Math.round(n / ((performance.now() - t) / 1000)), running: document.getAnimations ? document.getAnimations().filter((a) => a.playState === "running").length : -1 }); }; requestAnimationFrame(g); })).catch(() => null);
