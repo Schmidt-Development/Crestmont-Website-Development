@@ -35,8 +35,16 @@ export interface BuiltCheckpoint { file: string; base64: string | null; bytes: n
 
 let counter = 0;
 
-/** Runner-owned records in <job dir> (outside the agent's repository) that make retries idempotent. */
-export const RUNNER_STATE_FILES = ["integration-operations-done.json"] as const;
+/**
+ * Runner-owned records in <job dir> (outside the agent's repository) that a resume needs and the git bundle
+ * does not carry.
+ *
+ * `blueprint-sections.json` is the Design Blueprint built a section at a time. Without it in the archive a
+ * resume on another host regenerates every section from nothing -- the all-or-nothing behaviour that sectioning
+ * exists to end. `reference-manifest.json` is the provenance record: which gallery reference reached which
+ * model, by sha256. A resume that loses it can no longer say what the build was actually shown.
+ */
+export const RUNNER_STATE_FILES = ["integration-operations-done.json", "blueprint-sections.json", "reference-manifest.json"] as const;
 
 /** cpSync filter: copy directories and regular files only (symlinks and special files are left out of checkpoints). */
 function regularOnly(src: string): boolean {
