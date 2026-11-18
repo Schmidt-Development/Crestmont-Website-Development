@@ -219,6 +219,31 @@ await check("closed visitors are cleaned up (sessions ended, browsers closed)", 
   await until("no local browsers", async () => { const r = await json("/__dev/remote-fixtures/browsers"); return { ok: r.running === 0, v: r }; }, 15000);
 });
 
+// ── 2a. Readable layout on every slide (Owner, 2026-11-18): the long "remote view" label must not squeeze the title
+// and description into a narrow strip — desktop, tablet and phone widths.
+for (const [vw, vh] of [[1440, 900], [1280, 800], [820, 1180], [390, 844]]) {
+  const { c, p } = await visitor({ viewport: { width: vw, height: vh } });
+  await check(`layout at ${vw} px: every slide keeps a readable description beside its links`, async () => {
+    await p.goto(`${BASE}/portfolio`);
+    await p.locator(".pfx").first().scrollIntoViewIfNeeded();
+    const n = await p.locator(".pfx__slide").count();
+    const bad = [];
+    for (let i = 0; i < n; i++) {
+      if (i) { await p.locator("[data-pfx-next]").first().click(); await sleep(500); }
+      const l = await p.evaluate(() => {
+        const s = document.querySelector(".pfx__slide:not([inert])"), w = (sel) => s.querySelector(sel)?.getBoundingClientRect().width ?? 0;
+        return { name: s.dataset.name, kind: s.dataset.kind, meta: w(".pfx__meta"), desc: w(".pfx__desc"), links: w(".pfx__links") };
+      });
+      const stacked = vw <= 1000;
+      if (!(l.meta > 0 && l.desc >= l.meta * (stacked ? 0.85 : 0.5) && (stacked || l.links <= l.meta * 0.42))) bad.push(`${l.name} (${l.kind}): description ${Math.round(l.desc)} of ${Math.round(l.meta)} px, links ${Math.round(l.links)} px`);
+    }
+    assert.equal(n > 0, true, "slides present");
+    assert.deepEqual(bad, [], "squeezed slides");
+  });
+  await c.close();
+}
+await until("layout visitors released", async () => ({ ok: (await activeSessions()) === 0, v: await activeSessions() }), 30000).catch(() => undefined);
+
 // ── 2b. A website that paints late (production: Get Every Invoice Paid paints a dark empty page ~1 s before its
 // content fades in; Premium Invoices a black frame before its first paint). The slide must not be shown as live until
 // its content is on screen — the visitor never sees an empty box labelled "Live website".

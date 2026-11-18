@@ -1226,13 +1226,17 @@ a.shot { display: block; cursor: zoom-in; }
 .pfx__slide[data-unavailable="true"] .pfx__spinner { animation: none; border-top-color: var(--line-gold); opacity: .5; }
 .pfx__label--live { display: inline-flex; justify-content: flex-end; gap: 6px; }
 @media (prefers-reduced-motion: reduce) { .pfx__pulse::after, .pfx__spinner { animation: none; } }
-.pfx__meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s-4) var(--s-7); align-items: end; padding: var(--s-5) var(--s-1) 0; }
+/* Bounded columns: the links column grows only to fit its content and never past 24rem (a long mode label wraps inside
+   it); the title and description always keep at least 60% of the row. (An auto track sized itself to the longest
+   label's one-line width and squeezed the description into a narrow strip.) */
+.pfx__meta { display: grid; grid-template-columns: minmax(min(100%, 60%), 1fr) fit-content(24rem); gap: var(--s-4) var(--s-7); align-items: end; padding: var(--s-5) var(--s-1) 0; }
+.pfx__meta-main, .pfx__links { min-width: 0; }
 .pfx__count { margin: 0 0 var(--s-2); color: var(--text-3); font-size: var(--fs-sm); }
 .pfx__count-n { color: var(--gold-1); font-weight: 600; }
 .pfx__name { font: 500 var(--fs-3xl)/1.05 var(--font-display); letter-spacing: -.035em; margin: 0 0 var(--s-2); }
 .pfx__desc { margin: 0; color: var(--text-2); max-width: 62ch; }
 .pfx__links { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); align-items: center; justify-content: flex-end; }
-.pfx__label { flex-basis: 100%; text-align: right; font-size: var(--fs-xs); font-weight: 600; letter-spacing: .04em; color: var(--gold-1); }
+.pfx__label { flex-basis: 100%; max-width: 100%; text-align: right; font-size: var(--fs-xs); font-weight: 600; letter-spacing: .04em; color: var(--gold-1); overflow-wrap: break-word; }
 .pfx__link { display: inline-flex; align-items: center; gap: 6px; color: var(--white); font-size: var(--fs-sm); font-weight: 500; text-decoration: none; border-bottom: 1px solid var(--line-control); padding-bottom: 2px; }
 .pfx__link:hover { color: var(--gold-1); border-bottom-color: var(--gold-1); }
 @media (max-width: 1000px) {

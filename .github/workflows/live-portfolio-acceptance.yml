@@ -41,7 +41,7 @@ jobs:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: |
           set +e
-          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 5 --live lead-haven-collective > accept.log 2>&1
+          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 6 --live lead-haven-collective --real all > accept.log 2>&1
           rc=$?
           cat accept.log
           { if [ "$rc" = 0 ]; then echo "## Feature verification: PASSED — live portfolio accepted on production"; else echo "## Feature verification: FAILED — the live portfolio was NOT accepted"; fi

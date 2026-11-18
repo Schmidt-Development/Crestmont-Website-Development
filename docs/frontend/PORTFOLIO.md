@@ -26,6 +26,48 @@ This is recorded through the existing relationship-evidence fields (`relationshi
 `scripts/portfolio-setup.ts`. The relationship text is "Founder-owned business — website designed and developed
 in-house by the Crestmont team". Do not ask the Founder for this again.
 
+## Real websites first (Owner, 2026-11-18)
+
+> "Correct Crestmont's portfolio so that all five entries currently using demos or remote viewing display their actual
+> production websites, preferably through native iframe embedding like Lead Haven Collective." … "An existing demo must
+> never override a compatible live production website."
+
+**Order of preference** (`previewState()` in `src/services/portfolio.ts`; regression test in
+`tests/portfolio-live-embed.test.ts`): 1. the real production website in a native frame, when its own headers permit
+this site (a successful embedding check, at most 8 days old); 2. the real production website through the remote viewer,
+when it refuses framing (Mode B); 3. only then an Owner-verified demo (labelled "Interactive demo — no real
+transactions") or the genuine screenshot. Until 2026-11-18 a ready demo was returned before the live check, so the four
+demo entries never showed their real sites. The embedding check runs daily (Cron, 11:17 UTC), on every production
+release and on demand in the staff editor, so a site that changes its headers switches by itself.
+
+**Framing standard for every website Crestmont builds or controls** (applied 2026-11-18 to Get Every Invoice Paid,
+Glassly, Better Lansing Mechanics, Lansing Car Rentals and its mentorship site; Lead Haven Collective since 2026-11-15):
+
+- Public, read-only marketing pages send `Content-Security-Policy: frame-ancestors https://crestmontwebsitedevelopment.com
+  https://www.crestmontwebsitedevelopment.com` and no `X-Frame-Options` (it cannot name an allowed origin). Never `*`,
+  never another site.
+- Every other page — sign-in, sign-up, accounts, owner/admin/staff areas, booking, quotes, checkout, billing, payment,
+  token links, the API, error pages — keeps `frame-ancestors 'none'` and `X-Frame-Options: DENY`.
+- Inside a frame, links to non-framable pages open in a new tab (a capture-phase click handler; for client-side routers
+  such as Next.js the click must be intercepted before the router, or the private page would render inside the frame).
+- One list of framable pages, shared by the headers and the link handler, and a test that pins both sets of headers.
+- Never assume an unrelated third-party website may be framed: the embedding check reads its own headers, and a site
+  that refuses framing is shown through the remote viewer or not at all.
+
+Release paths used on 2026-11-18 (each site's own): Vercel (Get Every Invoice Paid PR #1, Glassly PR #15 — merge to
+`main`), Cloudflare Workers Builds (Better Lansing Mechanics — hotfix PR #25 to `production`, as its PR #10, so
+production received only this change; PR #26 brought the same change to `main`/staging), Cloudflare Pages (mentorship —
+PR #4 to its production branch `cloudflare-pages-deployment`), and lansingcarrentals.com (PR #5 to its source branch
+`claude/session-2026-10-21`, which builds production automatically — its deployment guide describes a manual
+`wrangler deploy`; the branch's earlier, not yet released header styling commit 4e40ff6 went live with it). Lead Haven
+Collective keeps its content-only update through Crestmont's release (`tools/client-sites/lead-haven-collective`).
+
+**Layout:** `.pfx__meta` uses bounded columns (`minmax(min(100%, 60%), 1fr) fit-content(24rem)`): the links column
+fits its content up to 24rem and long mode labels wrap inside it. An `auto` track had sized itself to the remote-view
+label's one-line width and squeezed titles and descriptions into a narrow strip. `live-portfolio-check.mjs` checks the
+description keeps ≥ 50% of the row on desktop (≥ 85% when stacked) on every slide, and with `--real all` that every
+published project shows its real production domain (native or remote, never a demo or `*.workers.dev`).
+
 ## Live website showcase (Owner, 2026-11-15)
 
 > "I DO NOT want a traditional screenshot-based portfolio. I want Crestmont Website Development to showcase actual,

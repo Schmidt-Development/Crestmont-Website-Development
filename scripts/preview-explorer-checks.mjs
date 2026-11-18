@@ -67,6 +67,13 @@ export async function checkLocation(p, base, path, label, ok) {
     states[g.name] = state;
     ok(g.full && !g.gap, `${label} ${path} · ${g.name}: full width, aspect kept (${g.mode}, ${g.media})`);
     ok(g.arrowsOutside, `${label} ${path} · ${g.name}: switching arrows sit outside the frame`);
+    // Readable title and description beside the links and mode label (Owner, 2026-11-18: long labels squeezed them).
+    const lay = await p.evaluate(() => {
+      const s = document.querySelector(".pfx__slide:not([inert])"), w = (sel) => s.querySelector(sel)?.getBoundingClientRect().width ?? 0;
+      return { meta: w(".pfx__meta"), desc: w(".pfx__desc"), links: w(".pfx__links"), vw: innerWidth };
+    });
+    const stacked = lay.vw <= 1000, share = stacked ? 0.85 : 0.5;
+    ok(lay.meta > 0 && lay.desc >= lay.meta * share && (stacked || lay.links <= lay.meta * 0.42), `${label} ${path} · ${g.name}: readable layout — description ${Math.round(lay.desc)} of ${Math.round(lay.meta)} px (≥ ${share * 100}%), links ${Math.round(lay.links)} px`);
     // Unavailable: say why, from the runner's side — the demo's own page (not /__demo/info, which answers without the
     // site or its database): HTTP status, time to answer, and whether the page carries the handshake script.
     let why = "";

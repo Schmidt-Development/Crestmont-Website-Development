@@ -280,15 +280,23 @@ jobs:
       # untouched), verifies the live headers (public pages: frame-ancestors = exactly the Crestmont origins; private
       # pages: still DENY / 'none') and rolls back on any mismatch. Idempotent: a site that already permits it is left
       # alone. A client-site problem never rolls back this release; the portfolio then shows that site's fallback.
-      - name: Client sites — owner-authorized framing permission (Lead Haven Collective)
+      # Every manifest under tools/client-sites/ (Lead Haven Collective, 2026-11-15). Sites with their own release pipeline
+      # (Vercel, Cloudflare Pages, Workers Builds) change through their repositories instead. One site's failure does
+      # not stop the others.
+      - name: Client sites — owner-authorized framing permission (every tools/client-sites manifest)
         if: steps.deploy.outcome == 'success'
         continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          node scripts/client-site-framing.mjs tools/client-sites/lead-haven-collective | tee -a "$GITHUB_STEP_SUMMARY"
-          exit "${PIPESTATUS[0]}"
+          rc=0
+          for dir in tools/client-sites/*/; do
+            echo "### ${dir%/}" | tee -a "$GITHUB_STEP_SUMMARY"
+            node scripts/client-site-framing.mjs "${dir%/}" | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "${PIPESTATUS[0]}" = 0 ] || rc=1
+          done
+          exit "$rc"
 
       # Interactive portfolio (Owner, 2026-11-13). The four isolated portfolio-demo Workers (their own synthetic data,
       # simulated payments, captured email; docs/frontend/PORTFOLIO.md) are recorded on production's portfolio rows
@@ -548,11 +556,11 @@ jobs:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: |
           set +e
-          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 5 --live lead-haven-collective > accept.log 2>&1
+          node scripts/live-portfolio-check.mjs "$PRODUCTION_URL" 6 --live lead-haven-collective --real all > accept.log 2>&1
           rc=$?
           cat accept.log
           { if [ "$rc" = 0 ]; then echo "## Feature verification: PASSED — live portfolio accepted on production"; else echo "## Feature verification: FAILED — the release is deployed, but the live portfolio was NOT accepted"; fi
-            echo; grep -E '^(PASS|FAIL)' accept.log | grep -E 'FAIL|lead-haven|published projects' ; } >> "$GITHUB_STEP_SUMMARY"
+            echo; grep -E '^(PASS|FAIL)' accept.log | grep -E 'FAIL|lead-haven|published projects|REAL production website' ; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
       # The automatic display system on the three acceptance websites (Mode A / B / C chosen by the deploy job's intake
       # step): blocked sites must be genuinely interactive through the remote browser — desktop, Android touch,
