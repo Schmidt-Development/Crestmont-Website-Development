@@ -1,0 +1,30 @@
+name: Diagnostic — preview and live framing headers (temporary, read-only)
+on:
+  push:
+    branches: ["claude/**"]
+    paths: [".github/workflows/diag-framing.yml"]
+permissions:
+  contents: read
+jobs:
+  headers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Response headers (GET, no cookies; nothing submitted)
+        run: |
+          probe() {
+            out=$(curl -s -o /dev/null -D - --max-time 20 "$1" | tr -d '\r')
+            code=$(echo "$out" | head -1 | awk '{print $2}')
+            xfo=$(echo "$out" | grep -i '^x-frame-options:' | head -1 | cut -d' ' -f2-)
+            fa=$(echo "$out" | grep -i '^content-security-policy:' | grep -o "frame-ancestors[^;]*" | tr '\n' '|')
+            echo "$code | $1 | XFO=${xfo:-—} | ${fa:-no frame-ancestors}"
+          }
+          echo "### GEIP preview (PR #1)"
+          for p in / /developers /security /privacy /login /signup /app /owner /api/health /p/x /billing-simulator/checkout; do probe "https://get-every-invoice-paid-git-claude-portfoli-76b866-noahschmidt10.vercel.app$p"; done
+          echo "### Glassly preview (PR #15)"
+          for p in / /quote /q/abc /ops /api/health /index.html /assets/css/styles.css; do probe "https://glassly-git-claude-portfolio-framing-noahschmidt10.vercel.app$p"; done
+          echo "### lansingcarrentals.com — which build is live?"
+          html=$(curl -s --max-time 20 https://lansingcarrentals.com/)
+          echo "brand__name present: $(echo "$html" | grep -c 'brand__name')"
+          echo "asset versions: $(echo "$html" | grep -o '?v=[0-9]*' | sort -u | tr '\n' ' ')"
+          echo "scripts: $(echo "$html" | grep -o '<script src="[^"]*"' | tr '\n' ' ')"
