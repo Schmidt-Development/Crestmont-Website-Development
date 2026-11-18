@@ -26,6 +26,92 @@ This is recorded through the existing relationship-evidence fields (`relationshi
 `scripts/portfolio-setup.ts`. The relationship text is "Founder-owned business — website designed and developed
 in-house by the Crestmont team". Do not ask the Founder for this again.
 
+## Automatic native readiness for new websites (Owner, 2026-11-18)
+
+> "When I add a website I own, I should not have to modify its security headers manually … Crestmont should
+> automatically use its authorized hosting and repository integrations to make that website native-compatible, verify
+> it, and display the actual live production website." … "Do not work around this problem by relabeling remote views
+> as native."
+
+**Root cause it fixes.** Until this change, Add → `selectDisplayMode()` turned every site that refused framing into Mode B
+(remote browser) automatically, and `publishBlockers()` accepted Mode B as publishable. Nothing ever tried to make a new
+site native: the six existing sites became native only through hand-made changes in their own repositories.
+
+**Now (migration 0110, `src/services/native/`).** Every entry created from this release is `native_required`:
+
+1. Staff → Portfolio → Add: enter the address. Step 2 reads the page (name, description) and its framing headers and,
+   for a site that refuses framing, asks the connected accounts which one serves it (read-only).
+2. Create: the orchestrator (`orchestrator.ts`, one step per call — on create, on **Check again**, and every 15 minutes
+   for entries in progress) moves the entry through `checking → preparing → native_verified`, or stops at
+   `authorization_required` / `unavailable` with the exact reason and what is needed.
+3. Preparation through the authorized connection only (ownership is proven by the provider, never inferred from a URL;
+   a repository only when the provider links it):
+   - **Cloudflare zone** (the host is in a connected zone and proxied: proxied DNS, Workers custom domain or route, Pages
+     custom domain): ONE Response Header Transform Rule owned by Crestmont (stable `ref`) that on the host's exact public
+     paths **adds** `Content-Security-Policy: frame-ancestors <Crestmont origins>` (the site's own CSP is untouched) and
+     removes `X-Frame-Options`. Other rules in the phase are never sent or changed (per-rule endpoints). If it has no
+     effect within 10 minutes it is removed again and recorded — never re-applied in a loop.
+   - **Vercel project linked to GitHub**: `vercel.json` `headers` entries for the public paths (structured JSON edit,
+     everything else kept), via a pull request in that repository; **Cloudflare Pages linked to GitHub**: Crestmont's
+     marked block in `_headers` (detaches `X-Frame-Options` on the public paths, adds the frame-ancestors CSP).
+     One branch (`crestmont/native-embedding`) and one PR per repository, updated in place. A production branch that
+     requires reviews is **never** merged by Crestmont: the entry shows *Authorization required* with the PR link. An
+     unprotected branch is merged once GitHub reports the PR mergeable; the provider deploys it through its own Git
+     integration and Crestmont follows that deployment (failed → *unavailable* with the deployment's status).
+   - Not attempted (honest *unavailable*): the site's own CSP already sets `frame-ancestors` on public pages (a second
+     policy cannot override it); a Vercel/Pages project not linked to GitHub; a Pages build whose `_headers` location is
+     unknown; a vercel.json that is not valid JSON or uses legacy `routes`.
+   - Public paths are "/" plus the homepage's same-site links that are not sensitive (`standard.ts SENSITIVE_ROUTE`:
+     sign-in/up, accounts, owner/staff/admin, dashboards, booking/appointments, quotes/applications, checkout, cart,
+     billing, payment, invoices, orders, tokens, the API …). Sensitive pages are never listed, never opened, never
+     loaded in a frame.
+4. **Verification in a real browser** (`verify.ts`): a fresh Chromium (Browser Run in production, a local Chromium in
+   development/CI) opens `/portfolio/native-verify/<10-minute token>` — the live site in exactly the portfolio's
+   sandboxed iframe, from this Crestmont origin — and checks *frame* (the browser loaded the live origin), *content*
+   (not blank, not stuck), *javascript* (animation frames, uncaught errors), *canvas* (every large 2D/WebGL canvas draws
+   pixels; animation recorded), *scroll* (a real wheel gesture), *click* (a real click reaches the site), *mobile* (390 px,
+   no sideways overflow), and *protected pages* (the sensitive pages the homepage links to still refuse framing).
+   Only then `native_verified`. A browser without WebGL says so instead of failing the site. At most
+   `PORTFOLIO_NATIVE_VERIFY_DAILY` (default 10) verifications per day, each well under a minute, only on transitions
+   or an explicit re-check — the daily header check stays header-only.
+5. Publishing keeps every existing requirement (relationship, link, the owner's recorded consent) and additionally
+   needs `native_verified`; no screenshots are needed and none can stand in for it. A new entry is **never** shown
+   through the remote browser (the remote-session API refuses it too), a demo or a screenshot; if a published native
+   entry's site later stops permitting framing, it is marked *Native embedding unavailable* and visitors are told so.
+
+Existing entries (`native_required = 0`, state `legacy`) — the six published sites and the release pipeline's
+display-mode acceptance entries — keep the previous behaviour, including Mode B.
+
+**Connections the Owner creates once** (Worker secrets; not in the database; `wrangler secret put` on the production
+Worker): `PORTFOLIO_CLOUDFLARE_TOKEN` (Zone:Read, DNS:Read, Transform Rules:Edit, Workers Scripts:Read, Pages:Read —
+optionally limited to accounts listed in `PORTFOLIO_CLOUDFLARE_ACCOUNTS`), `PORTFOLIO_VERCEL_TOKEN`
+(+ `PORTFOLIO_VERCEL_TEAM`), `PORTFOLIO_GITHUB_TOKEN` (fine-grained, the website repositories only: Contents RW,
+Pull requests RW, Metadata R). Without them every new site that refuses framing stops at *Authorization required*
+naming the missing connection.
+
+**What is tested, and how.** `tests/portfolio-native.test.ts` drives the staff flow over HTTP against a hermetic model of
+the Cloudflare, Vercel and GitHub APIs (`tests/support/native-world.ts`, whose sites change headers only when the fake
+provider has actually applied/deployed the change): Cloudflare zone rule, Vercel + GitHub (unprotected and protected),
+Cloudflare Pages + GitHub, and the negatives (no connection, unknown domain, unverified Vercel domain, read-only
+repository, CSP conflict, invalid link, failed deployment, rule without effect, PR closed unmerged, failed browser
+verification, redirects, daily cap, idempotent re-runs). `tests/portfolio-native-browser.test.ts` runs the same
+lifecycle with the REAL verifier in real Chromium (CI job "Portfolio scroll isolation", step "Native onboarding end to
+end"), including a WebGL scene, and its negatives (WebGL never draws, blank page after a JavaScript failure, a frame the
+browser refuses). The provider adapters have **not** yet been exercised against the live Cloudflare/Vercel/GitHub APIs
+of the Owner's accounts: that needs the connections above, and a first real onboarding is the remaining proof.
+
+**Websites Crestmont builds** are native-ready by default: both starters carry the standard in `public/_headers`
+(`scripts/lib/embedding.mjs` / `scripts/embedding.mjs`, identical copies) — every page `X-Frame-Options: DENY`; the
+built public pages (generated from the .html files; admin, booking/token and error pages excluded) detach it and add
+the Crestmont frame-ancestors policy. The gates regenerate the block and fail on a conflicting rule; after a release the
+runner checks the live headers (`runner/src/embedding.ts`: homepage permits Crestmont and nobody else; a sensitive page
+refuses) and the platform does not record the release as *Live and verified* otherwise.
+
+**Native vs direct, measured** (`scripts/live-native-visual.mjs`, in the read-only acceptance workflow): every published
+site opened directly and through Crestmont's native frame in the same Chromium — FCP/LCP, CLS, animation fps, scroll and
+click response, canvases drawn and animating — and Lead Haven Collective's 3D Earth specifically (cropped screenshots
+of both are kept as evidence).
+
 ## Real websites first (Owner, 2026-11-18)
 
 > "Correct Crestmont's portfolio so that all five entries currently using demos or remote viewing display their actual
