@@ -30,6 +30,8 @@ import { serviceVisual } from "../ui/service-visuals.ts";
 import { receptionistConsole, voiceLibrary } from "../ui/receptionist.ts";
 import { constellation, journey, qualityLab } from "../ui/about.ts";
 import { portfolioExplorer } from "../ui/portfolio-explorer.ts";
+import { advanceNative, discoverHosting, type Outcome as NativeOutcome } from "../services/native/orchestrator.ts";
+import { nativeDepsFrom } from "../services/native/deps.ts";
 import { SERVICES, SERVICE_GROUPS, serviceBySlug, servicePath, PRICING_NOTE, type ServiceDef } from "../content/services.ts";
 import { CMS_KEYS, cmsKeyDef, parseItems, paragraphs, type CmsKeyDef } from "../content/registry.ts";
 import { renderMarkdown, markdownIssues } from "../ui/markdown.ts";
@@ -695,6 +697,23 @@ ${pageHero("Preview — not published", proj.name, `Display: ${proj.display_mode
     return res;
   });
 
+  // Native verification page (src/services/native/verify.ts): ONLY the live website, in exactly the sandboxed iframe the
+  // portfolio uses, filling the viewport — opened by Crestmont's verification browser with a short-lived token. The
+  // site's own headers decide whether it loads; this page changes nothing about it.
+  r.get("/portfolio/native-verify/:token", async (ctx, p) => {
+    const id = await previewTokenProject(ctx.db, p.token, Date.now());
+    const proj = id ? await pf.getById(ctx.db, id) : null;
+    const target = proj ? safePublicUrl(proj.embed_url || proj.live_url) : null;
+    if (!proj || proj.archived_at || !target) throw new HttpError(404, "This verification link is not valid or has expired.");
+    ctx.frameSrc = [...new Set([...(ctx.frameSrc ?? []), target.origin])];
+    const res = htmlResponse(ctx, html`<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Native verification — ${proj.name}</title></head>
+<body style="margin:0;overflow:hidden;background:#fff"><iframe data-testid="native-verify-frame" src="${target.toString()}" title="${`The live ${proj.name} website`}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox" allow="camera 'none'; microphone 'none'; geolocation 'none'; payment 'none'" referrerpolicy="strict-origin-when-cross-origin" style="position:fixed;inset:0;width:100vw;height:100vh;border:0;display:block"></iframe></body></html>`);
+    res.headers.set("cache-control", "no-store");
+    res.headers.set("x-robots-tag", "noindex, nofollow");
+    res.headers.set("referrer-policy", "no-referrer");
+    return res;
+  });
+
   // Public screenshot bytes: ONLY files that are the current screenshot of a published project.
   r.get("/portfolio-media/:fileId", async (ctx, p) => {
     if (!(await pf.isPublicPortfolioFile(ctx.db, p.fileId))) throw new HttpError(404, "Not found");
@@ -1084,7 +1103,12 @@ function registerPortfolioAdmin(r: Router) {
     const v = projectFormValues(f);
     try {
       const { id } = await pf.createProject(ctx.db, ctx.actor!, v, ctx.ip, Number(str(f, "position")) || null);
-      // Step 3 happens on its own: the live preview is checked straight away (the site's own framing headers).
+      // Steps 3–4 for every new entry: Crestmont prepares the real website for its native frame through the authorized
+      // connections and verifies it in a real browser — never the remote browser in its place (src/services/native/).
+      if ((await pf.getById(ctx.db, id))?.native_required) {
+        const o = await advanceNative(nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin), id, { actorUserId: ctx.actor?.userId ?? null }).catch((e): NativeOutcome => ({ state: "checking", reason: `The first check did not complete (${(e as Error).message}); it continues automatically.` }));
+        return redirect(ctx, `/staff/portfolio/${id}`, { kind: o.state === "native_verified" ? "success" : o.state === "unavailable" ? "error" : "info", text: `Project added (unpublished). ${pf.NATIVE_LABEL[o.state]}: ${o.reason}`.slice(0, 900) });
+      }
       const r = await pf.refreshEmbed(ctx.db, { id, live_url: v.live_url }, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null, remoteBrowserConfig(ctx.env).enabled).catch(() => null);
       const sel = r ? pf.selectDisplayMode(r, remoteBrowserConfig(ctx.env).enabled) : null;
       const text = `Project added (unpublished). ${!sel ? "The live preview check will run again shortly." : sel.mode === "embed" ? "Display: native interactive embed (Mode A). The live website is shown below"
@@ -1109,7 +1133,8 @@ function registerPortfolioAdmin(r: Router) {
     const check = await checkEmbed(url.toString(), new URL(ctx.baseUrl).origin, netFetch(ctx));
     const name = (check.siteName ?? check.title?.split(/\s+[—–|·-]\s+/)[0] ?? "").trim().slice(0, 120);
     const slug = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
-    return portfolioNew(ctx, { live_url: check.url ?? url.toString(), name, slug, description: check.description ?? "", relationship: "Relationship documentation pending" }, [], check);
+    const hosting = check.status === "blocked" ? await discoverHosting(nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin), new URL(check.url ?? url.toString()).hostname) : null;
+    return portfolioNew(ctx, { live_url: check.url ?? url.toString(), name, slug, description: check.description ?? "", relationship: "Relationship documentation pending" }, [], check, 200, hosting);
   });
 
   r.post("/staff/portfolio/:id/embed-check", async (ctx, p) => {
@@ -1117,6 +1142,10 @@ function registerPortfolioAdmin(r: Router) {
     await ctx.form();
     const proj = await pf.getById(ctx.db, p.id);
     if (!proj) throw new HttpError(404, "Project not found");
+    if (proj.native_required) {
+      const o = await advanceNative(nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin), proj.id, { force: true, actorUserId: ctx.actor?.userId ?? null });
+      return redirect(ctx, `/staff/portfolio/${p.id}`, { kind: o.state === "native_verified" ? "success" : o.state === "unavailable" ? "error" : "info", text: `${pf.NATIVE_LABEL[o.state]}: ${o.reason}`.slice(0, 900) });
+    }
     const r = await pf.refreshEmbed(ctx.db, proj, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null, remoteBrowserConfig(ctx.env).enabled);
     const sel = pf.selectDisplayMode(r, remoteBrowserConfig(ctx.env).enabled);
     return redirect(ctx, `/staff/portfolio/${p.id}`, { kind: sel.mode === "unavailable" ? "error" : "success", text: `${MODE_LABEL[sel.mode]}. ${sel.reason}` });
@@ -1213,7 +1242,7 @@ async function portfolioList(ctx: AppContext, errors: string[] = [], status = 20
 <button type="button" class="pf-order__handle" data-pf-handle aria-label="Reorder ${p.name}: drag, or use the arrow keys" aria-describedby="pf-order-help">⠿</button>
 <span class="pf-order__pos" data-pf-pos aria-hidden="true">${i + 1}</span>
 <span class="pf-order__main"><a href="/staff/portfolio/${p.id}">${p.name}</a><br><span class="faint">${p.industry} · ${p.live_url}</span></span>
-<span class="pf-order__status">${p.published ? badge("published") : badge("draft", "Hidden")} ${d.kind === "live" ? badge("ok", "Live website") : d.kind === "remote" ? badge("ok", "Live website · remote view") : d.kind === "embed" ? badge("muted", "Demo") : badge("muted", "Screenshot")} ${b.length && !p.published ? badge("blocked", `${b.length} to publish`) : ""}</span>
+<span class="pf-order__status">${p.published ? badge("published") : badge("draft", "Hidden")} ${p.native_required ? badge(p.native_state === "native_verified" ? "ok" : p.native_state === "unavailable" ? "blocked" : "muted", pf.NATIVE_LABEL[p.native_state ?? "checking"]) : d.kind === "live" ? badge("ok", "Live website") : d.kind === "remote" ? badge("ok", "Live website · remote view") : d.kind === "embed" ? badge("muted", "Demo") : badge("muted", "Screenshot")} ${b.length && !p.published ? badge("blocked", `${b.length} to publish`) : ""}</span>
 <span class="pf-order__moves">${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Up", { hidden: { dir: "up" }, size: "sm" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Down", { hidden: { dir: "down" }, size: "sm" })}</span></li>`;
   };
   return staffShell(ctx, "Portfolio", html`${pageHead("Portfolio", undefined, "Content")}
@@ -1233,15 +1262,14 @@ ${input({ name: "live_url", label: "Live website address", type: "url", required
 }
 
 /** Step 2: confirm the details Crestmont read from the live site (nothing is saved until the staff member confirms). */
-async function portfolioNew(ctx: AppContext, v: Partial<pf.ProjectInput>, errors: string[], check: EmbedCheck | null, status = 200): Promise<Response> {
+async function portfolioNew(ctx: AppContext, v: Partial<pf.ProjectInput>, errors: string[], check: EmbedCheck | null, status = 200, hosting: { found: boolean; detail: string } | null = null): Promise<Response> {
   const n = (await pf.listActive(ctx.db)).length;
+  // New entries must become the real website in a native frame (src/services/native/): never the remote browser instead.
   const verdict = !check ? "" : check.status === "allowed"
-    ? html`<div class="alert alert--success" role="status"><strong>Live preview available.</strong> ${check.detail}. The portfolio will show the real, working website — screenshots are optional.</div>`
-    : check.status === "blocked" && remoteBrowserConfig(ctx.env).enabled
-      ? html`<div class="alert alert--success" role="status"><strong>Remote interactive browser selected (Mode B).</strong> ${check.detail}, so the site cannot be framed directly. Crestmont's remote browser will show the real, live website interactively instead — no change to the website is needed. ${REMOTE_LIMITS}</div>`
+    ? html`<div class="alert alert--success" role="status" data-testid="pf-native-plan"><strong>Native-ready.</strong> ${check.detail}. After you create the project, Crestmont verifies the real website in its native frame in a real browser (content, scrolling, clicks, animation); screenshots are not needed.</div>`
     : check.status === "blocked"
-      ? html`<div class="alert alert--warn" role="status"><strong>This website does not permit embedding, and the remote browser is not enabled here (Mode C).</strong> ${check.detail}. It will be shown with a genuine screenshot, clearly labelled, and a Visit live website button.</div>`
-      : html`<div class="alert alert--warn" role="status"><strong>The website could not be checked.</strong> ${check.detail}. You can still add it; the check runs again automatically.</div>`;
+      ? html`<div class="alert ${hosting?.found ? "alert--success" : "alert--warn"}" role="status" data-testid="pf-native-plan"><strong>${hosting?.found ? "Crestmont will prepare this website for native embedding." : "This website does not permit native embedding yet."}</strong> ${check.detail}. ${hosting?.detail ?? ""}. ${hosting?.found ? "After you create the project, Crestmont allows its public pages only (sensitive pages keep refusing), follows the deployment and verifies it in a real browser." : "It is not shown through the remote browser instead; the project will say exactly what is needed."}</div>`
+      : html`<div class="alert alert--warn" role="status" data-testid="pf-native-plan"><strong>The website could not be checked.</strong> ${check.detail}. You can still add it; Crestmont keeps checking automatically.</div>`;
   return staffShell(ctx, "Add a portfolio project", html`${pageHead("Add a portfolio project", linkButton("All projects", "/staff/portfolio", "ghost", "sm"), "Portfolio")}
 ${verdict}<p class="muted">Confirm the name, industry, description and features (list only what you have confirmed on the live site). The project is saved unpublished; publishing needs the owner's documented authorization.</p>
 ${projectForm(ctx, "/staff/portfolio", v, "Create project", errors, n + 1)}`, status);
@@ -1265,6 +1293,39 @@ ${input({ name: "poster_desktop_asset", label: "Bundled desktop poster", value: 
 ${input({ name: "poster_tablet_asset", label: "Bundled tablet poster", value: p.poster_tablet_asset })}
 ${input({ name: "poster_mobile_asset", label: "Bundled mobile poster", value: p.poster_mobile_asset })}
 <div class="form-actions">${button("Save demo settings", { variant: "secondary", size: "sm" })}</div></form></div>`;
+}
+
+/** The automatic display-mode card of entries created before native readiness (unchanged behaviour). */
+function legacyEmbedCard(ctx: AppContext, p: pf.PortfolioProject, mode: string, remoteOn: boolean): SafeHtml {
+  return html`<div class="card" data-testid="pf-embed" data-display-mode="${mode}"><div class="row row--between"><div>${mode === "embed" ? badge("ok", MODE_LABEL.embed) : mode === "remote" ? badge(remoteOn ? "ok" : "blocked", MODE_LABEL.remote) : mode === "unavailable" ? badge("blocked", MODE_LABEL.unavailable) : badge("muted", "Not checked yet")}
+<span class="faint">${p.embed_checked_at ? `Checked ${formatDateTime(p.embed_checked_at)}` : ""}${p.embed_detail ? ` · ${p.embed_detail}` : ""}</span></div>
+${actionForm(ctx, `/staff/portfolio/${p.id}/embed-check`, "Check again", { variant: "secondary", size: "sm" })}</div>
+${p.display_reason ? html`<p data-testid="pf-display-reason">${p.display_reason}</p>` : ""}
+${mode === "remote" ? html`<p class="muted" data-testid="pf-remote-limits">${REMOTE_LIMITS}${remoteOn ? "" : " The remote browser is switched off in this environment, so visitors currently see the screenshot and the live link."}</p>`
+  : mode === "unavailable" ? html`<p class="muted">Visitors see a genuine screenshot (labelled as a screenshot) and a Visit live website button. Nothing is changed on the website.</p>` : ""}
+<p class="muted">The display method is chosen automatically and re-checked every day: native embed when the site permits framing by ${new URL(ctx.baseUrl).origin}, otherwise Crestmont's remote browser, otherwise the honest fallback.</p></div>
+`;
+}
+
+/** Native readiness of a new entry (src/services/native/): state, exact reason, provider, change and the real-browser
+ *  verification — so staff always see why a website is or is not shown natively and what (if anything) is needed. */
+function nativeCard(ctx: AppContext, p: pf.PortfolioProject): SafeHtml {
+  const st = p.native_state ?? "checking";
+  const tone = st === "native_verified" ? "ok" : st === "unavailable" ? "blocked" : st === "authorization_required" ? "warn" : "muted";
+  let change: { kind?: string; pr?: { url?: string; repo?: string; path?: string }; host?: string; paths?: number; ref?: string; detail?: string } | null = null;
+  try { change = p.native_change ? JSON.parse(p.native_change) : null; } catch { change = null; }
+  let ver: { ok?: boolean; at?: string; checks?: { name: string; ok: boolean; detail: string }[] } | null = null;
+  try { ver = p.native_verification ? JSON.parse(p.native_verification) : null; } catch { ver = null; }
+  const changeRow = !change ? "None needed so far"
+    : change.kind === "github-pr" ? html`Pull request in ${change.pr?.repo ?? "the repository"} (${change.pr?.path ?? ""}): <a href="${safeUrl(change.pr?.url ?? "#")}" rel="noopener" target="_blank">${change.pr?.url ?? ""}</a>`
+    : change.kind === "cloudflare-rule" ? `Cloudflare response-header rule ${change.ref ?? ""} for ${change.host ?? ""} (${change.paths ?? 0} public paths)` : (change.detail ?? "—");
+  return html`<div class="card" data-testid="pf-native" data-native-state="${st}"><div class="row row--between"><div>${badge(tone, pf.NATIVE_LABEL[st])}
+<span class="faint">${p.native_updated_at ? `Updated ${formatDateTime(p.native_updated_at)}` : ""}${p.embed_detail ? ` · ${p.embed_detail}` : ""}</span></div>
+${actionForm(ctx, `/staff/portfolio/${p.id}/embed-check`, "Check again", { variant: "secondary", size: "sm" })}</div>
+<p data-testid="pf-native-reason">${p.native_reason ?? "Crestmont is checking the live website."}</p>
+${dl([["Hosting (discovered)", p.native_provider ?? "Not discovered yet"], ["Change", changeRow], ["Real-browser verification", ver?.at ? `${ver.ok ? "Passed" : "Failed"} ${formatDateTime(ver.at)}` : "Not run yet"]])}
+${ver?.checks?.length ? html`<ul class="checklist" data-testid="pf-native-checks">${ver.checks.map((c) => html`<li>${c.ok ? "✓" : "✗"} <strong>${c.name}</strong> — ${c.detail}</li>`)}</ul>` : ""}
+<p class="muted">New entries are shown only as the real website in a native frame, after a real browser has verified it. Crestmont prepares owned websites itself through the connected Cloudflare, Vercel and GitHub accounts — only their public pages may be framed by ${new URL(ctx.baseUrl).origin}; sign-in, account, booking, checkout and payment pages keep refusing. It is never replaced by the remote browser, a demo or a screenshot. Progress is checked every 15 minutes.</p></div>`;
 }
 
 async function portfolioEditor(ctx: AppContext, id: string, opts: { errors?: string[]; values?: pf.ProjectInput; status?: number } = {}): Promise<Response> {
@@ -1293,13 +1354,7 @@ ${formErrors(opts.errors ?? [])}
 <div>${p.archived_at ? html`${badge("muted", "Archived")} ${actionForm(ctx, `/staff/portfolio/${p.id}/restore`, "Restore", { variant: "secondary" })}` : html`${p.published ? actionForm(ctx, `/staff/portfolio/${p.id}/unpublish`, "Unpublish", { confirm: "Remove this project from the public portfolio?" }) : actionForm(ctx, `/staff/portfolio/${p.id}/publish`, "Publish", { variant: "primary" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/archive`, "Archive", { variant: "ghost", confirm: "Archive this project? It is hidden from the site and the list; its details and images are kept and it can be restored." })}`}</div></div>
 ${blockers.length ? html`<div class="alert alert--warn" role="status"><strong>Publishing is blocked until:</strong><ul>${blockers.map((b) => html`<li>${b}</li>`)}</ul></div>` : html`<p class="muted">All publishing requirements are met.</p>`}</div>
 <h2 class="h4">Live preview</h2>
-<div class="card" data-testid="pf-embed" data-display-mode="${mode}"><div class="row row--between"><div>${mode === "embed" ? badge("ok", MODE_LABEL.embed) : mode === "remote" ? badge(remoteOn ? "ok" : "blocked", MODE_LABEL.remote) : mode === "unavailable" ? badge("blocked", MODE_LABEL.unavailable) : badge("muted", "Not checked yet")}
-<span class="faint">${p.embed_checked_at ? `Checked ${formatDateTime(p.embed_checked_at)}` : ""}${p.embed_detail ? ` · ${p.embed_detail}` : ""}</span></div>
-${actionForm(ctx, `/staff/portfolio/${p.id}/embed-check`, "Check again", { variant: "secondary", size: "sm" })}</div>
-${p.display_reason ? html`<p data-testid="pf-display-reason">${p.display_reason}</p>` : ""}
-${mode === "remote" ? html`<p class="muted" data-testid="pf-remote-limits">${REMOTE_LIMITS}${remoteOn ? "" : " The remote browser is switched off in this environment, so visitors currently see the screenshot and the live link."}</p>`
-  : mode === "unavailable" ? html`<p class="muted">Visitors see a genuine screenshot (labelled as a screenshot) and a Visit live website button. Nothing is changed on the website.</p>` : ""}
-<p class="muted">The display method is chosen automatically and re-checked every day: native embed when the site permits framing by ${new URL(ctx.baseUrl).origin}, otherwise Crestmont's remote browser, otherwise the honest fallback.</p></div>
+${p.native_required ? nativeCard(ctx, p) : legacyEmbedCard(ctx, p, mode ?? "unchecked", remoteOn)}
 ${portfolioExplorer(ctx, [p], { variant: "case", headingLevel: 2, previewToken })}
 <div class="grid grid-2"><div class="card"><h3 class="card__title">Live link verification</h3>${dl([["Live link", html`<a href="${safeUrl(p.live_url)}" rel="noopener" target="_blank">${p.live_url}</a>`], ["Last verified", formatDate(p.link_verified_at)]])}
 <form method="post" action="/staff/portfolio/${p.id}/verify-link">${csrf(ctx)}<input type="hidden" name="verified_on" value="${new Date().toISOString().slice(0, 10)}">

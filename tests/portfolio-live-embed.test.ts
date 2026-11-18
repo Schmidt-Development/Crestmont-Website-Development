@@ -104,11 +104,15 @@ const sites = (origin: string): typeof fetch => async (input) => {
   throw new TypeError("offline");
 };
 
-test("[PORT-006] [PORT-007] enter a URL → confirm details → automatic live preview → publish after authorization, with no screenshot", async () => {
+test("[PORT-006] [PORT-007] enter a URL → confirm details → native verification in a real browser → publish after authorization, with no screenshot", async () => {
   const t0 = await createTestApp();
   const origin = new URL(t0.env.APP_URL!).origin;
   t0.close();
-  const t = await createTestApp({ overrides: { portfolioFetch: sites(origin) } } as never);
+  // The real-browser step is replaced here (tests/portfolio-native-browser.test.ts drives the real verifier in Chromium);
+  // it records what it was asked to verify so the test can open the same verification page.
+  const asked: { pageUrl: string; liveOrigin: string }[] = [];
+  const nativeVerify = async (pageUrl: string, liveOrigin: string) => { asked.push({ pageUrl, liveOrigin }); return { ok: true, at: new Date().toISOString(), summary: "Verified in a real browser: frame, content, javascript, scroll, click, mobile", checks: [{ name: "frame", ok: true, detail: "loaded" }, { name: "content", ok: true, detail: "visible" }] }; };
+  const t = await createTestApp({ overrides: { portfolioFetch: sites(origin), nativeVerify } } as never);
   const owner = await createStaff(t.db, "owner");
   const o = await t.client().login(owner.email, TEST_PASSWORD, owner.secret);
 
@@ -118,7 +122,8 @@ test("[PORT-006] [PORT-007] enter a URL → confirm details → automatic live p
   // Step 2: Crestmont reads the page and pre-fills it; nothing is saved yet.
   const before = (await t.db.prepare(`SELECT COUNT(*) AS n FROM portfolio_projects`).first<{ n: number }>())!.n;
   const step2 = await (await o.post("/staff/portfolio/new", { live_url: "live-site.fixture-portfolio.com" })).text();
-  assert.match(step2, /Live preview available/);
+  assert.match(step2, /data-testid="pf-native-plan"/);
+  assert.match(step2, /Native-ready/);
   assert.match(step2, /name="name"[^>]*value="Live Fixture"|value="Live Fixture"/);
   assert.match(step2, /value="live-fixture"/);
   assert.match(step2, /Live Fixture is a TEST DATA website/);
@@ -130,12 +135,27 @@ test("[PORT-006] [PORT-007] enter a URL → confirm details → automatic live p
   assert.equal(p.embed_status, "allowed");
   assert.equal(p.embed_url, "https://live-site.fixture-portfolio.com/");
   assert.equal(p.published, 0);
+  // A new entry is native-required and was verified straight away, through Crestmont's own verification page.
+  assert.equal(p.native_required, 1);
+  assert.equal(p.native_state, "native_verified");
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].liveOrigin, "https://live-site.fixture-portfolio.com");
+  assert.match(asked[0].pageUrl, new RegExp(`^${origin}/portfolio/native-verify/[0-9a-f]+$`));
+  const vp = await t.client().get(new URL(asked[0].pageUrl).pathname);
+  assert.equal(vp.status, 200);
+  const vph = await vp.text();
+  assert.match(vph, /<iframe data-testid="native-verify-frame" src="https:\/\/live-site\.fixture-portfolio\.com\/"[^>]*sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(vp.headers.get("content-security-policy")!, /frame-src [^;]*https:\/\/live-site\.fixture-portfolio\.com/);
+  assert.match(vp.headers.get("content-security-policy")!, /frame-ancestors 'none'/, "the verification page itself cannot be framed");
+  assert.equal((await t.client().get("/portfolio/native-verify/not-a-token")).status, 404);
   // The editor shows the real website in the explorer, lists only authorization steps, and frames exactly that origin.
   const ed = await o.get(`/staff/portfolio/${p.id}`);
   const edh = await ed.text();
   assert.match(edh, /data-kind="live"[^>]*data-frame-url="https:\/\/live-site\.fixture-portfolio\.com\/"/);
   assert.match(ed.headers.get("content-security-policy")!, /frame-src [^;]*https:\/\/live-site\.fixture-portfolio\.com/);
   assert.doesNotMatch(edh, /screenshot of the live site has not been uploaded/);
+  assert.match(edh, /data-testid="pf-native" data-native-state="native_verified"/);
+  assert.match(edh, /Live website — Native \(verified\)/);
   assert.match(edh, /The preview shows the correct website/);
   // Publishing is still refused until the relationship, link and owner's consent are recorded — never assumed.
   assert.equal((await o.post(`/staff/portfolio/${p.id}/publish`, {})).status, 409);
@@ -158,19 +178,25 @@ test("[PORT-006] [PORT-007] enter a URL → confirm details → automatic live p
   assert.doesNotMatch(html, /capture pending/i);
   assert.match(pub.headers.get("content-security-policy")!, /frame-src https:\/\/challenges\.cloudflare\.com https:\/\/live-site\.fixture-portfolio\.com/);
 
-  // A site that refuses framing: the editor explains it, the explorer shows a screenshot, the origin is never framed,
-  // and publishing needs genuine screenshots.
+  // A site that refuses framing, with no hosting connection configured: never handed to the remote browser or a
+  // screenshot; the editor says exactly what is needed, the origin is never framed, and it cannot be published.
   await o.post("/staff/portfolio", { name: "Locked Fixture", slug: "locked-fixture", industry: "Testing", live_url: "https://locked-site.fixture-portfolio.com/", description: "Locked Fixture is a TEST DATA website that refuses to be framed.", features: "", technology_summary: "", relationship: "Relationship documentation pending" });
   const lk = (await getBySlug(t.db, "locked-fixture"))!;
   assert.equal(lk.embed_status, "blocked");
   const lkh = await o.get(`/staff/portfolio/${lk.id}`);
   const lkt = await lkh.text();
-  assert.match(lkt, /Mode C — unavailable/, "no remote browser in this environment: the honest fallback");
   assert.equal(lk.display_mode, "unavailable");
+  assert.equal(lk.native_state, "authorization_required");
+  assert.match(lkt, /data-native-state="authorization_required"/);
+  assert.match(lkt, /Authorization required/);
   assert.match(lkt, /X-Frame-Options: DENY/);
+  assert.match(lkt, /PORTFOLIO_CLOUDFLARE_TOKEN/, "names the exact connection that is missing");
+  assert.match(lkt, /never changes a site it cannot prove you control/);
   assert.doesNotMatch(lkt, /data-frame-url="https:\/\/locked-site/);
   assert.doesNotMatch(lkh.headers.get("content-security-policy")!, /locked-site/);
-  assert.match(lkt, /does not permit embedding, so a screenshot is shown instead/);
+  assert.match(lkt, /not verified as a native embed yet/);
+  assert.doesNotMatch(lkt, /screenshot of the live site has not been uploaded/, "screenshots are no substitute for a new entry");
+  assert.equal(asked.length, 1, "nothing to verify while the site refuses");
   t.close();
 });
 
@@ -211,8 +237,9 @@ test("[PORT-006] [PORT-007] migration 0108: Lead Haven Collective keeps its exis
   // A record the Owner created in Staff → Portfolio (blocked by the old screenshot rule): its copy must survive.
   const t = await createTestApp();
   t.db.raw.exec(`DELETE FROM portfolio_projects WHERE slug = 'lead-haven-collective'`);
-  t.db.raw.exec(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, technology_summary, position, published, updated_at, created_at)
-    VALUES ('pf_owner_lhc', 'lead-haven-collective', 'Lead Haven Collective', 'Lead generation', 'https://leadhavencollective.com/', 'Relationship documentation pending', 'OWNER WRITTEN description of Lead Haven Collective.', '["Owner feature one","Owner feature two"]', NULL, 9, 0, '2026-11-14T00:00:00.000Z', '2026-11-14T00:00:00.000Z')`);
+  // (created before migration 0110, so it is an existing — not native-required — entry)
+  t.db.raw.exec(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, technology_summary, position, published, updated_at, created_at, native_required, native_state)
+    VALUES ('pf_owner_lhc', 'lead-haven-collective', 'Lead Haven Collective', 'Lead generation', 'https://leadhavencollective.com/', 'Relationship documentation pending', 'OWNER WRITTEN description of Lead Haven Collective.', '["Owner feature one","Owner feature two"]', NULL, 9, 0, '2026-11-14T00:00:00.000Z', '2026-11-14T00:00:00.000Z', 0, 'legacy')`);
   t.db.raw.exec(sql);
   let p = (await getBySlug(t.db, "lead-haven-collective"))!;
   assert.equal(p.id, "pf_owner_lhc", "the existing record is used");

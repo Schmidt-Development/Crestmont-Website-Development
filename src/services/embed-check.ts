@@ -15,7 +15,11 @@
 import { allowEgressHost, untrustedHostAllowed } from "../lib/egress.ts";
 
 export type EmbedStatus = "unchecked" | "allowed" | "blocked" | "error";
-export interface EmbedCheck { status: Exclude<EmbedStatus, "unchecked">; url: string | null; origin: string | null; detail: string; httpStatus: number | null; title: string | null; description: string | null; siteName: string | null }
+export interface EmbedCheck {
+  status: Exclude<EmbedStatus, "unchecked">; url: string | null; origin: string | null; detail: string; httpStatus: number | null; title: string | null; description: string | null; siteName: string | null;
+  /** The final page's HTML (bounded) and its framing headers — read by the native-readiness automation, never stored. */
+  html?: string; csp?: string | null; xfo?: string | null;
+}
 
 const MAX_REDIRECTS = 5;
 const MAX_HTML = 512 * 1024;
@@ -177,11 +181,13 @@ export async function checkEmbed(liveUrl: string, ancestorOrigin: string, fetche
       return { status: "error", url: url.toString(), origin: url.origin, detail: `The link is not a web page (${type || "no content type"})`, httpStatus: res.status, ...none };
     }
     const verdict = evaluateFraming(res.headers, url, ancestor.origin);
-    const facts = pageFacts(await readText(res, MAX_HTML).catch(() => ""));
+    const html = await readText(res, MAX_HTML).catch(() => "");
+    const facts = pageFacts(html);
+    const raw = { html, csp: res.headers.get("content-security-policy"), xfo: res.headers.get("x-frame-options") };
     if (/^(just a moment|attention required|access denied)/i.test(facts.title ?? "")) {
       return { status: "error", url: url.toString(), origin: url.origin, detail: `The site answers automated visitors with a bot check ("${facts.title}"), which Crestmont does not bypass`, httpStatus: res.status, ...facts };
     }
-    return { status: verdict.allowed ? "allowed" : "blocked", url: url.toString(), origin: url.origin, detail: verdict.detail, httpStatus: res.status, ...facts };
+    return { status: verdict.allowed ? "allowed" : "blocked", url: url.toString(), origin: url.origin, detail: verdict.detail, httpStatus: res.status, ...facts, ...raw };
   }
   return { status: "error", url: url.toString(), origin: url.origin, detail: "The site redirects too many times", httpStatus: null, ...none };
 }

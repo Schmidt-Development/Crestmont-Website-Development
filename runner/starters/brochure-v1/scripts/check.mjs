@@ -9,6 +9,7 @@
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { syncHeaders } from "./embedding.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -286,6 +287,9 @@ export function runCheck(opts) {
   if (!/@media\b/.test(css) && !/clamp\(/.test(css)) err("public/assets/css", "no responsive rules (@media or clamp()) found");
 
   if (profile.contactForm && !contactFormFound) err("public/", "no contact form posting to /api/contact with name, email and message fields");
+  // Native-embedding standard (scripts/embedding.mjs): only the public pages may be shown in Crestmont's portfolio;
+  // the managed block in public/_headers is regenerated from the built pages; a conflicting rule is an error.
+  for (const p of syncHeaders(pub, { write: true }).problems) err("public/_headers", p);
   return findings;
 }
 

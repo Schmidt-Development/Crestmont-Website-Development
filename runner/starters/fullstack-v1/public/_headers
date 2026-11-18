@@ -1,0 +1,7 @@
+# crestmont-native-embedding:start — managed by Crestmont: public pages may be shown in Crestmont's portfolio
+/*
+  X-Frame-Options: DENY
+/
+  ! X-Frame-Options
+  Content-Security-Policy: frame-ancestors https://crestmontwebsitedevelopment.com https://www.crestmontwebsitedevelopment.com
+# crestmont-native-embedding:end

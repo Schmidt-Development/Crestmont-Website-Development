@@ -72,7 +72,10 @@ test("[AIB-006] D5: the runner deploys the authorized commit of the project's ow
   const index = readFileSync(path.join(STARTER, "public", "index.html"));
   const fetched: string[] = [];
   let served: Uint8Array = index;
-  const fetchImpl = (async (u: string) => { fetched.push(String(u)); return new Response(served, { status: 200 }); }) as unknown as typeof fetch;
+  // What Cloudflare serves from the release's public/_headers (the native-embedding standard): the public homepage
+  // may be framed by Crestmont's portfolio only.
+  let framing: Record<string, string> = { "content-security-policy": "frame-ancestors https://crestmontwebsitedevelopment.com https://www.crestmontwebsitedevelopment.com" };
+  const fetchImpl = (async (u: string) => { fetched.push(String(u)); return new Response(served, { status: 200, headers: framing }); }) as unknown as typeof fetch;
   const env = { ...POLLUTED_ENV, SITE_CF_TOKEN: "site-hosting-token-0000000000", PROD_TEST_DUMP: dump };
   const r = await runSiteDeployment(cfg, deployment({ sourceCommit: src.commit }), { logger: silentLogger, processEnv: env, fetchImpl, clone: localClone(src.dir), sleep: async () => {} });
   assert.equal(r.result, "deployed", String(r.error));
@@ -80,7 +83,8 @@ test("[AIB-006] D5: the runner deploys the authorized commit of the project's ow
   assert.equal(r.deployedUrl, "https://cm-site-prj-alpha1.hosting.workers.dev");
   const sha = createHash("sha256").update(index).digest("hex");
   assert.equal(r.contentSha256, sha);
-  assert.deepEqual(r.verification, { url: "https://www.harbor.example/", httpStatus: 200, expectedSha256: sha, actualSha256: sha, matched: true, attempts: 1 });
+  assert.deepEqual(r.verification, { url: "https://www.harbor.example/", httpStatus: 200, expectedSha256: sha, actualSha256: sha, matched: true, attempts: 1,
+    embedding: { ok: true, detail: "homepage permits Crestmont's portfolio; no sensitive page in this site" } });
   const seen = JSON.parse(readFileSync(dump, "utf8")) as { argv: string[]; env: Record<string, string>; cwd: string; files: string[]; config: Record<string, unknown> };
   assert.deepEqual(seen.argv, ["deploy", "--message", "release sd_test1"], "structured argv: the runner value is one argument, no shell");
   assert.equal(seen.env.WRANGLER_SEND_METRICS, "false", "leading assignment applied to the environment");
@@ -90,6 +94,18 @@ test("[AIB-006] D5: the runner deploys the authorized commit of the project's ow
   assert.equal(seen.config.name, "cm-site-prj-alpha1");
   assert.deepEqual(seen.config.routes, [{ pattern: "www.harbor.example", custom_domain: true }]);
   assert.ok(seen.files.includes("public") && seen.files.includes("wrangler.json") && !seen.files.includes("wrangler.jsonc") && !seen.files.includes(".git"));
+
+  // The live site serves the release but not the native-embedding standard (e.g. _headers not applied, or framing
+  // refused / opened to everyone): reported, never claimed as verified.
+  for (const [h, why] of [[{}, /ALSO other sites/], [{ "x-frame-options": "DENY" }, /does NOT permit Crestmont's portfolio/], [{ "content-security-policy": "frame-ancestors *" }, /ALSO other sites/]] as const) {
+    framing = h as Record<string, string>;
+    const nf = await runSiteDeployment(cfg, deployment({ sourceCommit: src.commit }), { logger: silentLogger, processEnv: env, fetchImpl, clone: localClone(src.dir), sleep: async () => {} });
+    assert.equal(nf.verification?.matched, true);
+    assert.equal(nf.verification?.embedding?.ok, false);
+    assert.match(String(nf.error), /native-embedding standard not met/);
+    assert.match(String(nf.error), why);
+  }
+  framing = { "content-security-policy": "frame-ancestors https://crestmontwebsitedevelopment.com" };
 
   // The live site does not serve the release: reported, never claimed as verified.
   served = new TextEncoder().encode("<h1>old site</h1>");

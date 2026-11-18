@@ -212,6 +212,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /portfolio/:slug": { access: { kind: "public" }, params: { slug: "portfolioSlug" } },
   "GET /portfolio/preview/:token": token("short-lived portfolio preview link (staff editor or Owner-approved ops challenge; one project, view only)", { token: "portfolioPreviewToken" }),
   "GET /portfolio-media/:fileId": { access: { kind: "public" }, params: { fileId: "portfolioFile" } },
+  "GET /portfolio/native-verify/:token": token("native-readiness verification page for Crestmont's own verification browser (10-minute link; one project; only the live site in the portfolio's sandboxed frame)", { token: "portfolioPreviewToken" }),
   "GET /about": pub,
   "GET /process": pub,
   "GET /faq": pub,

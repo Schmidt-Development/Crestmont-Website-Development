@@ -63,6 +63,10 @@ export interface Env {
   /** Approved isolated portfolio demo origins (https only, comma/space separated). Only these may be framed. */
   PORTFOLIO_DEMO_ORIGINS?: string;
   /** Remote-browser viewer (portfolio Mode B): "on" enables it where the bindings below exist. */
+  /** Native-readiness connections (src/services/native/connections.ts) — Worker secrets set by the Owner. */
+  PORTFOLIO_CLOUDFLARE_TOKEN?: string; PORTFOLIO_CLOUDFLARE_ACCOUNTS?: string; PORTFOLIO_VERCEL_TOKEN?: string; PORTFOLIO_VERCEL_TEAM?: string; PORTFOLIO_GITHUB_TOKEN?: string;
+  /** Real-browser native verifications per day (default 10; each lasts well under a minute). */
+  PORTFOLIO_NATIVE_VERIFY_DAILY?: string;
   REMOTE_BROWSER?: string;
   REMOTE_BROWSER_MAX_CONCURRENT?: string;
   REMOTE_BROWSER_DAILY_MINUTES?: string;
@@ -159,7 +163,12 @@ export interface Env {
   FILES?: unknown;             // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */
-  overrides?: Partial<Pick<AppContext, "email" | "storage" | "payments">> & { now?: () => Date; /** Test seam for read-only provider calls (cost import, reconciliation). */ fetch?: typeof fetch; /** Test seam for the live portfolio check (loads client websites). */ portfolioFetch?: typeof fetch };
+  overrides?: Partial<Pick<AppContext, "email" | "storage" | "payments">> & { now?: () => Date; /** Test seam for read-only provider calls (cost import, reconciliation). */ fetch?: typeof fetch; /** Test seam for the live portfolio check (loads client websites). */ portfolioFetch?: typeof fetch;
+    /** Test seams for the native-readiness automation: provider APIs (Cloudflare/Vercel/GitHub), the verification
+     *  browser, and fixture responses the verification browser serves for TEST DATA sites. */
+    providerFetch?: typeof fetch; nativeBrowser?: import("../services/native/verify.ts").OpenBrowser; nativeFixture?: import("../services/native/verify.ts").FixtureResponder;
+    /** Unit-test seam: replaces only the real-browser step (the CDP verifier itself is tested with real Chromium). */
+    nativeVerify?: (pageUrl: string, liveOrigin: string) => Promise<import("../services/native/verify.ts").VerifyResult> };
   /** Legacy test seam retained for the API tests. */
   resolveActor?: (req: Request) => Promise<Actor | null>;
 }

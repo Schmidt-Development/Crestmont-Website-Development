@@ -28,6 +28,7 @@ import { readSiteConfig } from "./preview-gate.ts";
 import { stripForPreview } from "./job.ts";
 import type { Logger } from "./log.ts";
 import { errorMessage } from "./log.ts";
+import { checkLiveEmbedding, sensitiveProbe, usesStandard } from "./embedding.ts";
 
 export const SITE_WORKER = /^cm-site-[a-z0-9][a-z0-9-]{1,55}$/;
 export const SITE_HOSTNAME = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -117,7 +118,9 @@ export async function runSiteDeployment(cfg: RunnerConfig, d: SiteDeployment, de
     const deployedUrl = explicit?.[1] ?? workers?.[workers.length - 1] ?? null;
     const verifyUrl = d.hostname ? `https://${d.hostname}/` : deployedUrl ? new URL("/", deployedUrl).href : null;
     const verification = await verify(verifyUrl, expected, cfg.delivery, deps);
-    return { ...base, result: "deployed", deployedUrl, contentSha256: expected, verification, ...(verification.matched === false || !verification.httpStatus || verification.httpStatus >= 400 ? { error: "post-deployment verification failed" } : {}) };
+    // Native-embedding standard: public pages permit Crestmont's portfolio, sensitive pages refuse (built-in since 2026-11-18).
+    if (verifyUrl && verification.matched !== false && verification.httpStatus === 200 && usesStandard(exportDir)) verification.embedding = await checkLiveEmbedding(verifyUrl, sensitiveProbe(exportDir), deps.fetchImpl ?? fetch);
+    return { ...base, result: "deployed", deployedUrl, contentSha256: expected, verification, ...(verification.matched === false || !verification.httpStatus || verification.httpStatus >= 400 ? { error: "post-deployment verification failed" } : verification.embedding?.ok === false ? { error: `native-embedding standard not met on the live site: ${verification.embedding.detail}` } : {}) };
   } catch (err) {
     return failed(`release failed: ${errorMessage(err).slice(0, 300)}`);
   } finally {
