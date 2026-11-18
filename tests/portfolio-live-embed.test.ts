@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createTestApp, createStaff, TEST_PASSWORD } from "./support/app.ts";
 import { evaluateFraming, checkEmbed, safePublicUrl, pageFacts } from "../src/services/embed-check.ts";
-import { publishBlockers, liveEmbed, EMBED_MAX_AGE_MS, getBySlug, refreshAllEmbeds, type PortfolioProject } from "../src/services/portfolio.ts";
+import { publishBlockers, liveEmbed, previewState, EMBED_MAX_AGE_MS, getBySlug, refreshAllEmbeds, type PortfolioProject } from "../src/services/portfolio.ts";
 import { runJobs } from "../src/app/scheduled.ts";
 
 const CRESTMONT = "https://crestmontwebsitedevelopment.com";
@@ -74,6 +74,26 @@ test("[PORT-006] [PORT-007] screenshots are optional only while the live site is
   assert.match(blocked[0], /does not permit embedding/);
   // Consent can never be skipped.
   assert.ok(publishBlockers({ ...base, portfolio_consent_at: null, embed_status: "allowed", embed_url: "https://leadhavencollective.com/", embed_checked_at: now }).some((b) => /opt-in/.test(b)));
+});
+
+test("[PORT-006] [PORT-007] the real production website always wins over a demo: native frame, then remote viewer, then the demo (Owner, 2026-11-18)", () => {
+  const demo = "https://site-portfolio-demo.example-demos.dev/";
+  const approved = new Set([new URL(demo).origin]);
+  const now = new Date().toISOString();
+  const p = (o: Partial<PortfolioProject>) => ({ live_url: "https://site.fixture-portfolio.com", demo_url: demo, demo_status: "ready", demo_verified_at: now, embed_status: "none", embed_url: null, embed_checked_at: null, display_mode: "unchecked", ...o }) as unknown as PortfolioProject;
+  // A ready, verified, approved demo no longer overrides a live website that permits this site.
+  const native = previewState(p({ embed_status: "allowed", embed_url: "https://site.fixture-portfolio.com/", embed_checked_at: now, display_mode: "embed" }), approved, Date.now(), true);
+  assert.equal(native.kind, "live");
+  assert.equal(native.kind === "live" && native.origin, "https://site.fixture-portfolio.com");
+  // A site that refuses framing is shown through the remote viewer — the real website, not the demo.
+  const remote = previewState(p({ embed_status: "blocked", embed_url: "https://site.fixture-portfolio.com/", embed_checked_at: now, display_mode: "remote" }), approved, Date.now(), true);
+  assert.deepEqual(remote, { kind: "remote", url: "https://site.fixture-portfolio.com/" });
+  // Only when neither live method is available does the demo appear (honestly labelled as a demo by the explorer).
+  assert.equal(previewState(p({ embed_status: "blocked", display_mode: "remote" }), approved, Date.now(), false).kind, "embed", "remote browser off → demo");
+  assert.equal(previewState(p({ embed_status: "error", display_mode: "unavailable" }), approved, Date.now(), true).kind, "embed", "site unavailable → demo");
+  // A stale permission is not trusted; the remote viewer or the demo takes over.
+  const stale = new Date(Date.now() - EMBED_MAX_AGE_MS - 60_000).toISOString();
+  assert.equal(previewState(p({ embed_status: "allowed", embed_url: "https://site.fixture-portfolio.com/", embed_checked_at: stale, display_mode: "embed" }), approved, Date.now(), true).kind, "embed");
 });
 
 /** A staff-side stub of two websites: one permits Crestmont (the test origin), one refuses framing. */

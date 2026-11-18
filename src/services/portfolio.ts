@@ -147,17 +147,18 @@ const originOf = (u: string | null | undefined): string | null => { try { const 
 export type DemoState = { kind: "embed"; url: string; origin: string } | { kind: "unavailable"; reason: string } | { kind: "none" };
 /** What the explorer shows: the real live website, an isolated demo copy, or the genuine screenshot. */
 export type PreviewState = { kind: "live"; url: string; origin: string } | { kind: "remote"; url: string } | DemoState;
-/** An Owner-verified isolated demo stays where one is ready (it runs the site's flows with sample data and was
- *  approved for those projects); every other project shows its real live website when the site permits it; the
- *  genuine screenshot is the fallback. Setting a project's demo to "None" switches it to its live website. */
+/** What a visitor sees, in a fixed order of preference (Owner, 2026-11-18 — "an existing demo must never override a
+ *  compatible live production website"):
+ *   1. the real production website in a native frame, when its own headers permit this site (a fresh, successful
+ *      embedding check);
+ *   2. the real production website through Crestmont's remote browser, when it refuses framing (Mode B, where the
+ *      remote browser is enabled);
+ *   3. only then an Owner-verified isolated demo, honestly labelled, or the genuine screenshot. */
 export function previewState(p: PortfolioProject, approvedDemos: Set<string>, now = Date.now(), remoteEnabled = false): PreviewState {
-  const demo = demoState(p, approvedDemos);
-  if (demo.kind === "embed") return demo;
   const live = liveEmbed(p, now);
   if (live) return { kind: "live", ...live };
-  // Mode B: the site refuses framing; Crestmont's remote browser renders it (only where the remote browser is enabled).
   if (p.display_mode === "remote" && remoteEnabled) return { kind: "remote", url: p.embed_url || p.live_url };
-  return demo;
+  return demoState(p, approvedDemos);
 }
 /** Whether a project's demo may be embedded right now: ready, verified, on an approved origin, not production. */
 export function demoState(p: Pick<PortfolioProject, "demo_url" | "demo_status" | "demo_verified_at" | "live_url">, approved: Set<string>): DemoState {

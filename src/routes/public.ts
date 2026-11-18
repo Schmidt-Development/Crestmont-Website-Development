@@ -1207,13 +1207,13 @@ async function portfolioList(ctx: AppContext, errors: string[] = [], status = 20
   const archived = await pf.listArchived(ctx.db);
   const approved = pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) });
   const row = (p: pf.PortfolioProject, i: number) => {
-    const d = pf.previewState(p, approved);
+    const d = pf.previewState(p, approved, Date.now(), remoteBrowserConfig(ctx.env).enabled);
     const b = pf.publishBlockers(p);
     return html`<li class="pf-order__item card" data-pf-id="${p.id}" data-testid="pf-row">
 <button type="button" class="pf-order__handle" data-pf-handle aria-label="Reorder ${p.name}: drag, or use the arrow keys" aria-describedby="pf-order-help">⠿</button>
 <span class="pf-order__pos" data-pf-pos aria-hidden="true">${i + 1}</span>
 <span class="pf-order__main"><a href="/staff/portfolio/${p.id}">${p.name}</a><br><span class="faint">${p.industry} · ${p.live_url}</span></span>
-<span class="pf-order__status">${p.published ? badge("published") : badge("draft", "Hidden")} ${d.kind === "live" ? badge("ok", "Live") : d.kind === "embed" ? badge("ok", "Demo") : badge("muted", "Screenshot")} ${b.length && !p.published ? badge("blocked", `${b.length} to publish`) : ""}</span>
+<span class="pf-order__status">${p.published ? badge("published") : badge("draft", "Hidden")} ${d.kind === "live" ? badge("ok", "Live website") : d.kind === "remote" ? badge("ok", "Live website · remote view") : d.kind === "embed" ? badge("muted", "Demo") : badge("muted", "Screenshot")} ${b.length && !p.published ? badge("blocked", `${b.length} to publish`) : ""}</span>
 <span class="pf-order__moves">${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Up", { hidden: { dir: "up" }, size: "sm" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Down", { hidden: { dir: "down" }, size: "sm" })}</span></li>`;
   };
   return staffShell(ctx, "Portfolio", html`${pageHead("Portfolio", undefined, "Content")}

@@ -4,8 +4,11 @@
 // without moving Crestmont's page, navigate internally, reload/reset and switch devices
 // (scripts/preview-explorer-checks.mjs: the same checks the staging deploy runs). --live <slug,…> additionally
 // requires those projects to show their REAL live website (data-kind="live") on /portfolio and on their own case
-// study. No transaction is run. Exit 1 on any failure.
-//   PLAYWRIGHT_MODULE=… node scripts/live-portfolio-check.mjs <https-origin> [expected-count] [--live slug,slug]
+// study. --real all (or slug,…) requires every (or those) published project(s) to show the REAL production website —
+// natively or through the remote viewer, never a demo or a *.workers.dev copy — and reports the method per project.
+// On every slide the description keeps a readable width (Owner, 2026-11-18: long labels squeezed it). No transaction
+// is run. Exit 1 on any failure.
+//   PLAYWRIGHT_MODULE=… node scripts/live-portfolio-check.mjs <https-origin> [expected-count] [--live slug,slug] [--real all]
 const pw = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const { chromium } = pw.chromium ? pw : pw.default;
 const { checkLocation, checkInteractive } = await import("./preview-explorer-checks.mjs");
@@ -13,6 +16,8 @@ const base = (process.argv[2] ?? "").replace(/\/$/, "");
 const expected = Number(process.argv[3] ?? 4);
 const li = process.argv.indexOf("--live");
 const mustBeLive = li > 0 ? (process.argv[li + 1] ?? "").split(",").filter(Boolean) : [];
+const ri = process.argv.indexOf("--real");
+const mustBeReal = ri > 0 ? (process.argv[ri + 1] ?? "").split(",").filter(Boolean) : [];
 if (!/^https:\/\/[A-Za-z0-9.-]+$/.test(base)) { console.error("usage: live-portfolio-check.mjs <https-origin> [count]"); process.exit(2); }
 let failed = 0;
 const ok = (cond, msg) => { console.log(`${cond ? "PASS" : "FAIL"} ${msg}`); if (!cond) failed++; };
@@ -43,6 +48,19 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
     const count = await p.locator(".pfx__slide").count();
     for (let i = 0; i < count; i++) {
       if (i) { await p.locator("[data-pfx-next]").first().click(); await p.waitForTimeout(700); }
+      // The REAL production website on every slide (the layout is checked by checkLocation above).
+      const slide = await p.evaluate(() => {
+        const s = document.querySelector(".pfx__slide:not([inert])");
+        const url = s.dataset.kind === "remote" ? (s.dataset.remoteHost ? `https://${s.dataset.remoteHost}/` : "") : s.dataset.frameUrl;
+        return { slug: s.id.replace(/^pfx-/, ""), name: s.dataset.name, kind: s.dataset.kind, url: url || "", live: s.dataset.liveUrl || "" };
+      });
+      const wantReal = mustBeReal.includes("all") || mustBeReal.includes(slide.slug);
+      if (wantReal) {
+        const host = (() => { try { return new URL(slide.url).host; } catch { return ""; } })();
+        const real = (slide.kind === "live" || slide.kind === "remote") && !!host && host === new URL(slide.live).host && !host.endsWith(".workers.dev");
+        ok(real, `${name} project ${i + 1} (${slide.name}): the REAL production website — ${slide.kind === "live" ? "native frame" : slide.kind === "remote" ? "remote viewer" : slide.kind} at ${host || "—"}`);
+      }
+
       for (let k = 0; k < 80; k++) { if (await p.evaluate(() => { const s = document.querySelector(".pfx__slide:not([inert])"); return s.classList.contains("is-ready") || s.dataset.unavailable === "true" || !s.dataset.frameUrl; })) break; await p.waitForTimeout(400); }
       if (!(await p.evaluate(() => document.querySelector(".pfx__slide:not([inert])").classList.contains("is-ready")))) continue;
       // A Mode B project (remote browser) has no frame to drive here; scripts/live-remote-acceptance.mjs verifies it.

@@ -1,0 +1,29 @@
+{
+  "worker": "lansing-car-rentals-site",
+  "source": {
+    "repository": "Schmidt-Development/lansing-car-rentals",
+    "base": "4e40ff6",
+    "change": "ec18a00",
+    "branch": "claude/rentals-portfolio-framing",
+    "pullRequest": 5,
+    "app": "apps/rentals",
+    "bundler": "wrangler 4.164.0 (apps/rentals lockfile), wrangler deploy --dry-run --outdir"
+  },
+  "mainModule": "worker.js",
+  "oldSha256": "8fed0eac478494df190753033643bcff112d6102e727612dd126f7e517922329",
+  "newSha256": "189a08efe01bf406f1ed10c52b7ab740de99a1c8f6c717f34aea9630103deae8",
+  "allowOffsetPatch": true,
+  "verify": {
+    "site": "https://lansingcarrentals.com",
+    "publicPath": "/",
+    "privatePaths": [
+      "/partner/apply",
+      "/owner/login",
+      "/sign"
+    ],
+    "frameAncestors": [
+      "https://crestmontwebsitedevelopment.com",
+      "https://www.crestmontwebsitedevelopment.com"
+    ]
+  }
+}

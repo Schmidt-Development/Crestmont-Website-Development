@@ -1,0 +1,112 @@
+--- a/worker.js
++++ b/worker.js
+@@ -136,10 +136,12 @@
+ });
+ 
+ // src/lib/http.js
+-function securityHeaders(headers, { privatePage = false, cacheSeconds = 0 } = {}) {
+-  headers.set("Content-Security-Policy", CSP);
++function securityHeaders(headers, { privatePage = false, cacheSeconds = 0, framable = false } = {}) {
++  const portfolio = framable && !privatePage;
++  headers.set("Content-Security-Policy", portfolio ? CSP_PORTFOLIO : CSP);
+   headers.set("X-Content-Type-Options", "nosniff");
+-  headers.set("X-Frame-Options", "DENY");
++  if (portfolio) headers.delete("X-Frame-Options");
++  else headers.set("X-Frame-Options", "DENY");
+   headers.set("Referrer-Policy", privatePage ? "same-origin" : "strict-origin-when-cross-origin");
+   headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+   headers.set("Cross-Origin-Opener-Policy", "same-origin");
+@@ -152,10 +154,10 @@
+   }
+   return headers;
+ }
+-function html(body, { status = 200, privatePage = false, cookies = [], cacheSeconds = 0, headers = {} } = {}) {
++function html(body, { status = 200, privatePage = false, cookies = [], cacheSeconds = 0, headers = {}, framable = false } = {}) {
+   const h = new Headers({ "content-type": "text/html; charset=utf-8", ...headers });
+   for (const c of cookies) h.append("set-cookie", c);
+-  securityHeaders(h, { privatePage, cacheSeconds });
++  securityHeaders(h, { privatePage, cacheSeconds, framable: framable && status === 200 });
+   return new Response(body, { status, headers: h });
+ }
+ function json(data, { status = 200, cookies = [], privatePage = true } = {}) {
+@@ -265,7 +267,7 @@
+     }
+   };
+ }
+-var esc, CSP, cookieName, MAX_BODY, HttpError;
++var esc, CSP, PORTFOLIO_FRAME_ANCESTORS, CSP_PORTFOLIO, cookieName, MAX_BODY, HttpError;
+ var init_http = __esm({
+   "src/lib/http.js"() {
+     esc = /* @__PURE__ */ __name((s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]), "esc");
+@@ -281,6 +283,8 @@
+       "base-uri 'none'",
+       "object-src 'none'"
+     ].join("; ");
++    PORTFOLIO_FRAME_ANCESTORS = "https://crestmontwebsitedevelopment.com https://www.crestmontwebsitedevelopment.com";
++    CSP_PORTFOLIO = CSP.replace("frame-ancestors 'none'", `frame-ancestors ${PORTFOLIO_FRAME_ANCESTORS}`);
+     __name(securityHeaders, "securityHeaders");
+     __name(html, "html");
+     __name(json, "json");
+@@ -3590,7 +3594,7 @@
+ ${body}
+ </main>
+ ${variant === "site" ? footer() : `<footer class="portal-footer"><div class="container"><p>Lansing Car Rentals \xB7 ${esc(BRAND.addressLine)} \xB7 <a href="mailto:${BRAND.email}">${esc(BRAND.email)}</a> \xB7 <a href="/privacy">Privacy</a></p></div></footer>`}
+-${(variant === "site" ? ["/js/site.js", ...scripts.filter((x) => x !== "/js/site.js")] : scripts).map((s) => `<script src="${s}?v=${ASSET_V}" defer><\/script>`).join("\n")}
++${(variant === "site" ? ["/js/site.js", "/js/portfolio-frame.js", ...scripts.filter((x) => x !== "/js/site.js")] : scripts).map((s) => `<script src="${s}?v=${ASSET_V}" defer><\/script>`).join("\n")}
+ </body>
+ </html>`;
+ }
+@@ -4831,6 +4835,31 @@
+   }
+ });
+ 
++// src/views/portfolio-frame.js
++var PORTFOLIO_FRAME_JS;
++var init_portfolio_frame = __esm({
++  "src/views/portfolio-frame.js"() {
++    PORTFOLIO_FRAME_JS = `(function () {
++  'use strict';
++  var framed = true;
++  try { framed = window.top !== window.self; } catch (e) { /* cross-origin parent: framed */ }
++  if (!framed) return;
++  var publicPages = { '/': true, '/privacy': true, '/terms': true };
++  document.addEventListener('click', function (e) {
++    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
++    if (!a) return;
++    var u;
++    try { u = new URL(a.getAttribute('href'), location.href); } catch (err) { return; }
++    if (u.origin !== location.origin || publicPages[u.pathname.replace(/\\/+$/, '') || '/']) return;
++    e.preventDefault();
++    var w = window.open(u.toString(), '_blank', 'noopener');
++    if (w) w.opener = null;
++  }, true);
++}());
++`;
++  }
++});
++
+ // src/schema.js
+ var SCHEMA_VERSION, SCHEMA_STATEMENTS;
+ var init_schema = __esm({
+@@ -5299,9 +5328,10 @@
+ }
+ function createApp({ now, fetchImpl, log } = {}) {
+   const r = createRouter();
+-  r.add("GET", "/", (q) => html(homePage(q.viewCtx), { cacheSeconds: 300 }));
+-  r.add("GET", "/privacy", (q) => html(privacyPage(q.viewCtx), { cacheSeconds: 3600 }));
+-  r.add("GET", "/terms", (q) => html(termsPage(q.viewCtx), { cacheSeconds: 3600 }));
++  r.add("GET", "/", (q) => html(homePage(q.viewCtx), { cacheSeconds: 300, framable: true }));
++  r.add("GET", "/privacy", (q) => html(privacyPage(q.viewCtx), { cacheSeconds: 3600, framable: true }));
++  r.add("GET", "/terms", (q) => html(termsPage(q.viewCtx), { cacheSeconds: 3600, framable: true }));
++  r.add("GET", "/js/portfolio-frame.js", () => text(PORTFOLIO_FRAME_JS, { type: "text/javascript; charset=utf-8", cacheSeconds: 3600 }));
+   r.add("GET", "/partner", () => redirect("/#partner", { status: 301, privatePage: false }));
+   r.add("GET", "/css/photo-focus.css", () => text(photoFocusCss(), { type: "text/css; charset=utf-8", cacheSeconds: 86400 }));
+   r.add("GET", "/healthz", () => json({ ok: true }, { privatePage: true }));
+@@ -6149,6 +6179,7 @@
+     init_sign();
+     init_owner();
+     init_layout();
++    init_portfolio_frame();
+     init_ensure_schema();
+     init_proxy();
+     init_demo();
