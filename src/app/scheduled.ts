@@ -49,7 +49,7 @@ export type JobName = "portfolio_native" | "requirements" | "stripe_reconcile" |
  */
 export const SCHEDULE: Record<string, JobName[]> = {
   "* * * * *": ["research_promote"],
-  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "ops_alerts", "portfolio_native"],
+  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "portfolio_native", "ops_alerts"],
   "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention", "hosting_suspension", "db_backup", "portfolio_embeds"],
 };
 
