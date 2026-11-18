@@ -86,7 +86,8 @@ export class NativeWorld {
       }
     }
     const fa = csp.flatMap((c) => c.split(";").map((d) => d.trim()).filter((d) => d.startsWith("frame-ancestors")));
-    const allow = fa.length ? fa.every((d) => d.includes("http://crestmont.test")) : !xfo;
+    // Exact source tokens, as a browser compares them (never a substring of the directive).
+    const allow = fa.length ? fa.every((d) => d.split(/\s+/).slice(1).includes("http://crestmont.test")) : !xfo;
     return { allow, xfo, csp };
   }
   /** The site's response for a URL (headers derived from the providers' state). */
