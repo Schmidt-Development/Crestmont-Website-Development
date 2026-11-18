@@ -6,6 +6,11 @@ name: Live portfolio acceptance (production, read-only)
 #     screenshot);
 #   - each scrolls inside its frame without moving Crestmont's page, navigates, reloads/resets and switches devices;
 #   - Lead Haven Collective is published and shows its REAL live website.
+#   - native live websites are judged as real sites (2026-11-18): protected routes still refuse framing and never load
+#     in the frame, public pages do, and no Crestmont demo messages are required (scripts/preview-explorer-checks.mjs);
+#   - at 1440 / 1280 / 820 / 390 / 320 px every project shows its real domain with content, scrolls in isolation,
+#     animates, stays readable, keeps its controls uncovered and never overflows (scripts/live-portfolio-viewports.mjs;
+#     one screenshot per project and width is kept as the `portfolio-viewports` artifact).
 # It signs in nowhere, records nothing, uses NO secret and does not use the `production` environment (no approval
 # pause), like the production smoke test. It runs the default branch's own scripts.
 on:
@@ -21,7 +26,7 @@ concurrency:
 jobs:
   accept:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
@@ -47,3 +52,21 @@ jobs:
           { if [ "$rc" = 0 ]; then echo "## Feature verification: PASSED — live portfolio accepted on production"; else echo "## Feature verification: FAILED — the live portfolio was NOT accepted"; fi
             echo; grep -E '^(PASS|FAIL)' accept.log | grep -E 'FAIL|lead-haven|published projects' ; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+      - name: Five widths — 1440, 1280, 820, 390 and 320 px (real browser, read-only)
+        if: always()
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: |
+          set +e
+          node scripts/live-portfolio-viewports.mjs "$PRODUCTION_URL" 6 portfolio-viewports > viewports.log 2>&1
+          rc=$?
+          cat viewports.log
+          { if [ "$rc" = 0 ]; then echo "## Five widths: PASSED"; else echo "## Five widths: FAILED"; fi
+            echo; grep -E '^FAIL' viewports.log ; tail -1 viewports.log ; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: portfolio-viewports
+          path: portfolio-viewports
+          retention-days: 30

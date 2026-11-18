@@ -68,6 +68,27 @@ label's one-line width and squeezed titles and descriptions into a narrow strip.
 description keeps ≥ 50% of the row on desktop (≥ 85% when stacked) on every slide, and with `--real all` that every
 published project shows its real production domain (native or remote, never a demo or `*.workers.dev`).
 
+**Acceptance of native live websites (2026-11-18, after release `0f2e001`).** The release deployed; its
+`verify-live-portfolio` job (run 44262294583) failed 10 checks — five, on desktop and phone — that applied the isolated
+demo's contract to the real sites. None was a viewer defect, a broken visitor interaction or a weakened header:
+
+| Site | Failed check | Evidence (production, runner GET + browser) | Category |
+|---|---|---|---|
+| Get Every Invoice Paid | tap on `/login` must load in the frame | `/login` and `/signup`: `X-Frame-Options: DENY`, `frame-ancestors 'none'`; the tap opens a new tab | intentional restriction |
+| Lansing Car Rentals | `/partner/apply` must load in the frame | same headers; opens in a new tab | intentional restriction |
+| LCR Mentorship | `/book` must load in the frame | same headers; opens in a new tab | intentional restriction |
+| Better Lansing Mechanics | label must follow the page after `/services` | the viewer accepts label updates only from approved demo origins (`portfolio.js` `demoMessage`); a cross-origin live page cannot be observed, so the label stays its host | outdated test assumption |
+| Glassly Auto Glass | an in-page link must exist | its production homepage has 0 same-site links and 0 in-page anchors | outdated test assumption |
+
+`scripts/preview-explorer-checks.mjs` (`checkLiveSite`) now checks a native live site as the real site it is: sensitive
+routes (`SENSITIVE_ROUTE`) must still refuse framing (a security failure otherwise), and a tap on one never loads in the
+frame — answered by a stub with the same refusing headers, so the real sign-in page is never requested; a public page
+that permits framing is navigated instead; a one-page site's in-page link moves only the site; a site with neither is
+recorded and a real click is shown to reach it; the label stays the host and forged messages — also from the live site
+itself — change nothing. The demo branch is unchanged. Regression: `scripts/live-site-nav-check.mjs` (CI, fixture sites,
+with a negative control whose framable `/login` must fail). `scripts/live-portfolio-viewports.mjs` adds 1440 / 1280 /
+820 / 390 / 320 px to the read-only acceptance workflow.
+
 ## Live website showcase (Owner, 2026-11-15)
 
 > "I DO NOT want a traditional screenshot-based portfolio. I want Crestmont Website Development to showcase actual,

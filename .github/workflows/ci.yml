@@ -90,6 +90,15 @@ jobs:
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: LENIS_FILE="$RUNNER_TEMP/package/dist/lenis.mjs" node scripts/scroll-isolation-check.mjs http://localhost:8787 "$FIXTURES"
+      # Native live websites are judged by how real sites work (2026-11-18, production run 44262294583): protected routes
+      # stay protected and open in a new tab, public pages load in the frame, one-page and no-navigation sites are
+      # handled honestly, a live site's own messages never relabel the frame; a framable /login must FAIL.
+      - name: Live-site navigation and protected routes — desktop and phone, fixture sites
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: |
+          node --no-warnings scripts/scroll-isolation-seed.mjs .dev/scroll.db live-multipage,live-onepage,live-nonav,live-chatty,live-appshell,live-focus,live-short,live-leaky
+          node scripts/live-site-nav-check.mjs http://localhost:8787
 
   # Automatic portfolio display system (docs/frontend/PORTFOLIO.md §Display modes): the staff Add flow picks Mode A / B / C
   # by itself for frame-ancestors 'none', X-Frame-Options DENY, an allowed site and an unreachable one, and the remote
