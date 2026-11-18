@@ -24,7 +24,8 @@ const PUBLIC = { "content-type": "text/html", "content-security-policy": `frame-
 const PRIVATE = { "content-type": "text/html", "x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'" };
 const filler = (n) => Array.from({ length: n }, (_, i) => `<h2>Section ${i + 1}</h2><p>TEST DATA paragraph ${i + 1}. Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>`).join("");
 // The framing standard's link handler: inside a frame, links to non-framable pages open in a new tab.
-const handler = (paths) => `<script>if (window !== top) addEventListener("click", (e) => { const a = e.target.closest("a[href]"); if (!a) return; const u = new URL(a.href, location.href); if (u.origin === location.origin && ${JSON.stringify(paths)}.includes(u.pathname)) { e.preventDefault(); open(u.href, "_blank", "noopener"); } }, true);</script>`;
+const attr = (v) => String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+const handler = (paths) => `<script data-private="${attr(paths.join(" "))}">(() => { const P = document.currentScript.dataset.private.split(" "); if (window !== top) addEventListener("click", (e) => { const a = e.target.closest("a[href]"); if (!a) return; const u = new URL(a.href, location.href); if (u.origin === location.origin && P.includes(u.pathname)) { e.preventDefault(); open(u.href, "_blank", "noopener"); } }, true); })();</script>`;
 const page = (body, extra = "") => `<!doctype html><meta name=viewport content="width=device-width"><title>TEST DATA fixture</title><style>body{font:16px sans-serif;margin:0;padding:16px}nav a{margin-right:12px}</style>${extra}<body>${body}</body>`;
 
 const SITES = {
