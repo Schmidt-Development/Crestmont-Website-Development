@@ -72,6 +72,11 @@ async function addProject(name) {
   const m = /\/staff\/portfolio\/([^/?#]+)$/.exec(new URL(staff.url()).pathname);
   assert.ok(m, `editor opened for ${name} (${staff.url()})`);
   projectId[name] = m[1];
+  // These fixtures exercise the remote browser and the automatic display modes, which since 2026-11-18 apply to
+  // EXISTING entries only (new entries must become native: tests/portfolio-native*.test.ts). Record each as an existing
+  // entry and re-check it, so the Mode A/B/C pipeline keeps its full real-browser coverage.
+  db.prepare("UPDATE portfolio_projects SET native_required = 0, native_state = 'legacy' WHERE id = ?").run(m[1]);
+  await Promise.all([staff.waitForNavigation(), staff.locator('form[action$="/embed-check"] button[type=submit]').click()]);
   return { verdict, mode: await staff.locator('[data-testid="pf-embed"]').getAttribute("data-display-mode"), reason: await staff.locator('[data-testid="pf-embed"]').innerText() };
 }
 async function publish(name) {
@@ -96,7 +101,7 @@ for (const name of ["fa-none", "xfo-deny", "heavy-js", "late-paint", "allowed", 
     const r = await addProject(name);
     assert.equal(r.mode, EXPECTED_MODE[name], `display mode recorded (${r.reason.slice(0, 200)})`);
     if (EXPECTED_MODE[name] === "remote") {
-      assert.match(r.verdict, /Remote interactive browser selected \(Mode B\)/, "step 2 tells staff the remote browser will be used");
+      assert.match(r.verdict, /does not permit native embedding yet/, "step 2 never offers the remote browser for a new entry");
       assert.match(r.reason, /Mode B — remote interactive browser/);
       assert.match(await staff.locator('[data-testid="pf-remote-limits"]').innerText(), /Sign-in, account and checkout pages.*blocked/s, "limitations shown to staff");
       // Immediate staff preview (unpublished, through a short-lived preview link).
