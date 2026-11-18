@@ -112,6 +112,17 @@ site opened directly and through Crestmont's native frame in the same Chromium �
 click response, canvases drawn and animating — and Lead Haven Collective's 3D Earth specifically (cropped screenshots
 of both are kept as evidence).
 
+**Finding (2026-11-18, read-only production run 44417984802): Lead Haven Collective's 3D Earth does not render on the
+direct production site either** — in Crestmont's frame and on leadhavencollective.com alike, its 1440×900 canvas stays
+empty (WebGL is available in that browser). Chromium reports "An import map is added after module script load was
+triggered" and "Failed to resolve module specifier \"three\"". Cause, in the site's own source
+(`Schmidt-Development/lead-haven-collective` `public/index.html` at d7d8fdd): six `<link rel="modulepreload">` tags for
+three.js (lines 21–28) come before `<script type="importmap">` (line 35); the first modulepreload starts module loading,
+so the browser rejects the later import map and the bare `"three"` import cannot resolve. Crestmont's 2026-11-15 change
+to that site only touched its headers and the end of `<body>`. The fix belongs in the site's repository (move the
+import map above the modulepreload links); it was not changed from here, as no change to a destination site is
+authorized by this work.
+
 ## Real websites first (Owner, 2026-11-18)
 
 > "Correct Crestmont's portfolio so that all five entries currently using demos or remote viewing display their actual
