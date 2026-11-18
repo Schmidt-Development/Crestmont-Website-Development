@@ -54,12 +54,13 @@ Glassly, Better Lansing Mechanics, Lansing Car Rentals and its mentorship site; 
 - Never assume an unrelated third-party website may be framed: the embedding check reads its own headers, and a site
   that refuses framing is shown through the remote viewer or not at all.
 
-Release paths used on 2026-11-18 (each site's own): Vercel (Get Every Invoice Paid, Glassly — merge to `main`),
-Cloudflare Workers Builds (Better Lansing Mechanics — a hotfix PR to `production`, as its PR #10, so production
-received only this change), Cloudflare Pages (mentorship — its production branch), and, for the hand-deployed
-lansingcarrentals.com Worker, a content-only update by Crestmont's protected production release
-(`tools/client-sites/lansing-car-rentals`, `scripts/client-site-framing.mjs`: exact-context patch, live verification,
-automatic rollback; bindings, secrets and variables untouched).
+Release paths used on 2026-11-18 (each site's own): Vercel (Get Every Invoice Paid PR #1, Glassly PR #15 — merge to
+`main`), Cloudflare Workers Builds (Better Lansing Mechanics — hotfix PR #25 to `production`, as its PR #10, so
+production received only this change; PR #26 brought the same change to `main`/staging), Cloudflare Pages (mentorship —
+PR #4 to its production branch `cloudflare-pages-deployment`), and lansingcarrentals.com (PR #5 to its source branch
+`claude/session-2026-10-21`, which builds production automatically — its deployment guide describes a manual
+`wrangler deploy`; the branch's earlier, not yet released header styling commit 4e40ff6 went live with it). Lead Haven
+Collective keeps its content-only update through Crestmont's release (`tools/client-sites/lead-haven-collective`).
 
 **Layout:** `.pfx__meta` uses bounded columns (`minmax(min(100%, 60%), 1fr) fit-content(24rem)`): the links column
 fits its content up to 24rem and long mode labels wrap inside it. An `auto` track had sized itself to the remote-view

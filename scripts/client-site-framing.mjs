@@ -8,10 +8,7 @@
 // triggers are untouched) and verifies the live headers — rolling back to the downloaded modules if anything fails.
 //   • When the running bundle is byte-identical to the build of the manifest's base commit (sha256), the full change
 //     (headers + the site's framed-mode link handling) is applied and must produce exactly the change commit's build.
-//   • Otherwise only the HEADER_RULES block is replaced, and only if the running block is exactly the expected one
-//     (manifests with oldHeaderRules), or — manifests with "allowOffsetPatch" — the same patch is applied with
-//     --fuzz=0: every hunk's context must match the running code exactly; only its position may differ (a bundle
-//     built from a slightly different commit by the same bundler).
+//   • Otherwise only the HEADER_RULES block is replaced, and only if the running block is exactly the expected one.
 //   • Anything else: nothing is uploaded.
 // Idempotent: if the live site already permits exactly the Crestmont origins, it does nothing.
 //   CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… node scripts/client-site-framing.mjs tools/client-sites/lead-haven-collective
@@ -91,15 +88,6 @@ if (!main) { console.log(`NOT APPLIED: the running Worker has no ${m.mainModule}
 const current = textOf(main);
 console.log(`Running Worker ${m.worker}: ${parts.length} module(s) via ${via}; ${m.mainModule} sha256 ${sha(current).slice(0, 16)}… (${current.length} chars)`);
 
-/** The manifest's patch applied with exact context (positions may differ), or null when any hunk does not match. */
-function tryPatch(text) {
-  const w = mkdtempSync(join(tmpdir(), "framing-"));
-  writeFileSync(join(w, "index.js"), text);
-  try { execFileSync("patch", ["--fuzz=0", "--no-backup-if-mismatch", "-s", "-f", join(w, "index.js"), join(dir, "framing.patch")], { stdio: "pipe" }); }
-  catch { return null; }
-  return readFileSync(join(w, "index.js"), "utf8");
-}
-
 let next, mode;
 if (sha(current) === m.oldSha256) {
   const w = mkdtempSync(join(tmpdir(), "framing-"));
@@ -108,10 +96,7 @@ if (sha(current) === m.oldSha256) {
   next = readFileSync(join(w, "index.js"), "utf8");
   if (sha(next) !== m.newSha256) { console.log("NOT APPLIED: the patched bundle is not byte-identical to the change commit's build"); process.exit(1); }
   mode = `full change (byte-identical to ${m.source.repository}@${m.source.change})`;
-} else if (m.allowOffsetPatch && tryPatch(current) !== null) {
-  next = tryPatch(current);
-  mode = `the change commit's patch, applied with exact context to a build that differs from ${m.source.repository}@${m.source.base}`;
-} else if (m.oldHeaderRules && current.split(m.oldHeaderRules).length === 2) {
+} else if (current.split(m.oldHeaderRules).length === 2) {
   next = current.replace(m.oldHeaderRules, () => m.newHeaderRules);
   mode = "security headers only (the running bundle differs from the base build; only its HEADER_RULES block was replaced)";
 } else {

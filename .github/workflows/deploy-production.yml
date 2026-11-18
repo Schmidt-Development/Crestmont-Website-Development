@@ -280,9 +280,9 @@ jobs:
       # untouched), verifies the live headers (public pages: frame-ancestors = exactly the Crestmont origins; private
       # pages: still DENY / 'none') and rolls back on any mismatch. Idempotent: a site that already permits it is left
       # alone. A client-site problem never rolls back this release; the portfolio then shows that site's fallback.
-      # Every manifest under tools/client-sites/ (Lead Haven Collective 2026-11-15; Lansing Car Rentals 2026-11-18, whose
-      # Worker is otherwise released by hand). Sites with their own release pipeline (Vercel, Pages, Workers Builds)
-      # change through their repositories instead. One site's failure does not stop the others.
+      # Every manifest under tools/client-sites/ (Lead Haven Collective, 2026-11-15). Sites with their own release pipeline
+      # (Vercel, Cloudflare Pages, Workers Builds) change through their repositories instead. One site's failure does
+      # not stop the others.
       - name: Client sites — owner-authorized framing permission (every tools/client-sites manifest)
         if: steps.deploy.outcome == 'success'
         continue-on-error: true
