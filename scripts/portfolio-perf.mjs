@@ -177,6 +177,14 @@ async function measureNative() {
       for (let k = 0; k < 50 && !frame(); k++) await sleep(100);
       const f = frame(); if (!f) throw new Error("the live website's frame was not found");
       await f.waitForLoadState("load").catch(() => {});
+      R.startup.loadedMs = Date.now() - t0;
+      // Initial meaningful content of the framed page itself (its own clock: from its navigation start).
+      R.content = await f.evaluate(() => new Promise((res) => {
+        let lcp = null;
+        try { new PerformanceObserver((l) => { for (const e of l.getEntries()) lcp = e.startTime; }).observe({ type: "largest-contentful-paint", buffered: true }); } catch { /* unsupported */ }
+        setTimeout(() => { const n = performance.getEntriesByType("navigation")[0], fcp = performance.getEntriesByName("first-contentful-paint")[0]; const rs = performance.getEntriesByType("resource");
+          res({ ttfbMs: n ? Math.round(n.responseStart) : null, fcpMs: fcp ? Math.round(fcp.startTime) : null, lcpMs: lcp == null ? null : Math.round(lcp), domContentLoadedMs: n ? Math.round(n.domContentLoadedEventEnd) : null, loadMs: n ? Math.round(n.loadEventEnd) : null, resources: rs.length, transferKB: Math.round(rs.reduce((a, r) => a + (r.transferSize || 0), (n?.transferSize || 0)) / 1024) }); }, 600);
+      })).catch(() => null);
       await sleep(1200);
       const box = await p.locator(`${sel} iframe`).boundingBox();
       const cx = box.x + box.width / 2, cy = box.y + Math.min(box.height, 700) / 2;
@@ -201,23 +209,37 @@ async function measureNative() {
       }
       const ok = samples.filter((x) => typeof x === "number");
       R[D.touch ? "swipe" : "scrollSingle"] = { visibleMedMs: ok.length ? r1(med(ok)) : null, samples: samples.map((x) => (typeof x === "number" ? r1(x) : null)) };
-      R.idle = { fps: r1(await f.evaluate(() => new Promise((res) => { let n = 0; const t = performance.now(); const g = () => { n++; if (performance.now() - t < 2000) requestAnimationFrame(g); else res(n / 2); }; requestAnimationFrame(g); }))) };
-      // A same-site link inside the frame → the new page is loaded in the frame.
-      const link = await f.evaluate(() => { const here = location; for (const a of document.querySelectorAll("a[href]")) { let u; try { u = new URL(a.href); } catch { continue; } if (u.origin !== here.origin || u.pathname === here.pathname || a.target === "_blank") continue; const r = a.getBoundingClientRect(); if (r.width > 8 && r.height > 8 && r.top > 0 && r.bottom < innerHeight) return u.pathname; } return null; });
+      // Animation smoothness: frame intervals inside the framed page, idle and while a scroll is animating.
+      const frames = (ms) => f.evaluate((ms) => new Promise((res) => { const d = []; let last = performance.now(); const t = last; const g = (now) => { d.push(now - last); last = now; if (now - t < ms) requestAnimationFrame(g); else { d.sort((a, b) => a - b); res({ fps: Math.round((d.length / ((now - t) / 1000)) * 10) / 10, p95FrameMs: Math.round(d[Math.floor(d.length * 0.95)] * 10) / 10, longFrames: d.filter((x) => x > 50).length, running: document.getAnimations ? document.getAnimations().filter((a) => a.playState === "running").length : null }); } }; requestAnimationFrame(g); }), ms);
+      R.idle = await frames(2000);
+      if (!D.touch) { const fw = frames(1500); await p.mouse.move(cx, cy); for (let k = 0; k < 6; k++) { await p.mouse.wheel(0, 240); await sleep(120); } R.scrollAnim = await fw; }
+      // A SAFE public control inside the frame: a same-site link to a page that is not a sensitive route (sign-in,
+      // accounts, booking, checkout, payment …, SENSITIVE_ROUTE) and opens in the frame → the new page's first paint.
+      // Without one: an in-page link → the page has moved. Sensitive routes are never clicked.
+      const { SENSITIVE_ROUTE } = await import("./preview-explorer-checks.mjs");
+      const link = await f.evaluate((src) => { const rx = new RegExp(src, "i"), here = location; for (const a of document.querySelectorAll("a[href]")) { let u; try { u = new URL(a.href); } catch { continue; } if (u.origin !== here.origin || u.pathname === here.pathname || a.target === "_blank" || rx.test(u.pathname)) continue; const r = a.getBoundingClientRect(); if (r.width > 8 && r.height > 8 && a.getClientRects().length) { scrollTo({ top: Math.max(0, r.top + scrollY - innerHeight / 2), behavior: "instant" }); return u.pathname; } } return null; }, SENSITIVE_ROUTE.source);
       if (link) {
+        await sleep(400);
         const tc = Date.now();
-        const nav = f.waitForNavigation({ timeout: 15000 }).then(() => Date.now() - tc, () => null);
+        const nav = f.waitForNavigation({ timeout: 15000, waitUntil: "domcontentloaded" }).then(() => Date.now() - tc, () => null);
         await f.evaluate((path) => { const a = [...document.querySelectorAll("a[href]")].find((x) => { try { return new URL(x.href).pathname === path; } catch { return false; } }); a?.click(); }, link);
-        R.clickLink = { path: link, visibleMs: await nav };
+        const dcl = await nav;
+        const f2 = frame();
+        const fcp = f2 && dcl != null ? await f2.evaluate(() => new Promise((res) => { const pe = () => performance.getEntriesByName("first-contentful-paint")[0]; const t0 = performance.now(); const g = () => { const e = pe(); if (e || performance.now() - t0 > 8000) res(e ? e.startTime : null); else setTimeout(g, 50); }; g(); })).catch(() => null) : null;
+        R.clickLink = { path: link, visibleMs: dcl, newPageFcpMs: r1(fcp), safe: true };
+      } else {
+        const anchor = await f.evaluate(() => { for (const a of document.querySelectorAll("a[href^='#']")) { const id = a.getAttribute("href").slice(1); const d = id && document.getElementById(decodeURIComponent(id)); const r = a.getBoundingClientRect(); if (d && r.width > 4 && r.top > 0 && r.bottom < innerHeight && Math.abs(d.getBoundingClientRect().top) > innerHeight / 2) { a.setAttribute("data-pf-anchor", ""); return a.getAttribute("href"); } } return null; });
+        if (anchor) { const w = watch("click"); await f.locator("[data-pf-anchor]").first().click().catch(() => {}); R.clickLink = { path: anchor, visibleMs: r1(await w), safe: true, inPage: true }; }
+        else R.clickLink = { path: null, visibleMs: null, note: "no safe public link or in-page link on the page" };
       }
     } catch (e) { R.error = String(e.message).split("\n")[0].slice(0, 200); }
     report.devices[key] = R;
     console.log(`${key}: ${JSON.stringify(R)}`);
-    rows.push(`| ${R.label} | ${R.error ? `**${R.error}**` : "ok"} | ${R.startup?.wallMs ?? "—"} | ${R.idle?.fps ?? "—"} | ${(R.scrollSingle ?? R.swipe)?.visibleMedMs ?? "—"} | ${R.clickLink?.visibleMs ?? "—"} |`);
+    rows.push(`| ${R.label} | ${R.error ? `**${R.error}**` : "ok"} | ${R.startup?.wallMs ?? "—"} / ${R.startup?.loadedMs ?? "—"} | ${R.content?.fcpMs ?? "—"} / ${R.content?.lcpMs ?? "—"} | ${(R.scrollSingle ?? R.swipe)?.visibleMedMs ?? "—"} | ${R.clickLink?.visibleMs ?? "—"}${R.clickLink?.path ? ` (${R.clickLink.path})` : ""} | ${R.idle?.fps ?? "—"} fps, p95 ${R.idle?.p95FrameMs ?? "—"} ms${R.scrollAnim ? `; scrolling ${R.scrollAnim.fps} fps, p95 ${R.scrollAnim.p95FrameMs} ms, ${R.scrollAnim.longFrames} long` : ""} |`);
     await ctx.close();
   }
   const md = [`### Portfolio performance — ${LABEL} (${report.at})`, `Target: position ${POSITION} → **${T.slug}** (${T.live}) — native frame (Mode A)`, "",
-    "| Device | Status | Open → live (ms) | Frame animation fps | Scroll/swipe → moved 1/27 screen (ms, median) | Click link → new page (ms) |", "|---|---|---|---|---|---|", ...rows].join("\n");
+    "| Device | Status | Open → live / site loaded (ms) | Site FCP / LCP (ms, its own clock) | Scroll/swipe → moved 1/27 screen (ms, median) | Safe click → response (ms) | Animation frames (idle; while scrolling) |", "|---|---|---|---|---|---|---|", ...rows].join("\n");
   console.log("\n" + md);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + "\n");
 }
