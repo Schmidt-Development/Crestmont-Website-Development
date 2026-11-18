@@ -14,7 +14,7 @@
 //   PLAYWRIGHT_MODULE=… node scripts/portfolio-perf.mjs https://crestmontwebsitedevelopment.com --position 2 [--slug s]
 //     [--devices desktop,pixel,iphone,ipad] [--out perf.json] [--label baseline]
 // Sessions used: one per device (well inside the per-visitor limit); about 2–3 browser-minutes in total.
-import { writeFileSync } from "node:fs";
+import { writeFileSync, appendFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 const BASE = (args[0] ?? "").replace(/\/$/, "");
@@ -122,7 +122,7 @@ const report = { label: LABEL, base: BASE, at: new Date().toISOString(), positio
 {
   const ctx = await browser.newContext(); const p = await ctx.newPage();
   await p.goto(`${BASE}/portfolio`, { waitUntil: "domcontentloaded" });
-  const slides = await p.evaluate(() => [...document.querySelectorAll("[data-pfx] [data-pfx-slide]")].map((s) => ({ name: s.dataset.name, kind: s.dataset.kind, slug: s.dataset.remoteSlug ?? null, live: s.dataset.liveUrl })));
+  const slides = await p.evaluate(() => [...document.querySelectorAll("[data-pfx] [data-pfx-slide]")].map((s) => ({ name: s.dataset.name, kind: s.dataset.kind, slug: s.dataset.remoteSlug ?? s.id.replace(/^pfx-/, ""), live: s.dataset.liveUrl })));
   const slug = opt("--slug", null);
   report.target = slug ? slides.find((s) => s.slug === slug) ?? { slug } : slides[POSITION - 1];
   report.slides = slides.map((s, i) => `${i + 1}. ${s.name} (${s.kind})`);
@@ -130,7 +130,7 @@ const report = { label: LABEL, base: BASE, at: new Date().toISOString(), positio
 }
 const T = report.target;
 console.log(`target: position ${POSITION} → ${T?.name} (${T?.kind}) ${T?.live ?? ""} slug=${T?.slug}`);
-if (!T || T.kind !== "remote" || !T.slug) { console.log("The target is not a remote-browser (Mode B) entry; nothing to measure."); writeFileSync(OUT, JSON.stringify(report, null, 2)); process.exit(1); }
+if (!T || (T.kind !== "remote" && T.kind !== "live") || !T.slug) { console.log("The target is not a remote-browser (Mode B) entry; nothing to measure."); writeFileSync(OUT, JSON.stringify(report, null, 2)); process.exit(1); }
 
 /** A same-site link visible in the first screen of the real site at this viewport (read directly; nothing submitted). */
 async function findTargets(url, w, h, mobile) {
@@ -154,6 +154,74 @@ async function findTargets(url, w, h, mobile) {
   } catch { return { link: null, text: null }; } finally { await ctx.close(); }
 }
 
+/** Mode A (Owner, 2026-11-18): the real website in a native frame. Measured inside the framed page itself — wheel /
+ *  touch → the page has moved 1/27 of the screen (the remote measurement's threshold), animation frames per second,
+ *  a same-site link → the new page loaded — plus the time until the slide is live. No session, no browser-minutes. */
+async function measureNative() {
+  const rows = [];
+  for (const key of DEVICES) {
+    const D = DEV[key]; if (!D) continue;
+    const o = { ...D.opts }; delete o.defaultBrowserType;
+    const ctx = await browser.newContext(o), p = await ctx.newPage(), cdp = await ctx.newCDPSession(p);
+    if (D.net) { await cdp.send("Network.enable"); await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 60, downloadThroughput: 625000, uploadThroughput: 187500 }); }
+    const R = { label: D.label, mode: "native" };
+    try {
+      const t0 = Date.now();
+      await p.goto(`${BASE}/portfolio/${T.slug}`, { waitUntil: "domcontentloaded" });
+      const sel = `.pfx__slide#pfx-${T.slug}`;
+      await p.locator(sel).scrollIntoViewIfNeeded();
+      await p.waitForSelector(`${sel}.is-ready iframe`, { timeout: 60000 });
+      R.startup = { wallMs: Date.now() - t0 };
+      const origin = new URL(T.live).origin;
+      const frame = () => p.frames().find((f) => f.url().startsWith(origin));
+      for (let k = 0; k < 50 && !frame(); k++) await sleep(100);
+      const f = frame(); if (!f) throw new Error("the live website's frame was not found");
+      await f.waitForLoadState("load").catch(() => {});
+      await sleep(1200);
+      const box = await p.locator(`${sel} iframe`).boundingBox();
+      const cx = box.x + box.width / 2, cy = box.y + Math.min(box.height, 700) / 2;
+      const watch = (kind) => f.evaluate((kind) => new Promise((res) => {
+        const y0 = scrollY, row = innerHeight / 27, start = performance.now(); let t = null;
+        addEventListener(kind, () => { if (t === null) t = performance.now(); }, { capture: true, passive: true, once: true });
+        const step = () => { if (t !== null && Math.abs(scrollY - y0) >= row) res(performance.now() - t); else if (performance.now() - start > 4000) res(null); else requestAnimationFrame(step); };
+        requestAnimationFrame(step);
+      }), kind);
+      const samples = [];
+      for (let k = 0; k < 5; k++) {
+        if (!D.touch) { await p.mouse.move(cx, cy); const w = watch("wheel"); await sleep(50); await p.mouse.wheel(0, 360); samples.push(await w); }
+        else {
+          const w = watch("touchstart"); await sleep(50);
+          const from = { x: cx, y: cy + 120 }, to = { x: cx, y: cy - 120 };
+          await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [from] });
+          for (let m = 1; m <= 10; m++) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: cx, y: from.y + ((to.y - from.y) * m) / 10 }] }); await sleep(16); }
+          await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+          samples.push(await w);
+        }
+        await sleep(700);
+      }
+      const ok = samples.filter((x) => typeof x === "number");
+      R[D.touch ? "swipe" : "scrollSingle"] = { visibleMedMs: ok.length ? r1(med(ok)) : null, samples: samples.map((x) => (typeof x === "number" ? r1(x) : null)) };
+      R.idle = { fps: r1(await f.evaluate(() => new Promise((res) => { let n = 0; const t = performance.now(); const g = () => { n++; if (performance.now() - t < 2000) requestAnimationFrame(g); else res(n / 2); }; requestAnimationFrame(g); }))) };
+      // A same-site link inside the frame → the new page is loaded in the frame.
+      const link = await f.evaluate(() => { const here = location; for (const a of document.querySelectorAll("a[href]")) { let u; try { u = new URL(a.href); } catch { continue; } if (u.origin !== here.origin || u.pathname === here.pathname || a.target === "_blank") continue; const r = a.getBoundingClientRect(); if (r.width > 8 && r.height > 8 && r.top > 0 && r.bottom < innerHeight) return u.pathname; } return null; });
+      if (link) {
+        const tc = Date.now();
+        const nav = f.waitForNavigation({ timeout: 15000 }).then(() => Date.now() - tc, () => null);
+        await f.evaluate((path) => { const a = [...document.querySelectorAll("a[href]")].find((x) => { try { return new URL(x.href).pathname === path; } catch { return false; } }); a?.click(); }, link);
+        R.clickLink = { path: link, visibleMs: await nav };
+      }
+    } catch (e) { R.error = String(e.message).split("\n")[0].slice(0, 200); }
+    report.devices[key] = R;
+    console.log(`${key}: ${JSON.stringify(R)}`);
+    rows.push(`| ${R.label} | ${R.error ? `**${R.error}**` : "ok"} | ${R.startup?.wallMs ?? "—"} | ${R.idle?.fps ?? "—"} | ${(R.scrollSingle ?? R.swipe)?.visibleMedMs ?? "—"} | ${R.clickLink?.visibleMs ?? "—"} |`);
+    await ctx.close();
+  }
+  const md = [`### Portfolio performance — ${LABEL} (${report.at})`, `Target: position ${POSITION} → **${T.slug}** (${T.live}) — native frame (Mode A)`, "",
+    "| Device | Status | Open → live (ms) | Frame animation fps | Scroll/swipe → moved 1/27 screen (ms, median) | Click link → new page (ms) |", "|---|---|---|---|---|---|", ...rows].join("\n");
+  console.log("\n" + md);
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + "\n");
+}
+
 const DEV = {
   desktop: { label: "Desktop Chrome 1440×900", opts: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 }, touch: false },
   pixel: { label: "Android-sized (Pixel 7, Chromium emulation)", opts: devices["Pixel 7"], touch: true },
@@ -165,6 +233,7 @@ const DEV = {
   pixel5m: { label: "Android-sized on a 5 Mbit/s connection", opts: devices["Pixel 7"], touch: true, net: true },
 };
 
+if (T.kind === "live") { await measureNative(); writeFileSync(OUT, JSON.stringify(report, null, 2)); await browser.close(); process.exit(0); }
 for (const key of DEVICES) {
   const D = DEV[key]; if (!D) continue;
   const o = { ...D.opts }; delete o.defaultBrowserType;
