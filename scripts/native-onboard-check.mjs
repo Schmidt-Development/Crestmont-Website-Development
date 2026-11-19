@@ -43,15 +43,33 @@ for (const [label, opts] of [["desktop", { viewport: { width: 1440, height: 900 
   await ctx.close();
 }
 await b.close();
-// Protected pages: read their own headers (a visitor's GET), never load them in a frame.
-for (const path of ["/login", "/account", "/admin", "/checkout"]) {
+// Headers, read like a visitor's GET (never loaded in a frame). The same sensitive-route rule as
+// src/services/native/standard.ts SENSITIVE_ROUTE decides what is protected.
+const SENSITIVE = /(^|\/)(log-?in|log-?out|sign-?in|sign-?up|register|auth|account|accounts|my-account|portal|owner|admin|staff|dashboard|checkout|cart|billing|pay|payment|payments|subscribe|subscription|password|token|api|book|booking|apply|application|applications|quote|quotes|invoice|invoices|order|orders|manage|confirm|verify)(\/|$|\.)/i;
+const directives = (csp) => csp.split(",").flatMap((p) => p.split(";").map((d) => d.trim()).filter(Boolean));
+const fa = (csp) => directives(csp).filter((d) => /^frame-ancestors(\s|$)/i.test(d));
+const others = (csp) => directives(csp).filter((d) => !/^frame-ancestors(\s|$)/i.test(d)).join("; ");
+const head = async (path) => { const r = await fetch(new URL(path, live), { redirect: "manual" }); const html = r.headers.get("content-type")?.includes("html") ? await r.text() : ""; return { status: r.status, csp: r.headers.get("content-security-policy") ?? "", xfo: r.headers.get("x-frame-options") ?? "", html }; };
+// The public homepage: exactly one frame-ancestors, listing only Crestmont's origins — never * or another site.
+const home = await head("/").catch(() => null);
+if (home) {
+  const list = fa(home.csp).join(" ").replace(/^frame-ancestors\s*/i, "").split(/\s+/).filter(Boolean);
+  ok(fa(home.csp).length === 1 && list.length > 0 && list.every((o) => /^https:\/\/(www\.)?crestmontwebsitedevelopment\.com$/.test(o)) && !home.xfo, `public / allows only Crestmont (${fa(home.csp).join("; ") || "no frame-ancestors"}; X-Frame-Options ${home.xfo || "none"})`);
+}
+// Protected pages: a fixed set plus every same-site sensitive link on the homepage.
+const linked = new Set();
+for (const m of (home?.html ?? "").matchAll(/<a\b[^>]*\bhref\s*=\s*("([^"]*)"|'([^']*)')/gi)) { try { const u = new URL((m[2] ?? m[3] ?? "").replace(/&amp;/g, "&"), live); if (u.origin === origin && SENSITIVE.test(u.pathname)) linked.add(u.pathname); } catch {} }
+let compared = false;
+for (const path of [...new Set(["/login", "/account", "/admin", "/apply", "/application", "/checkout", "/payment", "/pay", ...[...linked].slice(0, 12)])]) {
   try {
-    const r = await fetch(new URL(path, live), { redirect: "manual" });
-    if (r.status >= 400 || (r.status >= 300 && r.status < 400)) { console.log(`INFO ${path}: HTTP ${r.status}`); continue; }
-    const csp = r.headers.get("content-security-policy") ?? "", xfo = r.headers.get("x-frame-options") ?? "";
-    const fa = csp.split(",").flatMap((p) => p.split(";").map((d) => d.trim()).filter((d) => d.startsWith("frame-ancestors")));
-    const refuses = fa.length ? fa.every((d) => !/crestmontwebsitedevelopment\.com|\*/.test(d)) : /deny|sameorigin/i.test(xfo);
-    ok(refuses, `protected ${path} still refuses framing (${fa.join("; ") || `X-Frame-Options ${xfo || "none"}`})`);
+    const r = await head(path);
+    if (r.status >= 400 || (r.status >= 300 && r.status < 400)) { console.log(`INFO ${path}: HTTP ${r.status}${linked.has(path) ? " (linked from the homepage)" : ""}`); continue; }
+    const d = fa(r.csp);
+    const refuses = d.length ? d.every((x) => !/crestmontwebsitedevelopment\.com|\*/.test(x)) : /deny|sameorigin/i.test(r.xfo);
+    ok(refuses, `protected ${path}${linked.has(path) ? " (linked from the homepage)" : ""} still refuses framing (${d.join("; ") || `X-Frame-Options ${r.xfo || "none"}`})`);
+    // Nothing else changed: where the site sends one policy for every page, the public page's policy equals the protected
+    // page's own in every directive except frame-ancestors.
+    if (!compared && home && r.csp && home.csp) { compared = true; const same = others(home.csp) === others(r.csp); console.log(`${same ? "PASS" : "INFO"} every directive other than frame-ancestors on / ${same ? "is identical to" : "differs from"} ${path}'s own policy${same ? " (nothing else was changed)" : " (the site sends different policies per page)"}`); }
   } catch (e) { console.log(`INFO ${path}: ${e.message}`); }
 }
 console.log(failed ? `${failed} native onboarding check(s) failed` : `native onboarding verified for ${live}`);

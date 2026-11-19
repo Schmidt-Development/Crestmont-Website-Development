@@ -114,6 +114,15 @@ token, that is now a supported mode: automatic merging is **off** and reported a
 and the Owner reviews and merges it (manual approval), after which Crestmont follows the deployment as usual. The
 Cloudflare Pages list refused `per_page=50` (HTTP 400); Pages discovery now uses the API's own page size.
 
+**Operations requests and the challenge (run 44456707770).** The first production onboarding reported failure although
+the Worker had answered HTTP 200 (rule created, state `preparing`): the workflow captured `ask()`'s output, which held the
+`::add-mask::` command as well as the status, and printed it — challenge included — in the error (that one-time
+challenge was already consumed). Every request now goes through `scripts/native-ops-ask.sh`, which writes the status to
+a file only, masks the challenge on the job's own output and scrubs it from any answer it keeps
+(tests/native-ops-ask.test.ts). `status` reads an entry's state, audit trail, Crestmont's rule and the live headers
+read-only; `resume` continues an existing entry with ordinary (never forced) steps, so a rule is reused, never duplicated,
+and a rolled-back rule is not re-applied.
+
 **A site whose own policy says `frame-ancestors 'none'` (Cloudflare-proxied).** A second policy cannot loosen the site's
 own, so Crestmont's zone rule then *replaces only that directive*: it matches only the site's exact public paths and only
 when the response's `Content-Security-Policy` is byte-for-byte the single policy Crestmont read twice (a per-request
