@@ -80,6 +80,20 @@ Every portfolio entry — existing and future — follows one standard. There is
   `{source:"crestmont-portfolio", type:"visibility", visible}` messages (switching projects, leaving the screen, hidden
   page). Websites Crestmont builds include `/assets/crestmont-visibility.js` (both starters, identical), which accepts
   only Crestmont's origins from the framing window and pauses its own CSS animations while not visible.
+* **Release sequence (after release #39, 2026-11-19)**: release #39 migrated the entries and ran acceptance at once,
+  while the native job was still working through them (its data report was even taken mid-run), and the job had no
+  per-tick bound (the old automatic allowance of 10 verifications a day was used up by the converted entries). Now:
+  the 15-minute job is bounded per tick (6 minutes, 3 verifications; published entries first, cheap preparation before
+  verification; the rest deferred to the next tick, never dropped); Owner-approved runs (a release, the operations
+  workflow) may use 3× the daily allowance. The release's deploy job runs **Native preparation**
+  (`scripts/native-prepare-loop.sh`: bounded `prepare` rounds — `/api/ops/portfolio-native` — until every published
+  entry and the named acceptance websites are verified or only genuine blockers remain, 30 minutes at most) *before*
+  any acceptance, and `verify-live-portfolio` starts with the strict **Native readiness** gate
+  (`scripts/native-readiness-gate.mjs`): every published entry and every acceptance website must be `native_verified`;
+  a fallback notice is honest but fails the gate, which names each blocker and the one action needed, and prints the
+  measured direct-vs-embedded performance (a diagnosis, not a guarantee). The native display acceptance
+  (`live-native-acceptance.mjs`) likewise requires each acceptance website to be shown natively, and an operations
+  run (`onboard`, `resume`, `prepare`) fails unless every requested website ends `native_verified`.
 * **Proof**: `tests/portfolio-native*.test.ts` (Workers, Pages, Vercel, restrictive CSP rewrite, deployment failure,
   rule without effect, multi-account, regression repair, GitHub App, merge gate), `tests/portfolio-native-browser.test.ts`
   (real Chromium: working WebGL, decorative empty canvas, deferred scene, broken scene = website defect, blank bundle,

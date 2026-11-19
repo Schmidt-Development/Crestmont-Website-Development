@@ -23,10 +23,10 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "check (read-only), status (read-only), onboard (one website) or resume (an existing entry)"
+        description: "check / status (read-only), onboard (up to 3 websites), resume (an entry) or prepare (every published entry + named slugs, until settled)"
         required: true
         type: choice
-        options: [check, status, onboard, resume]
+        options: [check, status, onboard, resume, prepare]
       url:
         description: "onboard: the website's production address (https://…), or up to 3 comma-separated"
         required: false
@@ -36,7 +36,7 @@ on:
         required: false
         type: string
       slug:
-        description: "status / resume: the portfolio entry's slug (e.g. lending-for-beginners)"
+        description: "status / resume: the entry's slug (e.g. lending-for-beginners); prepare: extra required slugs, comma-separated"
         required: false
         type: string
 
@@ -63,8 +63,9 @@ jobs:
     steps:
       - name: Validate inputs (F-23)
         run: |
-          [[ "$ACTION" =~ ^(check|status|onboard|resume)$ ]] || { echo "::error::action must be check, status, onboard or resume"; exit 1; }
-          [[ -z "$SLUG_INPUT" || "$SLUG_INPUT" =~ ^[a-z0-9][a-z0-9-]{0,79}$ ]] || { echo "::error::slug must be lowercase letters, digits and dashes"; exit 1; }
+          [[ "$ACTION" =~ ^(check|status|onboard|resume|prepare)$ ]] || { echo "::error::action must be check, status, onboard, resume or prepare"; exit 1; }
+          [[ -z "$SLUG_INPUT" || "$SLUG_INPUT" =~ ^[a-z0-9][a-z0-9-]{0,79}(,[a-z0-9][a-z0-9-]{0,79}){0,5}$ ]] || { echo "::error::slug must be lowercase letters, digits and dashes (prepare: up to 6, comma-separated)"; exit 1; }
+          [[ "$ACTION" == "prepare" || ! "$SLUG_INPUT" =~ , ]] || { echo "::error::only prepare takes several slugs"; exit 1; }
           [[ ! "$ACTION" =~ ^(status|resume)$ || -n "$SLUG_INPUT" ]] || { echo "::error::$ACTION needs slug"; exit 1; }
           [[ -z "$URL_INPUT" || "$URL_INPUT" =~ ^https://[A-Za-z0-9.-]+(/[A-Za-z0-9/._~-]*)?(,[[:space:]]*https://[A-Za-z0-9.-]+(/[A-Za-z0-9/._~-]*)?){0,2}$ ]] || { echo "::error::url must be up to 3 comma-separated plain https addresses"; exit 1; }
           [[ -z "$URLS_INPUT" || "$URLS_INPUT" =~ ^(https://[A-Za-z0-9.-]+/?)(,[[:space:]]*https://[A-Za-z0-9.-]+/?){0,11}$ ]] || { echo "::error::urls must be up to 12 comma-separated https origins"; exit 1; }
@@ -123,7 +124,15 @@ jobs:
             done
             printf '%s\t%s\t%s\t%s\n' "$slug" "$(field state)" "$(field preview)" "$1" >> "$targets"
           }
-          if [ "$ACTION" = "onboard" ]; then
+          if [ "$ACTION" = "prepare" ]; then
+            # Bounded rounds until every published entry and the named slugs are verified, or only genuine blockers remain.
+            bash scripts/native-prepare-loop.sh "$RUNNER_TEMP/readiness.json" 40 "$SLUG_INPUT" | tee -a "$GITHUB_STEP_SUMMARY"
+            node scripts/native-readiness-gate.mjs "$RUNNER_TEMP/readiness.json" "$SLUG_INPUT" | tee -a "$GITHUB_STEP_SUMMARY" || true
+            node -e '
+              const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")), named = (process.argv[2] || "").split(",").filter(Boolean);
+              const rows = r.readiness.filter((x) => x.published || named.includes(x.slug));
+              for (const x of rows) console.log([x.slug, x.state, r.previews[x.slug] || "", x.live].join("\t"));' "$RUNNER_TEMP/readiness.json" "$SLUG_INPUT" > "$targets"
+          elif [ "$ACTION" = "onboard" ]; then
             IFS=',' read -ra list <<< "$URL_INPUT"
             for raw in "${list[@]}"; do
               u="$(echo "$raw" | xargs)"
@@ -165,4 +174,6 @@ jobs:
         run: |
           [[ "$ACTION" =~ ^(check|status)$ ]] && exit 0
           echo "Native states: ${STATES:-unknown} (${VERIFIED:-0} of ${ALL:-0} verified)"
-          [ "${VERIFIED:-0}" = "${ALL:-x}" ] || echo "::warning title=Not every website is verified yet::${STATES:-unknown} — see the steps above for the exact reason and what is needed."
+          # A run succeeds only when EVERY requested website is native_verified (2026-11-19): an unverified target —
+          # even one honestly reported as blocked — fails the run, with the reason in the steps above.
+          [ -n "${ALL:-}" ] && [ "${ALL}" != "0" ] && [ "${VERIFIED:-0}" = "${ALL}" ] || { echo "::error title=Not every website is native-verified::${STATES:-no result} — see the steps above for the exact reason and what is needed."; exit 1; }

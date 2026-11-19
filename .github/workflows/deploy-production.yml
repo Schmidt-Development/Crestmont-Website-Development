@@ -49,6 +49,8 @@ jobs:
       deployed: ${{ steps.deploy.outcome }}
       # Display-mode acceptance websites (slugs, modes and one-hour view-only preview links), for verify-live-portfolio.
       portfolio_intake: ${{ steps.intake.outputs.json }}
+      # Every entry's native readiness after the release finished preparing them (native-prepare-loop.sh), for the gate.
+      native_readiness: ${{ steps.prepare.outputs.json }}
     # F-24: no secret is set for the whole job. The Cloudflare token goes only to the steps that run wrangler and the
     # evidence secret only to the steps that sign evidence; npm install / typecheck / tests (third-party package code)
     # receive neither. tests/workflow-security.test.ts enforces this.
@@ -358,7 +360,7 @@ jobs:
           node --no-warnings scripts/ops-challenge.ts --purpose portfolio_intake --out-sql "$work/c.sql" --out-nonce "$work/nonce" > /dev/null
           echo "::add-mask::$(cat "$work/nonce")"
           $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
-          body=$(node -e 'console.log(JSON.stringify({ challenge: process.argv[1], urls: ["https://geteveryinvoicepaid.com/", "https://premiuminvoices.com/", "https://lendingforbeginners.com/", "https://leadhavencollective.com/"] }))' "$(cat "$work/nonce")")
+          body=$(node -e 'console.log(JSON.stringify({ challenge: process.argv[1], urls: ["https://keepyourwebsiteworking.com/", "https://wincustomersback.com/", "https://lendingforbeginners.com/", "https://leadhavencollective.com/", "https://geteveryinvoicepaid.com/"] }))' "$(cat "$work/nonce")")
           http=$(curl -s -o "$work/r.json" -w '%{http_code}' --max-time 180 -X POST -H 'content-type: application/json' --data "$body" "$PRODUCTION_URL/api/ops/portfolio-intake" || echo 000)
           [ "$http" = "200" ] || { echo "::warning title=Portfolio intake::HTTP $http"; exit 1; }
           node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`### Portfolio display (native-first; remote streaming ${r.remoteBrowser.enabled?"ON — unexpected":"off"})`);for(const x of r.results)console.log(`- ${x.url} → **${x.mode}** (${x.slug}${x.created?", added unpublished":", existing"}${x.published?", published":""}) — ${x.reason}`)' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -382,6 +384,25 @@ jobs:
           http=$(curl -s -o "$work/r.json" -w '%{http_code}' --max-time 280 -X POST -H 'content-type: application/json' --data "$body" "$PRODUCTION_URL/api/ops/portfolio-native" || echo 000)
           [ "$http" = "200" ] || { echo "::warning title=Native connections::HTTP $http"; exit 1; }
           node scripts/native-ops-report.mjs check "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Native preparation BEFORE any acceptance (Owner, 2026-11-19): a release that converts or adds entries finishes
+      # their supported configuration and real-browser verification first — published entries first, bounded rounds
+      # (time and verification budgets per round), progress stored per entry, never a duplicate rule or pull request —
+      # until every required entry is verified or only genuine blockers remain (30 minutes at most; the 15-minute job
+      # continues after). The strict gate is in verify-live-portfolio.
+      - name: Native preparation — every published entry and the acceptance websites, until settled
+        id: prepare
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          f="$RUNNER_TEMP/readiness.json"
+          # Each round writes a one-time challenge with $WRANGLER (scripts/native-ops-ask.sh) and asks the Worker.
+          WRANGLER="$WRANGLER" bash scripts/native-prepare-loop.sh "$f" 30 "keep-your-website-working,wincustomersback,lending-for-beginners"
+          { echo "### Native readiness after preparation"; node scripts/native-readiness-gate.mjs "$f" "keep-your-website-working,wincustomersback,lending-for-beginners" || true; } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "json=$(base64 -w0 "$f")" >> "$GITHUB_OUTPUT"
 
       - name: Post-deploy production checks (LAUNCH-003)
         id: checks
@@ -570,6 +591,17 @@ jobs:
       # demo, never only a screenshot), scrolls inside the frame without moving Crestmont's page, navigates, reloads /
       # resets and switches devices, on desktop and phone; Lead Haven Collective must be published and show its REAL
       # live website.
+      # Strict native readiness (Owner, 2026-11-19): every published entry and every acceptance website must be
+      # native_verified — a fallback notice is not success. Names each blocker and what is needed. Mandatory.
+      - name: Native readiness — every published entry and acceptance website verified (strict) — mandatory
+        if: always()
+        env:
+          READINESS: ${{ needs.deploy.outputs.native_readiness }}
+        run: |
+          if [ -z "$READINESS" ]; then echo "## Native readiness: FAILED — the deploy job's preparation step produced no result" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
+          printf '%s' "$READINESS" | base64 -d > readiness.json
+          set -o pipefail
+          { echo "## Native readiness (strict)"; node scripts/native-readiness-gate.mjs readiness.json "keep-your-website-working,wincustomersback,lending-for-beginners"; } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Live portfolio acceptance (desktop and phone, real browser) — mandatory
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs

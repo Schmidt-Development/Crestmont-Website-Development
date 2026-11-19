@@ -91,3 +91,36 @@ test("[PORT-NATIVE-OPS] workflow: check, onboard and advance all go through nati
   assert.match(WORKFLOW, /name: Ask the production Worker \(one-time challenges\)\n\s+id: ops\n\s+if: inputs\.action != 'status'/);
   assert.ok(!/force["']?\s*:/.test(WORKFLOW), "no request sets force");
 });
+
+test("[PORT-NATIVE-OPS] native-prepare-loop: repeats bounded rounds until every required entry is verified, stops on genuine blockers, and never loops past its deadline", () => {
+  const dir = mkdtempSync(join(tmpdir(), "native-loop-"));
+  const bin = join(dir, "bin");
+  execFileSync("mkdir", ["-p", bin]);
+  // Each curl call answers the next scripted round (busy, then verified; or a blocker that never changes).
+  const rounds = (states: string[][]) => states.map((st) => JSON.stringify({ round: [{ slug: "kyww", state: st[0] }], readiness: [{ slug: "kyww", name: "KYWW", published: true, state: st[0], codes: [] }, { slug: "wcb", name: "WCB", published: false, state: st[1], codes: [] }], previews: {} }));
+  const run = (answers: string[], args: string[]) => {
+    answers.forEach((a, i) => writeFileSync(join(dir, `a${i}.json`), a));
+    writeFileSync(join(dir, "n"), "0");
+    writeFileSync(join(bin, "curl"), `#!/usr/bin/env bash
+out=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done
+cat > /dev/null; n=$(cat "${dir}/n"); f="${dir}/a$n.json"; [ -f "$f" ] || f="${dir}/a$(( ${answers.length} - 1 )).json"
+cp "$f" "$out"; echo $((n + 1)) > "${dir}/n"; printf 200
+`);
+    writeFileSync(join(bin, "wrangler"), "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(join(bin, "curl"), 0o755); chmodSync(join(bin, "wrangler"), 0o755);
+    return spawnSync("bash", ["scripts/native-prepare-loop.sh", join(dir, "out.json"), ...args], { cwd: ROOT, encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, WRANGLER: join(bin, "wrangler"), PRODUCTION_URL: "https://crestmont.test", NATIVE_PREPARE_PAUSE: "0" } });
+  };
+  // Busy, busy, then verified (wcb is named, so it is required too).
+  let r = run(rounds([["preparing", "checking"], ["preparing", "native_verified"], ["native_verified", "native_verified"]]), ["5", "wcb"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /round 3: 2\/2 verified/);
+  assert.match(r.stdout, /every required entry is native_verified/);
+  assert.equal(JSON.parse(readFileSync(join(dir, "out.json"), "utf8")).readiness[0].state, "native_verified");
+  // A genuine blocker (nothing in progress): it stops at once and leaves the gate to fail.
+  r = run(rounds([["authorization_required", "native_verified"]]), ["5", "wcb"]);
+  assert.match(r.stdout, /round 1: 1\/2 verified; in progress: none/);
+  assert.match(r.stdout, /settled: nothing in progress/);
+  // Something that stays in progress: bounded by the deadline (0 minutes → one round).
+  r = run(rounds([["preparing", "native_verified"]]), ["0", "wcb"]);
+  assert.match(r.stdout, /deadline reached after 1 rounds/);
+});
