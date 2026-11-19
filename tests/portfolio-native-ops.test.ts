@@ -97,3 +97,61 @@ test("[PORT-NATIVE-OPS] onboard + advance: an owned Cloudflare site is prepared 
   assert.equal((await post({ action: "advance", slug: "pub" })).status, 422);
   t.close();
 });
+
+test("[PORT-NATIVE-OPS] prepare: one bounded round drives every published entry (cheap preparation before verification), reports every entry's readiness, and the strict gate fails until each required entry is verified", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { writeFileSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const w = new NativeWorld()
+    .site({ ...site("blocked.fixture-native.com") }).cloudflareZone("blocked.fixture-native.com", ACCT, { workerDomain: { hostname: "blocked.fixture-native.com", service: "blocked" } })
+    .site({ ...site("open.fixture-native.com"), baseXfo: null, baseCsp: "frame-ancestors http://crestmont.test" } as never);
+  const t = await createTestApp({ ...TOKENS, overrides: { portfolioFetch: w.fetchSite, providerFetch: w.fetchApi, nativeVerify: async () => ({ ok: true, at: new Date().toISOString(), summary: "Verified in a real browser", checks: [] }) } } as never);
+  const at = new Date().toISOString();
+  for (const [slug, url] of [["blocked-pub", "https://blocked.fixture-native.com/"], ["open-pub", "https://open.fixture-native.com/"]])
+    await t.db.prepare(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, position, published, updated_at, created_at, native_required, native_state, native_migrated_at) VALUES (?,?,?,'T',?,'TEST DATA','TEST DATA','[]',90,1,?,?,1,'checking',?)`).bind(`pf_${slug.replace("-", "_")}`, slug, slug, url, at, at, at).run();
+  // Only these two are published here (the seeded entries would otherwise be required too — and rightly fail the gate).
+  await t.db.prepare(`UPDATE portfolio_projects SET published = 0 WHERE slug NOT IN ('blocked-pub', 'open-pub')`).run();
+  const post = async (body: unknown) => t.client().request("POST", "/api/ops/portfolio-native", { body: JSON.stringify({ ...body as object, challenge: await challenge(t) }), headers: { "content-type": "application/json" } });
+  type R = { round: { slug: string; state: string; published: boolean }[]; readiness: { slug: string; published: boolean; state: string; codes: string[] }[]; previews: Record<string, string | null> };
+  const r1 = await (await post({ action: "prepare" })).json() as R;
+  const order = r1.round.map((x) => x.slug);
+  assert.ok(order.indexOf("blocked-pub") < order.indexOf("open-pub"), `cheap preparation before a verification: ${order}`);
+  assert.equal(r1.round.find((x) => x.slug === "blocked-pub")!.state, "preparing", "the rule was applied");
+  assert.equal(r1.round.find((x) => x.slug === "open-pub")!.state, "native_verified");
+  assert.match(r1.previews["open-pub"]!, /^\/portfolio\/preview\/[0-9a-f]{48}$/);
+  const dir = mkdtempSync(join(tmpdir(), "gate-"));
+  const gate = (r: R, named = "") => { writeFileSync(join(dir, "r.json"), JSON.stringify(r)); try { return { code: 0, out: execFileSync(process.execPath, ["scripts/native-readiness-gate.mjs", join(dir, "r.json"), named], { encoding: "utf8" }) }; } catch (e) { const x = e as { status: number; stdout: string }; return { code: x.status, out: x.stdout }; } };
+  const g1 = gate(r1);
+  assert.equal(g1.code, 1, "a published entry still preparing fails the strict gate");
+  assert.match(g1.out, /✗ blocked-pub \(blocked-pub\) \| yes \| preparing/);
+  // Next round: the rule has taken effect → verified; no second rule was created.
+  const r2 = await (await post({ action: "prepare" })).json() as R;
+  assert.equal(r2.readiness.find((x) => x.slug === "blocked-pub")!.state, "native_verified");
+  assert.equal(w.zones[0].rulesets!.rules.length, 1, "one rule, never duplicated");
+  assert.equal(gate(r2).code, 0, "every published entry verified → the gate passes");
+  // A named acceptance slug that does not exist (or is not verified) fails the gate.
+  const g3 = gate(r2, "no-such-entry");
+  assert.equal(g3.code, 1);
+  assert.match(g3.out, /no-such-entry .* missing/);
+  t.close();
+});
+
+test("[PORT-NATIVE] the 15-minute job is bounded: a time budget and a verification budget per tick; the rest is deferred, never dropped", async () => {
+  const { advanceAllNative } = await import("../src/services/native/orchestrator.ts");
+  const { nativeDepsFrom } = await import("../src/services/native/deps.ts");
+  const w = new NativeWorld();
+  for (let i = 1; i <= 4; i++) w.site({ ...site(`v${i}.fixture-native.com`), baseXfo: null, baseCsp: "frame-ancestors http://crestmont.test" } as never);
+  let verifications = 0;
+  const t = await createTestApp({ ...TOKENS, overrides: { portfolioFetch: w.fetchSite, providerFetch: w.fetchApi, nativeVerify: async () => { verifications++; return { ok: true, at: new Date().toISOString(), summary: "Verified", checks: [] }; } } } as never);
+  const at = new Date().toISOString();
+  for (let i = 1; i <= 4; i++) await t.db.prepare(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, position, published, updated_at, created_at, native_required, native_state) VALUES (?,?,?,'T',?,'TEST DATA','TEST DATA','[]',90,1,?,?,1,'checking')`).bind(`pf_v${i}`, `v${i}`, `v${i}`, `https://v${i}.fixture-native.com/`, at, at).run();
+  await t.db.prepare(`UPDATE portfolio_projects SET archived_at = ? WHERE slug NOT LIKE 'v_'`).bind(at).run(); // only these four here
+  const d = nativeDepsFrom(t.env, t.db, "http://crestmont.test");
+  const out = await advanceAllNative(d, 10, { maxVerifications: 2 });
+  assert.equal(verifications, 2);
+  assert.deepEqual(out.map((x) => x.state), ["native_verified", "native_verified", "deferred: verification budget", "deferred: verification budget"]);
+  const next = await advanceAllNative(d, 10, { maxVerifications: 2 });
+  assert.deepEqual(next.map((x) => x.state), ["native_verified", "native_verified"], "the deferred ones complete on the next tick; the verified ones are not repeated");
+  t.close();
+});

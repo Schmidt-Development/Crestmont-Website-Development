@@ -3,11 +3,10 @@
 // slug, mode, reason and a one-hour, view-only preview link per acceptance website).
 //   PLAYWRIGHT_MODULE=… node scripts/live-native-acceptance.mjs https://crestmontwebsitedevelopment.com intake.json
 // Read-only: nothing on the destination websites is changed or submitted; the previews are only looked at.
-//   • every website's display follows its own answer: allowed → native embed; refused / no answer → the honest notice —
-//     never "remote" (remote streaming is switched off and no entry may select it);
-//   • desktop (1440) and phone (Pixel 7): a website shown live is the REAL site in a native iframe (the frame's
-//     document is its own origin, with real content); a website not shown live displays the plain notice and its live
-//     link; no remote-browser request, WebSocket or stream canvas appears anywhere.
+//   • every acceptance website is REQUIRED to be native-ready (2026-11-19, strict): its display is the native embed,
+//     never "remote" (switched off) — and an honest notice, though correct for a site that cannot be shown, FAILS here;
+//   • desktop (1440) and phone (Pixel 7): each is the REAL site in a native iframe (the frame's document is its own
+//     origin, with real content); no remote-browser request, WebSocket or stream canvas appears anywhere.
 import { readFileSync } from "node:fs";
 
 const [BASE, FILE] = process.argv.slice(2);
@@ -26,6 +25,7 @@ for (const r of intake.results) {
   if (!r.preview) { ok(r.error === "invalid", `${r.url}: refused as an invalid address`); continue; }
   ok(r.mode !== "remote", `${r.url}: never shown through a remote stream`);
   ok(r.mode === expectMode(r.status), `${r.url}: the display (${r.mode}) follows the site's own answer (${r.status})`);
+  ok(r.mode === "embed", `${r.url}: required native — the site permits Crestmont's frame (${r.status})`);
 }
 
 const b = await chromium.launch();
@@ -47,9 +47,8 @@ for (const [label, opts] of [["desktop", { viewport: { width: 1440, height: 900 
         ok(ready && !!f && text > 40, `${label} ${r.slug}: the real website natively — frame document ${origin}, ${text} characters`);
       } else {
         const status = await slide.locator("[data-pfx-status]").innerText();
-        const link = await slide.locator("a.pfx__link--live").count();
-        ok(/can't be shown here right now/.test(status) && link === 1, `${label} ${r.slug}: honest notice and live link ("${status.slice(0, 80)}")`);
         ok(await p.locator("iframe.pfx__frame").count() === 0, `${label} ${r.slug}: nothing framed or claimed live`);
+        ok(false, `${label} ${r.slug}: required native, but the portfolio shows the fallback notice ("${status.slice(0, 80)}") — not native-ready`);
       }
       ok(await p.locator("canvas.pfx__remote").count() === 0 && !traffic.length, `${label} ${r.slug}: no remote stream`);
     } catch (e) { ok(false, `${label} ${r.slug}: ${String(e && e.message || e).split("\n")[0].slice(0, 200)}`); }

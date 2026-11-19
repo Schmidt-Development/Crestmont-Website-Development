@@ -38,7 +38,7 @@ import * as pf from "../services/portfolio.ts";
 import { issuePreviewToken } from "../services/remote-browser/connect.ts";
 import { nativeDepsFrom } from "../services/native/deps.ts";
 import { verifyConnections } from "../services/native/verify-connections.ts";
-import { advanceForOps, discoverForOps, onboardForOps } from "../services/native/orchestrator.ts";
+import { advanceAllNative, advanceForOps, discoverForOps, nativeReadiness, onboardForOps } from "../services/native/orchestrator.ts";
 
 // ───────────── Signed automation ─────────────
 
@@ -365,14 +365,17 @@ export function register(r: Router): void {
   // .github/workflows/portfolio-native-ops.yml, which needs the Owner's approval of the production environment):
   //   check   — read-only: the connections' identity and scope, and for each url its framing answer and hosting;
   //   onboard — the controlled onboarding of one owned website (unpublished; as Staff → Portfolio → Add);
-  //   advance — one more step for an onboarding entry, with its preview link once verified.
+  //   advance — one more step for an onboarding entry, with its preview link once verified;
+  //   prepare — one bounded round of native preparation and verification for every entry that needs it (published
+  //             first) or the named slugs, and every entry's readiness — a release drives this until it settles.
+  // Every request is Owner-approved, so it may use the larger verification allowance (orchestrator.ts).
   // Never returns a token or secret.
   r.post("/api/ops/portfolio-native", async (ctx) => {
     const raw = await readBody(ctx.req);
     const auth = await opsAuth(ctx, raw, "portfolio_native");
     if (auth instanceof Response) return auth;
     if (!auth.payload) return jsonResponse(ctx, 403, { error: "This operation needs a one-time challenge." });
-    const d = nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin);
+    const d = { ...nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin), ownerApproved: true };
     const action = String(auth.body.action ?? "");
     const preview = async (slug: string) => { const p = await pf.getBySlug(ctx.db, slug); return p && p.native_state === "native_verified" ? `/portfolio/preview/${await issuePreviewToken(ctx.db, p.id, 60, "native-onboarding", Date.now())}` : null; };
     if (action === "check") {
@@ -392,7 +395,16 @@ export function register(r: Router): void {
       if ("error" in r) return jsonResponse(ctx, 422, r);
       return jsonResponse(ctx, 200, { ...r, preview: await preview(r.slug) }, { "cache-control": "no-store" });
     }
-    return jsonResponse(ctx, 422, { error: "action: check | onboard | advance" });
+    if (action === "prepare") {
+      const slugs = Array.isArray(auth.body.slugs) ? auth.body.slugs.filter((x): x is string => typeof x === "string" && /^[a-z0-9][a-z0-9-]{0,79}$/.test(x)).slice(0, 12) : [];
+      const round = await advanceAllNative(d, 12, { budgetMs: 4 * 60_000, maxVerifications: 4, slugs });
+      const readiness = await nativeReadiness(ctx.db);
+      const previews: Record<string, string | null> = {};
+      for (const x of readiness) if ((slugs.length ? slugs.includes(x.slug) : x.published) && x.state === "native_verified") previews[x.slug] = await preview(x.slug);
+      await audit(ctx.db, { actorKind: "system", action: "portfolio.native_prepare_round", subjectType: "portfolio_project", details: { round: round.map((x) => `${x.slug}:${x.state}`).slice(0, 12) } });
+      return jsonResponse(ctx, 200, { round, readiness, previews }, { "cache-control": "no-store" });
+    }
+    return jsonResponse(ctx, 422, { error: "action: check | onboard | advance | prepare" });
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.

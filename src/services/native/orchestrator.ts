@@ -37,6 +37,9 @@ import { codesFor, diagnose, type DiagCode } from "./diagnostics.ts";
 export interface NativeDeps {
   db: Db; siteOrigin: string; fetchSite: typeof fetch; fetchApi: typeof fetch; conn: NativeConnections;
   openBrowser: OpenBrowser | null; fixture?: FixtureResponder; verifyDailyCap: number; remoteEnabled: boolean; now?: () => number;
+  /** An Owner-approved run (a release or the operations workflow) may use three times the automatic daily allowance,
+   *  so a release that converts many entries finishes them instead of leaving some for tomorrow. */
+  ownerApproved?: boolean;
   verify?: (pageUrl: string, liveOrigin: string) => Promise<VerifyResult>;
 }
 type Target = CloudflareTarget | VercelTarget;
@@ -121,7 +124,8 @@ async function sensitiveStillProtected(d: NativeDeps, check: EmbedCheck): Promis
 
 async function runVerification(d: NativeDeps, p: pf.PortfolioProject, check: EmbedCheck, now: number): Promise<VerifyResult | string> {
   if (!d.openBrowser && !d.verify) return "No verification browser is available in this environment (Browser Run binding missing)";
-  if ((await verificationsToday(d.db, now)) >= d.verifyDailyCap) return `Today's real-browser verifications (${d.verifyDailyCap}) are used up; it runs again automatically within a day`;
+  const cap = d.ownerApproved ? d.verifyDailyCap * 3 : d.verifyDailyCap;
+  if ((await verificationsToday(d.db, now)) >= cap) return `Today's real-browser verifications (${cap}) are used up; it runs again automatically within a day`;
   const token = await issuePreviewToken(d.db, p.id, 10, "native-verify", now);
   const pageUrl = `${d.siteOrigin}/portfolio/native-verify/${token}`;
   const res = d.verify ? await d.verify(pageUrl, check.origin!) : await verifyNative(d.openBrowser!, pageUrl, check.origin!, { fixture: d.fixture, liveUrl: check.url ?? undefined });
@@ -295,15 +299,44 @@ async function followChange(d: NativeDeps, p: pf.PortfolioProject, check: EmbedC
 /** The 15-minute job: entries in progress every time; settled ones (waiting for authorization, unavailable) at most
  *  every 6 hours, so a missing permission or a fixed deployment is noticed without re-verifying in a loop; verified
  *  ones once a day (regression monitoring). Bounded. */
-export async function advanceAllNative(d: NativeDeps, limit = 10): Promise<{ slug: string; state: string }[]> {
-  const settledBefore = new Date((d.now?.() ?? Date.now()) - 6 * 3_600_000).toISOString();
+export async function advanceAllNative(d: NativeDeps, limit = 10, opts: { budgetMs?: number; maxVerifications?: number; slugs?: string[] } = {}): Promise<{ slug: string; state: string; published: boolean }[]> {
+  const now = () => d.now?.() ?? Date.now();
+  const start = now();
+  const settledBefore = new Date(start - 6 * 3_600_000).toISOString();
   // Verified entries are re-checked daily (cheap: their headers; a real-browser verification only once it is a week
   // old), so a later website update that breaks native embedding is noticed and repaired without anyone asking.
-  const verifiedBefore = new Date((d.now?.() ?? Date.now()) - 86_400_000).toISOString();
-  const rows = (await d.db.prepare(`SELECT id, slug FROM portfolio_projects WHERE native_required = 1 AND archived_at IS NULL AND (native_state IN ('checking', 'preparing') OR (native_state IN ('authorization_required', 'unavailable') AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'native_verified' AND COALESCE(native_updated_at, '') < ?)) ORDER BY CASE native_state WHEN 'native_verified' THEN 1 ELSE 0 END, COALESCE(native_updated_at, '') LIMIT ?`).bind(settledBefore, verifiedBefore, limit).all<{ id: string; slug: string }>()).results;
-  const out: { slug: string; state: string }[] = [];
-  for (const r of rows) { try { out.push({ slug: r.slug, state: (await advanceNative(d, r.id)).state }); } catch (e) { out.push({ slug: r.slug, state: `error: ${(e as Error).message}`.slice(0, 80) }); } }
+  const verifiedBefore = new Date(start - 86_400_000).toISOString();
+  // Order: published entries first (visitors see them), then cheap preparation steps (a site that still refuses
+  // framing: discovery and a rule) before real-browser verifications (a site that permits framing), verified re-checks last.
+  // Named entries (an Owner-approved round) are taken whatever their last state — a settled entry is retried now, not
+  // after six hours (a failed change still stays failed: only "Check again" starts it over).
+  const named = opts.slugs?.length ? `slug IN (${opts.slugs.map(() => "?").join(", ")})` : "";
+  const rows = (await d.db.prepare(`SELECT id, slug, published FROM portfolio_projects WHERE native_required = 1 AND archived_at IS NULL AND (${named ? `(${named} AND native_state != 'native_verified') OR ` : ""}native_state IN ('checking', 'preparing') OR (native_state IN ('authorization_required', 'unavailable') AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'native_verified' AND COALESCE(native_updated_at, '') < ?))
+    ORDER BY CASE native_state WHEN 'native_verified' THEN 2 ELSE 0 END, published DESC, CASE WHEN embed_status = 'allowed' THEN 1 ELSE 0 END, COALESCE(native_updated_at, ''), position LIMIT ?`).bind(...(opts.slugs ?? []), settledBefore, verifiedBefore, limit).all<{ id: string; slug: string; published: number }>()).results;
+  const out: { slug: string; state: string; published: boolean }[] = [];
+  // Bounded per run: a time budget and a number of real-browser verifications, so one tick never runs into the
+  // platform's limits and the rest simply continues on the next tick (progress is stored per entry).
+  const budget = opts.budgetMs ?? 6 * 60_000, maxV = opts.maxVerifications ?? 3;
+  let verifications = 0;
+  for (const r of rows) {
+    if (now() - start > budget) { out.push({ slug: r.slug, state: "deferred: time budget", published: !!r.published }); continue; }
+    if (verifications >= maxV) { out.push({ slug: r.slug, state: "deferred: verification budget", published: !!r.published }); continue; }
+    try {
+      const before = await d.db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_verification' AND subject_id = ?`).bind(r.id).first<{ n: number }>();
+      const st = (await advanceNative(d, r.id)).state;
+      const after = await d.db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_verification' AND subject_id = ?`).bind(r.id).first<{ n: number }>();
+      if ((after?.n ?? 0) > (before?.n ?? 0)) verifications++;
+      out.push({ slug: r.slug, state: st, published: !!r.published });
+    } catch (e) { out.push({ slug: r.slug, state: `error: ${(e as Error).message}`.slice(0, 120), published: !!r.published }); }
+  }
   return out;
+}
+
+/** Every published entry's native readiness, for a release or an operations run: settled when each is verified, or
+ *  stopped on a genuine blocker (authorization, provider, the site's own policy or defect). */
+export async function nativeReadiness(db: Db): Promise<{ slug: string; name: string; live: string; published: boolean; state: string; reason: string; codes: string[]; action: string | null; perf: unknown }[]> {
+  const rows = (await db.prepare(`SELECT slug, name, live_url, published, native_state, native_reason, native_diagnosis, native_perf FROM portfolio_projects WHERE archived_at IS NULL ORDER BY position, name`).all<{ slug: string; name: string; live_url: string; published: number; native_state: string; native_reason: string | null; native_diagnosis: string | null; native_perf: string | null }>()).results;
+  return rows.map((r) => { const d = parse<{ codes?: string[]; action?: string | null }>(r.native_diagnosis); return { slug: r.slug, name: r.name, live: r.live_url, published: !!r.published, state: r.native_state, reason: (r.native_reason ?? "").slice(0, 400), codes: d?.codes ?? [], action: d?.action ?? null, perf: parse(r.native_perf) }; });
 }
 
 /** Step 2 of the Add flow (read-only): which connected account serves the site, before anything is created. */
