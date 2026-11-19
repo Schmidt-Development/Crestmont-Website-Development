@@ -11,22 +11,32 @@ name: Portfolio native onboarding (production)
 #            the Owner's merge), follows the deployment, verifies it in a real browser, then this job opens the preview
 #            and checks it in Chromium (native frame, content, scrolling, animation, phone width, no remote browser,
 #            protected pages refused). Nothing is published; no consent or relationship is recorded.
-# Each request uses a one-time challenge written with the production Cloudflare token (src/services/ops-challenge.ts).
-# No token value is ever printed: the Worker's answers contain names and identifiers only.
+#   status   read-only: the entry's native state and audit trail from the production database, and the live site's
+#            framing headers on its homepage and protected pages. Nothing is called on the Worker, nothing changes.
+#   resume   continue an existing onboarding entry (slug) where it is — one ordinary step at a time, never forced, so an
+#            existing rule is reused (never duplicated) and a rolled-back one is not re-applied — then the same browser
+#            check once it is verified.
+# Each Worker request uses a one-time challenge (src/services/ops-challenge.ts) through scripts/native-ops-ask.sh, which
+# writes the HTTP status to a file and masks the challenge on the job's own output (production run 44456707770 captured
+# the mask command together with the status). No token value is ever printed.
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: "check (read-only) or onboard (one website)"
+        description: "check (read-only), status (read-only), onboard (one website) or resume (an existing entry)"
         required: true
         type: choice
-        options: [check, onboard]
+        options: [check, status, onboard, resume]
       url:
         description: "onboard: the website's production address (https://…)"
         required: false
         type: string
       urls:
         description: "check: addresses to discover (comma-separated; empty = the portfolio's sites and the test candidates)"
+        required: false
+        type: string
+      slug:
+        description: "status / resume: the portfolio entry's slug (e.g. lending-for-beginners)"
         required: false
         type: string
 
@@ -49,10 +59,13 @@ jobs:
       ACTION: ${{ inputs.action }}
       URL_INPUT: ${{ inputs.url }}
       URLS_INPUT: ${{ inputs.urls }}
+      SLUG_INPUT: ${{ inputs.slug }}
     steps:
       - name: Validate inputs (F-23)
         run: |
-          [[ "$ACTION" =~ ^(check|onboard)$ ]] || { echo "::error::action must be check or onboard"; exit 1; }
+          [[ "$ACTION" =~ ^(check|status|onboard|resume)$ ]] || { echo "::error::action must be check, status, onboard or resume"; exit 1; }
+          [[ -z "$SLUG_INPUT" || "$SLUG_INPUT" =~ ^[a-z0-9][a-z0-9-]{0,79}$ ]] || { echo "::error::slug must be lowercase letters, digits and dashes"; exit 1; }
+          [[ ! "$ACTION" =~ ^(status|resume)$ || -n "$SLUG_INPUT" ]] || { echo "::error::$ACTION needs slug"; exit 1; }
           [[ -z "$URL_INPUT" || "$URL_INPUT" =~ ^https://[A-Za-z0-9.-]+(/[A-Za-z0-9/._~-]*)?$ ]] || { echo "::error::url must be a plain https address"; exit 1; }
           [[ -z "$URLS_INPUT" || "$URLS_INPUT" =~ ^(https://[A-Za-z0-9.-]+/?)(,[[:space:]]*https://[A-Za-z0-9.-]+/?){0,11}$ ]] || { echo "::error::urls must be up to 12 comma-separated https origins"; exit 1; }
           [[ "$ACTION" != "onboard" || -n "$URL_INPUT" ]] || { echo "::error::onboard needs url"; exit 1; }
@@ -63,42 +76,56 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
-      - name: Ask the production Worker (one-time challenges written with wrangler)
-        id: ops
+      - name: Production state (read-only — database, Crestmont's rule and the live site's headers)
+        id: state
+        if: inputs.action == 'status' || inputs.action == 'resume'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
-          ask() { # $1 = JSON body without the challenge; writes $work/r.json, prints the HTTP status
-            rm -f "$work/c.sql" "$work/nonce"
-            node --no-warnings scripts/ops-challenge.ts --purpose portfolio_native --out-sql "$work/c.sql" --out-nonce "$work/nonce" > /dev/null
-            echo "::add-mask::$(cat "$work/nonce")"
-            $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
-            body=$(node -e 'const b=JSON.parse(process.argv[1]);b.challenge=process.argv[2];console.log(JSON.stringify(b))' "$1" "$(cat "$work/nonce")")
-            curl -s -o "$work/r.json" -w '%{http_code}' --max-time 300 -X POST -H 'content-type: application/json' --data "$body" "$PRODUCTION_URL/api/ops/portfolio-native" || echo 000
-          }
+          q() { $WRANGLER d1 execute crestmont-production --remote --env production --json --command "$1" > "$work/$2.json" 2> /dev/null || echo '[{"results":[]}]' > "$work/$2.json"; }
+          q "SELECT id, slug, live_url, embed_url, published, native_required, native_state, native_reason, native_provider, native_change, native_verified_at, native_updated_at, substr(native_verification, 1, 1500) AS native_verification, archived_at FROM portfolio_projects WHERE slug = '$SLUG_INPUT'" project
+          q "SELECT a.created_at, a.actor_kind, a.action, substr(a.details_json, 1, 600) AS details FROM audit_logs a JOIN portfolio_projects p ON p.id = a.subject_id WHERE p.slug = '$SLUG_INPUT' AND a.action LIKE 'portfolio.%' ORDER BY a.created_at DESC LIMIT 30" audit
+          node scripts/native-ops-report.mjs status "$work/project.json" "$work/audit.json" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Ask the production Worker (one-time challenges)
+        id: ops
+        if: inputs.action != 'status'
+        env:
+          LIVE_FROM_STATE: ${{ steps.state.outputs.live }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          # scripts/native-ops-ask.sh never writes the status to stdout: it is read from r.json.status.
+          ask() { bash scripts/native-ops-ask.sh "$1" "$work/r.json"; http=$(cat "$work/r.json.status"); }
+          answer() { head -c 400 "$work/r.json" 2>/dev/null | tr -d '\r' | tr '\n' ' '; }
           if [ "$ACTION" = "check" ]; then
             urls="${URLS_INPUT:-https://leadhavencollective.com/, https://geteveryinvoicepaid.com/, https://betterlansingmechanics.com/, https://glasslyautoglass.com/, https://lansingcarrentals.com/, https://mentorship.lansingcarrentals.com/, https://lendingforbeginners.com/, https://premiuminvoices.com/}"
-            req=$(node -e 'console.log(JSON.stringify({ action: "check", urls: process.argv[1].split(",").map((s) => s.trim()).filter(Boolean) }))' "$urls")
-            http=$(ask "$req"); [ "$http" = "200" ] || { echo "::error::HTTP $http: $(head -c 400 "$work/r.json" 2>/dev/null)"; exit 1; }
+            ask "$(node -e 'console.log(JSON.stringify({ action: "check", urls: process.argv[1].split(",").map((s) => s.trim()).filter(Boolean) }))' "$urls")"
+            [ "$http" = "200" ] || { echo "::error::check HTTP $http: $(answer)"; exit 1; }
             node scripts/native-ops-report.mjs check "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          req=$(node -e 'console.log(JSON.stringify({ action: "onboard", url: process.argv[1] }))' "$URL_INPUT")
-          http=$(ask "$req"); [ "$http" = "200" ] || { echo "::error::onboard HTTP $http: $(head -c 400 "$work/r.json" 2>/dev/null)"; exit 1; }
+          if [ "$ACTION" = "onboard" ]; then
+            ask "$(node -e 'console.log(JSON.stringify({ action: "onboard", url: process.argv[1] }))' "$URL_INPUT")"
+            [ "$http" = "200" ] || { echo "::error::onboard HTTP $http: $(answer)"; exit 1; }
+          else
+            ask "$(node -e 'console.log(JSON.stringify({ action: "advance", slug: process.argv[1] }))' "$SLUG_INPUT")"
+            [ "$http" = "200" ] || { echo "::error::resume HTTP $http: $(answer)"; exit 1; }
+          fi
           node scripts/native-ops-report.mjs step "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
-          slug=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).slug)' "$work/r.json")
-          # Follow it (the 15-minute job would too): up to 45 minutes, one step a minute, until it settles.
+          field() { node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(r[process.argv[2]]??"")' "$work/r.json" "$1"; }
+          slug=$(field slug); live="${LIVE_FROM_STATE:-$URL_INPUT}"
+          # Follow it (the 15-minute job would too): up to 45 minutes, one ordinary step a minute, until it settles.
           for i in $(seq 1 45); do
-            state=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).state)' "$work/r.json")
-            case "$state" in native_verified|authorization_required|unavailable) break ;; esac
+            case "$(field state)" in native_verified|authorization_required|unavailable) break ;; esac
             sleep 60
-            http=$(ask "$(node -e 'console.log(JSON.stringify({ action: "advance", slug: process.argv[1] }))' "$slug")")
+            ask "$(node -e 'console.log(JSON.stringify({ action: "advance", slug: process.argv[1] }))' "$slug")"
             [ "$http" = "200" ] || { echo "::warning::advance HTTP $http"; continue; }
             node scripts/native-ops-report.mjs step "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
           done
-          node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`state=${r.state}`);console.log(`preview=${r.preview??""}`)' "$work/r.json" >> "$GITHUB_OUTPUT"
+          { echo "state=$(field state)"; echo "preview=$(field preview)"; echo "live=$live"; } >> "$GITHUB_OUTPUT"
       - name: Install Chromium (pinned Playwright)
         if: steps.ops.outputs.preview != ''
         run: |
@@ -109,12 +136,15 @@ jobs:
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
           PREVIEW: ${{ steps.ops.outputs.preview }}
-        run: node scripts/native-onboard-check.mjs "$PRODUCTION_URL$PREVIEW" "$URL_INPUT" | tee -a "$GITHUB_STEP_SUMMARY"
+          LIVE: ${{ steps.ops.outputs.live }}
+        run: |
+          set -o pipefail
+          node scripts/native-onboard-check.mjs "$PRODUCTION_URL$PREVIEW" "$LIVE" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Outcome
         if: always()
         env:
           STATE: ${{ steps.ops.outputs.state }}
         run: |
-          [ "$ACTION" = "check" ] && exit 0
+          [[ "$ACTION" =~ ^(check|status)$ ]] && exit 0
           echo "Native state: ${STATE:-unknown}"
           [ "$STATE" = "native_verified" ] || { echo "::warning title=Not verified yet::${STATE:-unknown} — see the steps above for the exact reason and what is needed."; }
