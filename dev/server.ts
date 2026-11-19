@@ -81,6 +81,15 @@ if (fixtures) {
     return new Response(fx.status === 204 ? null : fx.body, { status: fx.status, headers: fx.headers });
   }) as typeof fetch;
 }
+// Native verification locally (CI's native-first display check): with the fixtures and a local Chromium, the real
+// verifier (src/services/native/verify.ts) runs in that Chromium; fixture sites are answered locally, Crestmont's own
+// pages come from this server.
+if (fixtures && process.env.REMOTE_BROWSER_CHROMIUM) {
+  const exe = process.env.REMOTE_BROWSER_CHROMIUM;
+  const { Cdp } = await import("../src/services/remote-browser/cdp.ts");
+  env.overrides!.nativeBrowser = async () => { const b = await launchLocalBrowser(exe, ["--enable-unsafe-swiftshader", "--use-angle=swiftshader"]); localBrowsers.add(b.close); return { cdp: new Cdp(b.ws, 30_000), close: () => { localBrowsers.delete(b.close); b.close(); } }; };
+  env.overrides!.nativeFixture = (url: string) => { const fx = fixtures.fixtureResponse(url, new URL(env.APP_URL!).origin); return fx && !("error" in fx) ? { status: fx.status, headers: fx.headers, body: fx.body } : null; };
+}
 
 const server = createServer(async (req, res) => {
   try {

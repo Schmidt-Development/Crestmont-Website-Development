@@ -108,13 +108,13 @@ jobs:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: node --no-warnings --test tests/portfolio-native-browser.test.ts
 
-  # Automatic portfolio display system (docs/frontend/PORTFOLIO.md §Display modes): the staff Add flow picks Mode A / B / C
-  # by itself for frame-ancestors 'none', X-Frame-Options DENY, an allowed site and an unreachable one, and the remote
-  # browser (one local Chromium per session in place of Cloudflare Browser Run, same session code) is genuinely
-  # interactive on every portfolio surface — desktop, Android, iPhone-sized and tablet viewports (Chromium emulation,
-  # not Safari) — with its limits, cleanup and failure recovery. Any failed check fails CI.
-  portfolio-remote-browser:
-    name: Portfolio display modes + remote browser (real browser, fixture sites)
+  # One native-first portfolio standard (Owner, 2026-11-19, docs/frontend/PORTFOLIO.md): through the normal staff Add
+  # flow a site that permits Crestmont is verified by the REAL verifier in a real Chromium (direct vs embedded) and
+  # publishes; a refused one is never streamed and says what is needed; visitors on desktop and phone get the real
+  # site in a native frame that scrolls on its own; only the active website loads, viewport switches never reload it,
+  # and framed sites receive exact-origin visibility messages. Any failed check fails CI.
+  portfolio-native-display:
+    name: Portfolio native-first display (real browser, fixture sites)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -128,28 +128,17 @@ jobs:
         run: |
           npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
-      - name: Start the local site with the remote browser on a local Chromium
+      - name: Start the local site (remote streaming off; native verification on a local Chromium)
         run: |
           mkdir -p .dev
           CHROMIUM="$(node -e 'import(process.argv[1]).then((m) => console.log(m.chromium.executablePath()))' "$GITHUB_WORKSPACE/.pw/node_modules/playwright/index.mjs")"
-          REMOTE_BROWSER=on REMOTE_BROWSER_CHROMIUM="$CHROMIUM" REMOTE_BROWSER_FIXTURES=1 REMOTE_BROWSER_MAX_CONCURRENT=2 REMOTE_BROWSER_IDLE_SECONDS=20 REMOTE_BROWSER_RATE_PER_10MIN=500 \
-            node --no-warnings dev/server.ts --port 8787 --db .dev/rb.db > "$RUNNER_TEMP/dev.log" 2>&1 &
+          REMOTE_BROWSER=off REMOTE_BROWSER_CHROMIUM="$CHROMIUM" REMOTE_BROWSER_FIXTURES=1 \
+            node --no-warnings dev/server.ts --port 8787 --db .dev/nd.db > "$RUNNER_TEMP/dev.log" 2>&1 &
           for i in $(seq 1 60); do curl -fs -o /dev/null http://localhost:8787/api/health && break; sleep 1; done
-          curl -fs http://localhost:8787/api/portfolio/remote-sessions/status
-      - name: Display modes, interaction, limits and recovery
+      - name: Add, verify, publish and view — native only
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
-        run: node --no-warnings scripts/remote-browser-check.mjs http://localhost:8787 .dev/rb.db
-      # Performance gate (portfolio performance upgrade): on a throttled 5 Mbit/s visitor link, scroll and swipe must
-      # show quickly, an always-animating page must not flood the link or build a backlog, and Chromium must not
-      # render more pictures than are delivered. Fails if the stream regresses to its pre-upgrade behaviour.
-      - name: Performance gate (throttled visitor, static and animated fixture sites)
-        env:
-          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
-        run: |
-          node --no-warnings scripts/portfolio-perf.mjs http://localhost:8787 --slug rb-fa-none --devices desktop5m,pixel5m --out perf-static.json --label "CI static"
-          node --no-warnings scripts/portfolio-perf.mjs http://localhost:8787 --slug rb-heavy-js --devices desktop5m --out perf-animated.json --label "CI animated"
-          node scripts/remote-browser-perf-gate.mjs perf-static.json perf-animated.json
+        run: node --no-warnings scripts/native-display-check.mjs http://localhost:8787 .dev/nd.db
       - name: Development server log (on failure)
         if: failure()
         run: tail -n 200 "$RUNNER_TEMP/dev.log"

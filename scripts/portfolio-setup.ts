@@ -46,11 +46,14 @@ for (const p of PORTFOLIO_PROJECTS) {
   const linkAt = `${p.linkVerifiedOn}T00:00:00.000Z`;
   const demoAt = isVerified ? `${verifiedOn}T00:00:00.000Z` : null;
   const row = { relationship: FOUNDER_AUTHORIZATION.relationship, relationship_documented_at: documentedAt, link_verified_at: linkAt, desktop_screenshot_file_id: null, mobile_screenshot_file_id: null, poster_desktop_asset: p.posterDesktop, poster_mobile_asset: p.posterMobile, portfolio_consent_at: documentedAt, portfolio_consent_withdrawn_at: null } as unknown as PortfolioProject;
-  const publish = publishBlockers(row).length === 0;
+  // These are the Founder's existing portfolio entries: they follow the native-first standard exactly as production's
+  // existing entries do after migration 0111 — converted (native_migrated_at), publication decided by the other
+  // requirements, shown as the real website natively once its own headers permit this site, otherwise an honest notice.
+  const publish = publishBlockers(row).filter((b) => !/not verified as a native embed/.test(b)).length === 0;
   sql.push(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, technology_summary, position, published, updated_at, created_at,
-  relationship_documented_at, relationship_documented_by, relationship_evidence, link_verified_at, link_verified_by, published_at, demo_url, demo_status, demo_verified_at, demo_verified_by, demo_revision, poster_desktop_asset, poster_mobile_asset, poster_tablet_asset)
+  relationship_documented_at, relationship_documented_by, relationship_evidence, link_verified_at, link_verified_by, published_at, demo_url, demo_status, demo_verified_at, demo_verified_by, demo_revision, poster_desktop_asset, poster_mobile_asset, poster_tablet_asset, native_migrated_at)
 VALUES (${[p.id, values.slug, values.name, values.industry, values.live_url, FOUNDER_AUTHORIZATION.relationship, values.description, values.featuresJson, values.technology_summary || null, p.position, publish ? 1 : 0, now, now,
-    documentedAt, null, FOUNDER_AUTHORIZATION.evidence, linkAt, null, publish ? now : null, demo.values.demo_url, demo.values.demo_status, demoAt, null, demo.values.demo_revision, p.posterDesktop, p.posterMobile, p.posterTablet].map(q).join(", ")})
+    documentedAt, null, FOUNDER_AUTHORIZATION.evidence, linkAt, null, publish ? now : null, demo.values.demo_url, demo.values.demo_status, demoAt, null, demo.values.demo_revision, p.posterDesktop, p.posterMobile, p.posterTablet, now].map(q).join(", ")})
 ON CONFLICT(id) DO UPDATE SET slug = excluded.slug, name = excluded.name, industry = excluded.industry, live_url = excluded.live_url, relationship = excluded.relationship, description = excluded.description,
   verified_features_json = excluded.verified_features_json, technology_summary = excluded.technology_summary, position = excluded.position, published = excluded.published, updated_at = excluded.updated_at,
   relationship_documented_at = excluded.relationship_documented_at, relationship_evidence = excluded.relationship_evidence, link_verified_at = excluded.link_verified_at,

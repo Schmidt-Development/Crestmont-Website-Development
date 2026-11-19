@@ -10,7 +10,8 @@ const r = JSON.parse(readFileSync(file, "utf8"));
 const list = (xs) => (Array.isArray(xs) && xs.length ? xs.map((x) => `  - ${typeof x === "string" ? x : JSON.stringify(x)}`).join("\n") : "  - (none)");
 if (mode === "check") {
   const out = [`### Native onboarding connections (production Worker, ${r.origin})`];
-  for (const [name, p] of Object.entries(r.connections).filter(([k]) => k !== "at")) {
+  const entries = [...Object.entries(r.connections).filter(([k]) => k !== "at" && k !== "more"), ...(r.connections.more ?? []).map((m) => [m.label, m.report])];
+  for (const [name, p] of entries) {
     out.push(`\n**${name}** — ${!p.connected ? "NOT CONNECTED (secret not set)" : p.authenticated ? `authenticated as ${p.identity}` : "**FAILED to authenticate**"}`);
     for (const [k, v] of Object.entries(p.scope ?? {})) out.push(`- ${k}:${Array.isArray(v) ? `\n${list(v)}` : typeof v === "object" ? `\n${list(Object.entries(v).map(([a, b]) => `${a}: ${typeof b === "string" ? b : JSON.stringify(b)}`))}` : ` ${v}`}`);
     if (p.missing?.length) out.push(`- **missing permissions:**\n${list(p.missing)}`);

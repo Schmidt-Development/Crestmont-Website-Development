@@ -311,7 +311,7 @@ test("[PORT-004] migration 0105 never touches an entry the Owner already edited,
   assert.deepEqual({ ...r }, { description: "Owner wording", published: 0 });
 });
 
-test("[PORT-007] publishing is refused while screenshots or relationship documentation are missing", async () => {
+test("[PORT-007] publishing is refused while the native verification or relationship documentation is missing — screenshots never substitute", async () => {
   const app = await createTestApp();
   const { c } = await staffClient(app, "owner");
   const id = "pf_better_lansing_mechanics";
@@ -322,7 +322,7 @@ test("[PORT-007] publishing is refused while screenshots or relationship documen
   const refused = await c.post(`/staff/portfolio/${id}/publish`);
   assert.equal(refused.status, 409);
   const h = await refused.text();
-  assert.match(h, /genuine desktop screenshot/);
+  assert.match(h, /not verified as a native embed yet/);
   assert.match(h, /relationship to this business has not been documented/);
   assert.equal((await app.db.prepare(`SELECT published FROM portfolio_projects WHERE id = ?`).bind(id).first<{ published: number }>())!.published, 0);
   // Upload only screenshots: still refused because relationship is pending.
@@ -360,6 +360,9 @@ test("[PORT-007] [PORT-006] full portfolio workflow: upload, replace, verify, do
   // FD-13: still refused until the owner's explicit opt-in is recorded.
   assert.equal((await c.post(`/staff/portfolio/${id}/publish`)).status, 409, "no publishing without recorded consent");
   assert.equal((await c.post(`/staff/portfolio/${id}/consent`, { given_by: "Business owner (TEST DATA)", method: "written", given_on: "2026-10-26", evidence: "Founder authorization letter on file, dated 2026-10-26" })).status, 303);
+  // One native-first standard: screenshots alone never publish; the live website must be verified natively first.
+  assert.equal((await c.post(`/staff/portfolio/${id}/publish`)).status, 409, "no publishing before the native verification");
+  await app.db.prepare(`UPDATE portfolio_projects SET native_state = 'native_verified', native_verified_at = ?, embed_status = 'allowed', embed_url = 'https://lansingcarrentals.com/', embed_checked_at = ? WHERE id = ?`).bind(new Date().toISOString(), new Date().toISOString(), id).run(); // TEST DATA: the verifier's result
   assert.equal((await c.post(`/staff/portfolio/${id}/publish`)).status, 303);
   const anon = app.client();
   const list = await (await anon.get("/portfolio")).text();

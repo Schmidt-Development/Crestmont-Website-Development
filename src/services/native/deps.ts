@@ -12,7 +12,7 @@ export function nativeDepsFrom(env: Env, db: Db, siteOrigin: string): NativeDeps
     db, siteOrigin,
     fetchSite: env.overrides?.portfolioFetch ?? fetch,
     fetchApi: env.overrides?.providerFetch ?? fetch,
-    conn: connectionsFrom(env),
+    conn: connectionsFrom(env as unknown as Record<string, unknown>),
     openBrowser: env.overrides?.nativeBrowser ?? (env.BROWSER ? browserRunOpener(env.BROWSER) : null),
     fixture: env.overrides?.nativeFixture,
     verify: env.overrides?.nativeVerify,

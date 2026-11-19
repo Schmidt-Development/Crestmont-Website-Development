@@ -66,3 +66,15 @@ test("[AIB-STD] a page added by a build is covered on the next gate run (idempot
   // The portfolio automation's Pages editor produces the same managed block format, so either tool keeps the other's.
   assert.ok(editPagesHeaders(once, ["/"], m.ALLOW).includes(HEADERS_START));
 });
+
+test("[AIB-STD] portfolio visibility protocol: one identical script in both starters, on every public page, accepting only Crestmont's exact origins from the framing window", async () => {
+  const a = readFileSync(path.join(FULL, "public", "assets", "crestmont-visibility.js"), "utf8"), b = readFileSync(path.join(BRO, "public", "assets", "crestmont-visibility.js"), "utf8");
+  assert.equal(a, b, "copy fullstack-v1/public/assets/crestmont-visibility.js to brochure-v1");
+  const m = await mod(path.join(FULL, "scripts", "lib", "embedding.mjs"));
+  for (const o of m.PORTFOLIO_ORIGINS) assert.ok(a.includes(`"${o}"`), `accepts ${o}`);
+  assert.match(a, /e\.source !== window\.parent/, "only the window that frames the page");
+  assert.match(a, /d\.source !== "crestmont-portfolio" \|\| d\.type !== "visibility" \|\| typeof d\.visible !== "boolean"/, "a strict message shape");
+  assert.doesNotMatch(a, /postMessage|fetch\(|XMLHttpRequest|innerHTML|eval\(/, "it never sends anything back or injects content");
+  for (const page of ["index.html", "about.html", "services.html", "contact.html"]) assert.match(readFileSync(path.join(BRO, "public", page), "utf8"), /<script src="\/assets\/crestmont-visibility\.js" defer><\/script>/, `brochure ${page}`);
+  assert.match(readFileSync(path.join(FULL, "public", "index.html"), "utf8"), /<script src="\/assets\/crestmont-visibility\.js" defer><\/script>/, "fullstack index.html");
+});

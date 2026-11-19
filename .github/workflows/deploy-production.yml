@@ -343,7 +343,7 @@ jobs:
           node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`### Live portfolio (framing permission for ${r.origin})`);for(const x of r.results)console.log(`- ${x.slug}: ${x.status}${x.published?" — published now (every requirement met)":""} — ${x.detail}`)' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Automatic display system on real websites (Owner, 2026-11-16): the three acceptance sites go through the same
-      # steps as Staff → Portfolio → Add a project (read the page, create UNPUBLISHED, check, select Mode A/B/C) — or are
+      # steps as Staff → Portfolio → Add a project (read the page, create UNPUBLISHED, check, select the native embed or the honest notice) — or are
       # only re-checked when they already exist. Nothing is published, no consent is recorded, and the websites are not
       # changed. The one-hour, view-only preview links are handed to verify-live-portfolio, which drives them.
       - name: Portfolio display modes — add the acceptance websites through the Add service (unpublished)
@@ -361,7 +361,7 @@ jobs:
           body=$(node -e 'console.log(JSON.stringify({ challenge: process.argv[1], urls: ["https://geteveryinvoicepaid.com/", "https://premiuminvoices.com/", "https://lendingforbeginners.com/", "https://leadhavencollective.com/"] }))' "$(cat "$work/nonce")")
           http=$(curl -s -o "$work/r.json" -w '%{http_code}' --max-time 180 -X POST -H 'content-type: application/json' --data "$body" "$PRODUCTION_URL/api/ops/portfolio-intake" || echo 000)
           [ "$http" = "200" ] || { echo "::warning title=Portfolio intake::HTTP $http"; exit 1; }
-          node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`### Portfolio display modes (remote browser ${r.remoteBrowser.enabled?"on":"OFF"}, ${r.remoteBrowser.maxConcurrent} concurrent, ${r.remoteBrowser.dailyMinutes} min/day)`);for(const x of r.results)console.log(`- ${x.url} → **${x.mode}** (${x.slug}${x.created?", added unpublished":", existing"}${x.published?", published":""}) — ${x.reason}`)' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`### Portfolio display (native-first; remote streaming ${r.remoteBrowser.enabled?"ON — unexpected":"off"})`);for(const x of r.results)console.log(`- ${x.url} → **${x.mode}** (${x.slug}${x.created?", added unpublished":", existing"}${x.published?", published":""}) — ${x.reason}`)' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "json=$(base64 -w0 "$work/r.json")" >> "$GITHUB_OUTPUT"
 
       # Native onboarding connections (2026-11-19), read-only: the production Worker verifies its own Cloudflare / Vercel /
@@ -581,12 +581,10 @@ jobs:
           { if [ "$rc" = 0 ]; then echo "## Feature verification: PASSED — live portfolio accepted on production"; else echo "## Feature verification: FAILED — the release is deployed, but the live portfolio was NOT accepted"; fi
             echo; grep -E '^(PASS|FAIL)' accept.log | grep -E 'FAIL|lead-haven|published projects|REAL production website' ; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
-      # The automatic display system on the three acceptance websites (Mode A / B / C chosen by the deploy job's intake
-      # step): blocked sites must be genuinely interactive through the remote browser — desktop, Android touch,
-      # iPhone-sized and tablet viewports (Chromium emulation, NOT Safari), scrolling without moving Crestmont's page,
-      # clicks and navigation, reload, device switching, private routes refused, several visitors at once, the capacity
-      # limit, idle cleanup and Resume. Runs even if the step above failed, and fails the run on its own.
-      - name: Display modes and remote browser on real websites (production) — mandatory
+      # The native-first standard on the acceptance websites (display chosen by the deploy job's intake step): a website
+      # shown live is the real site in a native frame; one that refuses framing shows the honest notice and its live
+      # link; nothing is ever streamed — desktop and phone. Runs even if the step above failed, and fails on its own.
+      - name: Native-first display on real websites (production) — mandatory
         if: always()
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
@@ -595,9 +593,9 @@ jobs:
           set +e
           if [ -z "$INTAKE" ]; then echo "## Display modes: FAILED — the deploy job's intake step produced no result" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
           printf '%s' "$INTAKE" | base64 -d > intake.json
-          node scripts/live-remote-acceptance.mjs "$PRODUCTION_URL" intake.json > remote.log 2>&1
+          node scripts/live-native-acceptance.mjs "$PRODUCTION_URL" intake.json > native.log 2>&1
           rc=$?
-          cat remote.log
-          { if [ "$rc" = 0 ]; then echo "## Display modes: PASSED — automatic selection and the remote browser accepted on production"; else echo "## Display modes: FAILED — deployed, but NOT accepted"; fi
-            echo; grep -E '^(PASS|FAIL|SKIP|MODE|COST)' remote.log ; } >> "$GITHUB_STEP_SUMMARY"
+          cat native.log
+          { if [ "$rc" = 0 ]; then echo "## Native-first display: PASSED — real websites natively, honest notices, no streaming"; else echo "## Native-first display: FAILED — deployed, but NOT accepted"; fi
+            echo; grep -E '^(PASS|FAIL|SKIP|MODE|COST)' native.log ; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"

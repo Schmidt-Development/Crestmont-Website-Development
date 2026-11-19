@@ -78,16 +78,24 @@ test("[PORT-006] [PORT-007] explorer: published records drive one shared compone
   assert.equal(await count(), audits, "re-running the setup adds no duplicate audit rows");
   assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE published = 1`).first<{ n: number }>())!.n, 4);
   const pr = (await db.prepare(`SELECT * FROM portfolio_projects WHERE id = 'pf_glassly_auto_glass'`).first<PortfolioProject>())!;
-  assert.deepEqual(publishBlockers(pr), [], "bundled posters satisfy the genuine-screenshot requirement");
+  // A converted existing entry stays published; a NEW publication would additionally need its native verification.
+  assert.deepEqual(publishBlockers(pr).map((b) => b.replace(/ —.*/, "")), ["The live website is not verified as a native embed yet"], "only the native verification is outstanding");
+  assert.ok(pr.native_migrated_at, "set up as a converted existing entry");
 
+  // Native-first (2026-11-19): one project's live website is verified natively (TEST DATA); it is the only one framed —
+  // approved isolated demos never stand in for the others, which show an honest notice and their live link.
+  const glassly = PORTFOLIO_PROJECTS.find((p) => p.slug === "glassly-auto-glass")!;
+  db.raw.exec(`UPDATE portfolio_projects SET native_state = 'native_verified', native_verified_at = '${new Date().toISOString()}', embed_status = 'allowed', embed_url = '${glassly.liveUrl.replace(/\/?$/, "/")}', embed_checked_at = '${new Date().toISOString()}' WHERE slug = 'glassly-auto-glass'`);
   const c = client();
   const res = await c.get("/portfolio");
   const html = await res.text();
   assert.equal((html.match(/data-pfx-slide/g) ?? []).length, 4, "four slides from four published records");
-  for (const p of PORTFOLIO_PROJECTS) assert.ok(html.includes(`data-demo-url="${p.demoUrl}"`), `${p.slug} embeds its isolated demo`);
+  assert.doesNotMatch(html, /data-demo-url=|Interactive demo — no real transactions/, "no demo stands in for a website");
+  assert.equal((html.match(/data-kind="live"/g) ?? []).length, 1, "only the verified live website is framed");
+  assert.ok(html.includes(`data-frame-origin="${new URL(glassly.liveUrl).origin}"`));
+  assert.match(html, /The real, live website — native, verified in a real browser/);
   assert.match(html, /aria-label="Previous project: Better Lansing Mechanics"/);
   assert.match(html, /aria-label="Next project: Glassly Auto Glass"/);
-  assert.match(html, /Interactive demo — no real transactions/);
   assert.match(html, /<script src="\/assets\/portfolio\.js" defer>/);
   // Framing: every slide has a device stage with the genuine desktop, tablet and phone captures, and the visitor can
   // pick the device viewport (desktop 1440 / tablet 820 / phone 390 CSS px, scaled to fit — never cropped).
@@ -96,13 +104,14 @@ test("[PORT-006] [PORT-007] explorer: published records drive one shared compone
   for (const m of ["desktop", "tablet", "mobile"]) assert.match(html, new RegExp(`data-pfx-mode="${m}"`));
   for (const p of PORTFOLIO_PROJECTS) assert.ok(html.includes(`href="${p.liveUrl}" target="_blank" rel="noopener noreferrer">Visit live website`), "separate live-site link");
   const csp = res.headers.get("content-security-policy")!;
-  for (const o of ORIGINS.split(" ")) assert.ok(csp.includes(o), `frame-src allows ${o}`);
+  assert.ok(csp.includes(new URL(glassly.liveUrl).origin), "frame-src allows exactly the framed live website");
+  for (const o of ORIGINS.split(" ")) assert.ok(!csp.includes(o), `frame-src does not allow the unused demo origin ${o}`);
   for (const t of [html.replace(/<[^>]+>/g, " ")]) { assert.equal(findProhibitedClaims(t).length, 0); for (const re of FABRICATION) assert.doesNotMatch(t, re); }
 
   const home = await (await c.get("/")).text();
   assert.equal((home.match(/data-pfx-slide/g) ?? []).length, 4, "homepage uses the same component and data");
   const login = await c.get("/login");
-  assert.doesNotMatch(login.headers.get("content-security-policy")!, /workers\.dev/, "pages without the explorer keep the default CSP");
+  assert.doesNotMatch(login.headers.get("content-security-policy")!, /glasslyautoglass|workers\.dev/, "pages without the explorer keep the default CSP");
 
   const cs = await (await c.get("/portfolio/glassly-auto-glass")).text();
   assert.equal((cs.match(/data-pfx-slide/g) ?? []).length, 1);

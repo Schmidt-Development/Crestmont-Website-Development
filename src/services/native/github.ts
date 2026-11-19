@@ -39,7 +39,7 @@ export async function readFile(f: typeof fetch, gh: Gh, repo: string, path: stri
   return { text: unb64(r.content ?? ""), sha: r.sha };
 }
 
-export interface ProposedChange { repo: string; base: string; path: string; pr: number; url: string; committed: boolean; merged: boolean; mergeSha: string | null; needsApproval: boolean }
+export interface ProposedChange { /** Which authorized GitHub account proposed it (0 = the first). */ conn?: number; repo: string; base: string; path: string; pr: number; url: string; committed: boolean; merged: boolean; mergeSha: string | null; needsApproval: boolean }
 /** Writes `content` to `path` on Crestmont's branch and makes sure one open PR exists. Idempotent. */
 export async function proposeChange(f: typeof fetch, gh: Gh, repo: string, base: string, path: string, content: string, title: string, body: string, needsApproval: boolean): Promise<ProposedChange> {
   const existing = (await call<{ number: number; html_url: string; head: { ref: string } }[]>(f, "github", gh.token, `/repos/${repo}/pulls`, { query: { state: "open", head: `${repo.split("/")[0]}:${BRANCH}`, base } })) ?? [];

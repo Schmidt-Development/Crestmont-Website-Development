@@ -109,14 +109,13 @@ test("[PORT-006] production portfolio is poster-only with visitor-facing copy: n
     assert.doesNotMatch(h, /in this environment/i, `${path}: no environment wording`);
     assert.match(h, /demonstration build, which uses sample data/, `${path}: hint describes the screenshots`);
   }
-  // A demo the owner marked temporarily unavailable still says so, in visitor terms.
-  db.raw.exec(`UPDATE portfolio_projects SET demo_status = 'unavailable' WHERE slug = 'glassly-auto-glass'`);
-  assert.match(await (await client().get("/portfolio")).text(), /The interactive demo is temporarily unavailable, so a screenshot is shown instead\./);
-  // Where demos are approved (staging), the demo controls and hint are unchanged.
+  // A website that cannot be shown natively right now says so in visitor terms, with the live link.
+  assert.match(await (await client().get("/portfolio")).text(), /The live website can&#39;t be shown here right now — please visit it directly\./);
+  // Native-first (2026-11-19): even where isolated demos are approved (staging), a demo never stands in for the website.
   const st = await createTestApp({ PORTFOLIO_DEMO_ORIGINS: PORTFOLIO_PROJECTS.map((p) => new URL(p.demoUrl).origin).join(" ") });
   st.db.raw.exec(portfolioSql(PORTFOLIO_PROJECTS.map((p) => p.slug).join(",")));
   const sh = await (await st.client().get("/portfolio")).text();
-  assert.match(sh, /data-pfx-reset/); assert.match(sh, /click inside the demo/);
+  assert.doesNotMatch(sh, /data-demo-url=|data-pfx-reset|click inside the demo/);
 });
 
 test("[PORT-004] [WEB-009] screenshot provenance: copy and alt text say the posters are demonstration-build captures (CREST-GAP-048); case-study screenshots have dimensions (CREST-GAP-078)", async () => {

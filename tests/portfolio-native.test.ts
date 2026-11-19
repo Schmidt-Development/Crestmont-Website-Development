@@ -145,7 +145,7 @@ test("[PORT-NATIVE] Cloudflare Pages (static, Git-linked): _headers in the publi
     .pages({ name: "pg-owned", account: ACCT, domain: "pg-owned.fixture-native.com", repo: "owner/pg-owned", branch: "production", destination: "public", buildCommand: "" })
     .repo("owner/pg-owned", { branch: "production", files: { "public/_headers": "/*\n  X-Frame-Options: DENY\n" } });
   // The Pages domain is not in a connected zone, so the change goes through its repository.
-  w.zones.length = 0; w.zones.push({ id: "z".repeat(32), name: "unrelated.com", account: ACCT, rulesets: null, dns: [], workerDomains: [] });
+  w.zones.length = 0; w.zones.push({ id: "z".repeat(32), name: "unrelated.com", account: ACCT, token: "cf-test-token", rulesets: null, dns: [], workerDomains: [] });
   const { t, add, tick } = await setup(w, { PORTFOLIO_CLOUDFLARE_TOKEN: "cf-test-token", PORTFOLIO_GITHUB_TOKEN: "gh-test-token" });
   let p = await add("pg-owned", "https://pg-owned.fixture-native.com/");
   const files = w.repos.get("owner/pg-owned")!.branches.production.files;
@@ -239,7 +239,7 @@ test("[PORT-NATIVE] negatives: failed deployment, a rule without effect (removed
   t.close();
 });
 
-test("[PORT-NATIVE] real-browser verifications are capped per day; existing entries are untouched by the native job", async () => {
+test("[PORT-NATIVE] real-browser verifications are capped per day; existing entries are converted to the native-first standard without losing anything", async () => {
   const w = new NativeWorld().site(site("cap1.fixture-native.com", { baseXfo: null })).site(site("cap2.fixture-native.com", { baseXfo: null }));
   const { t, add } = await setup(w, { ...TOKENS, PORTFOLIO_NATIVE_VERIFY_DAILY: "1" });
   const a = await add("cap1", "https://cap1.fixture-native.com/");
@@ -247,11 +247,15 @@ test("[PORT-NATIVE] real-browser verifications are capped per day; existing entr
   assert.equal(a.native_state, "native_verified");
   assert.equal(b.native_state, "checking");
   assert.match(b.native_reason!, /real-browser verifications \(1\) are used up/);
-  // The six existing entries (legacy) are never touched by the native job.
-  const before = (await t.db.prepare(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE native_required = 0 AND native_state = 'legacy'`).first<{ n: number }>())!.n;
-  await runJobs(t.env, ["portfolio_native"]);
-  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE native_required = 0 AND native_state = 'legacy'`).first<{ n: number }>())!.n, before);
-  assert.ok(before >= 1);
+  // Migration 0111: every existing entry follows the same native-first standard — none is legacy, none is streamed;
+  // published entries stay published with their content, order and images; each conversion is audited.
+  const q = async (sql: string) => (await t.db.prepare(sql).first<{ n: number }>())!.n;
+  assert.equal(await q(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE native_required = 0 OR native_state = 'legacy'`), 0, "no legacy entries remain");
+  assert.equal(await q(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE display_mode = 'remote'`), 0, "nothing is shown through the remote browser");
+  const converted = await q(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE native_migrated_at IS NOT NULL`);
+  assert.ok(converted >= 1, "the seeded existing entries were converted");
+  assert.equal(await q(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_first_migration'`), converted);
+  assert.equal(await q(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE native_migrated_at IS NOT NULL AND (description IS NULL OR description = '' OR position IS NULL)`), 0, "content and order kept");
   t.close();
 });
 
@@ -300,5 +304,43 @@ test("[PORT-NATIVE] Cloudflare Pages discovery never sends a per_page the Pages 
   const p = await add("pg2", "https://pg2.fixture-native.com/");
   assert.match(p.native_provider ?? "", /cloudflare-pages/, p.native_reason!);
   assert.ok(!w.calls.some((c) => /pages\/projects\?.*per_page/.test(c)), "no per_page on the Pages list");
+  t.close();
+});
+
+test("[PORT-NATIVE] multi-account hosting: a site served only by the SECOND Cloudflare account is discovered there and prepared with that account's token", async () => {
+  const w = new NativeWorld().site(site("second.fixture-native.com")).cloudflareZone("second.fixture-native.com", "c".repeat(32), { workerDomain: { hostname: "second.fixture-native.com", service: "second" }, token: "cf2-test-token" });
+  const { t, add, tick } = await setup(w, { ...TOKENS, PORTFOLIO_CLOUDFLARE_TOKEN_2: "cf2-test-token" });
+  let p = await add("second", "https://second.fixture-native.com/");
+  assert.equal(p.native_state, "preparing", p.native_reason!);
+  assert.equal(JSON.parse(p.native_target!).conn, 1, "the target records the account that serves it");
+  assert.ok(w.calls.some((c) => /^PUT api\.cloudflare\.com\/client\/v4\/zones\/zone_second/.test(c)) || w.writes.some((x) => /zone_second/.test(x)), "the rule was written in the second account's zone");
+  p = await tick(p.id);
+  assert.equal(p.native_state, "native_verified", p.native_reason!);
+  t.close();
+});
+
+test("[PORT-NATIVE] regression repair: a verified site whose update changes its policy is detected by the daily re-check, repaired with the same rule (updated in place, never duplicated) and verified again — without anyone asking", async () => {
+  const own = "default-src 'self'; frame-ancestors 'none'; object-src 'none'";
+  const w = new NativeWorld().site(site("drift.fixture-native.com", { baseCsp: own })).cloudflareZone("drift.fixture-native.com", ACCT, { workerDomain: { hostname: "drift.fixture-native.com", service: "drift" } });
+  const { t, add, tick } = await setup(w);
+  let p = await add("drift", "https://drift.fixture-native.com/");
+  p = await tick(p.id);
+  assert.equal(p.native_state, "native_verified", p.native_reason!);
+  // A later deployment of the website changes its policy: Crestmont's rule no longer matches, the page refuses again.
+  w.sites.get("drift.fixture-native.com")!.baseCsp = own.replace("object-src 'none'", "object-src 'none'; base-uri 'self'");
+  await runJobs(t.env, ["portfolio_embeds"]);
+  p = (await getById(t.db, p.id))!;
+  assert.equal(p.native_state, "checking");
+  assert.match(p.native_reason!, /^Regression: the site stopped permitting framing/);
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_regression' AND subject_id = ?`).bind(p.id).first<{ n: number }>())!.n, 1);
+  // The 15-minute job repairs it: the same rule (same ref) now matches the new policy; then it verifies again.
+  p = await tick(p.id);
+  assert.match(p.native_reason!, /Regression repair/);
+  assert.equal(w.zones[0].rulesets!.rules.length, 1, "the rule was updated in place — never a second rule");
+  assert.match(w.zones[0].rulesets!.rules[0].expression, /base-uri 'self'/);
+  p = await tick(p.id);
+  assert.equal(p.native_state, "native_verified", p.native_reason!);
+  // The new policy keeps every directive but frame-ancestors.
+  assert.equal(w.respond("https://drift.fixture-native.com/")!.headers["content-security-policy"], `default-src 'self'; ${frameAncestorsValue("http://crestmont.test")}; object-src 'none'; base-uri 'self'`);
   t.close();
 });

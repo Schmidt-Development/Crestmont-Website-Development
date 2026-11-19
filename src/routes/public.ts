@@ -24,7 +24,7 @@ import * as cms from "../services/cms.ts";
 import { lineDiff } from "../services/voice.ts";
 import * as pf from "../services/portfolio.ts";
 import { checkEmbed, safePublicUrl, type EmbedCheck } from "../services/embed-check.ts";
-import { remoteBrowserConfig } from "../services/remote-browser/admission.ts";
+import { ownerProgress, STAGES } from "../services/native/diagnostics.ts";
 import { issuePreviewToken, previewTokenProject } from "../services/remote-browser/connect.ts";
 import { serviceVisual } from "../ui/service-visuals.ts";
 import { receptionistConsole, voiceLibrary } from "../ui/receptionist.ts";
@@ -689,7 +689,7 @@ ${tms.length ? section("Testimonials", "What they said", html`<div class="grid g
     const proj = id ? await pf.getById(ctx.db, id) : null;
     if (!proj || proj.archived_at) throw new HttpError(404, "This preview link is not valid or has expired.");
     const res = htmlResponse(ctx, publicLayout(ctx, { title: `${proj.name} — preview`, noindex: true }, html`
-${pageHero("Preview — not published", proj.name, `Display: ${proj.display_mode === "embed" ? "native interactive embed (Mode A)" : proj.display_mode === "remote" ? "remote interactive browser (Mode B)" : proj.display_mode === "unavailable" ? "unavailable — honest fallback (Mode C)" : "not checked yet"}. ${proj.display_reason ?? ""}`)}
+${pageHero("Preview — not published", proj.name, `Display: ${proj.display_mode === "embed" ? "native interactive embed (Mode A)" : proj.display_mode === "unavailable" || proj.display_mode === "remote" ? "unavailable — honest fallback (Mode C)" : "not checked yet"}. ${proj.display_reason ?? ""}`)}
 <section class="section section--flush"><div class="container" data-testid="pf-preview" data-display-mode="${proj.display_mode}">${portfolioExplorer(ctx, [proj], { variant: "case", headingLevel: 2, previewToken: p.token })}</div></section>`));
     res.headers.set("cache-control", "no-store");
     res.headers.set("x-robots-tag", "noindex, nofollow");
@@ -1085,8 +1085,6 @@ ${input({ name: "relationship", label: "Relationship to Crestmont", value: v.rel
 <div class="form-actions">${button(submit)}</div></form>`;
 }
 
-const MODE_LABEL = { embed: "Mode A — native interactive embed", remote: "Mode B — remote interactive browser", unavailable: "Mode C — unavailable (honest fallback)" } as const;
-const REMOTE_LIMITS = "In the remote view visitors can scroll, click, type into search boxes and follow the site's own public pages. Sign-in, account and checkout pages, form submissions, purchases, uploads, downloads and pop-ups are blocked, sessions end after a few minutes or when idle, and it is a picture of a real browser rather than the page itself (slightly less crisp, with a small delay).";
 
 /** Outbound fetch for the live-site check (tests substitute a stub through env.overrides.portfolioFetch). */
 const netFetch = (ctx: AppContext): typeof fetch => ctx.env.overrides?.portfolioFetch ?? fetch;
@@ -1103,18 +1101,12 @@ function registerPortfolioAdmin(r: Router) {
     const v = projectFormValues(f);
     try {
       const { id } = await pf.createProject(ctx.db, ctx.actor!, v, ctx.ip, Number(str(f, "position")) || null);
-      // Steps 3–4 for every new entry: Crestmont prepares the real website for its native frame through the authorized
-      // connections and verifies it in a real browser — never the remote browser in its place (src/services/native/).
-      if ((await pf.getById(ctx.db, id))?.native_required) {
-        const o = await advanceNative(nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin), id, { actorUserId: ctx.actor?.userId ?? null }).catch((e): NativeOutcome => ({ state: "checking", reason: `The first check did not complete (${(e as Error).message}); it continues automatically.` }));
-        return redirect(ctx, `/staff/portfolio/${id}`, { kind: o.state === "native_verified" ? "success" : o.state === "unavailable" ? "error" : "info", text: `Project added (unpublished). ${pf.NATIVE_LABEL[o.state]}: ${o.reason}`.slice(0, 900) });
-      }
-      const r = await pf.refreshEmbed(ctx.db, { id, live_url: v.live_url }, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null, remoteBrowserConfig(ctx.env).enabled).catch(() => null);
-      const sel = r ? pf.selectDisplayMode(r, remoteBrowserConfig(ctx.env).enabled) : null;
-      const text = `Project added (unpublished). ${!sel ? "The live preview check will run again shortly." : sel.mode === "embed" ? "Display: native interactive embed (Mode A). The live website is shown below"
-        : sel.mode === "remote" ? "Display: remote interactive browser (Mode B) — the site refuses framing, so Crestmont's remote browser shows the real site; nothing on the site changes. Try it below"
-        : `Display: unavailable (Mode C) — ${sel.reason} A genuine screenshot and the live link will be shown`}. Review it, then complete the owner's authorization to publish.`;
-      return redirect(ctx, `/staff/portfolio/${id}`, { kind: "success", text });
+      // Steps 3–14 for every entry (one native-first standard): Crestmont finds the authorized hosting, prepares the real
+      // website for its native frame, verifies it in a real browser and measures it — never a remote stream in its place
+      // (src/services/native/). The first step runs now; the 15-minute job continues it without anyone supervising.
+      const o = await advanceNative(nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin), id, { actorUserId: ctx.actor?.userId ?? null }).catch((e): NativeOutcome => ({ state: "checking", reason: `The first check did not complete (${(e as Error).message}); it continues automatically.` }));
+      const prog = ownerProgress((await pf.getById(ctx.db, id))!);
+      return redirect(ctx, `/staff/portfolio/${id}`, { kind: o.state === "native_verified" ? "success" : prog.attention ? "error" : "info", text: `Project added (unpublished). ${prog.label}${prog.done ? "" : "…"} ${prog.message}${prog.action ? ` What to do: ${prog.action}` : ""}`.slice(0, 900) });
     } catch (e) {
       if (e instanceof pf.PortfolioError && e.status === 422) return portfolioNew(ctx, v, e.issues, null, 422);
       cmsFail(e);
@@ -1142,13 +1134,9 @@ function registerPortfolioAdmin(r: Router) {
     await ctx.form();
     const proj = await pf.getById(ctx.db, p.id);
     if (!proj) throw new HttpError(404, "Project not found");
-    if (proj.native_required) {
-      const o = await advanceNative(nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin), proj.id, { force: true, actorUserId: ctx.actor?.userId ?? null });
-      return redirect(ctx, `/staff/portfolio/${p.id}`, { kind: o.state === "native_verified" ? "success" : o.state === "unavailable" ? "error" : "info", text: `${pf.NATIVE_LABEL[o.state]}: ${o.reason}`.slice(0, 900) });
-    }
-    const r = await pf.refreshEmbed(ctx.db, proj, new URL(ctx.baseUrl).origin, netFetch(ctx), ctx.actor?.userId ?? null, remoteBrowserConfig(ctx.env).enabled);
-    const sel = pf.selectDisplayMode(r, remoteBrowserConfig(ctx.env).enabled);
-    return redirect(ctx, `/staff/portfolio/${p.id}`, { kind: sel.mode === "unavailable" ? "error" : "success", text: `${MODE_LABEL[sel.mode]}. ${sel.reason}` });
+    const o = await advanceNative(nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin), proj.id, { force: true, actorUserId: ctx.actor?.userId ?? null });
+    const prog = ownerProgress((await pf.getById(ctx.db, proj.id))!);
+    return redirect(ctx, `/staff/portfolio/${p.id}`, { kind: o.state === "native_verified" ? "success" : prog.attention ? "error" : "info", text: `${prog.label}${prog.done ? "" : "…"} ${prog.message}${prog.action ? ` What to do: ${prog.action}` : ""}`.slice(0, 900) });
   });
 
   // Drag and drop / keyboard reordering: the whole active order at once ("order" = ids, comma-separated).
@@ -1236,13 +1224,12 @@ async function portfolioList(ctx: AppContext, errors: string[] = [], status = 20
   const archived = await pf.listArchived(ctx.db);
   const approved = pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) });
   const row = (p: pf.PortfolioProject, i: number) => {
-    const d = pf.previewState(p, approved, Date.now(), remoteBrowserConfig(ctx.env).enabled);
     const b = pf.publishBlockers(p);
     return html`<li class="pf-order__item card" data-pf-id="${p.id}" data-testid="pf-row">
 <button type="button" class="pf-order__handle" data-pf-handle aria-label="Reorder ${p.name}: drag, or use the arrow keys" aria-describedby="pf-order-help">⠿</button>
 <span class="pf-order__pos" data-pf-pos aria-hidden="true">${i + 1}</span>
 <span class="pf-order__main"><a href="/staff/portfolio/${p.id}">${p.name}</a><br><span class="faint">${p.industry} · ${p.live_url}</span></span>
-<span class="pf-order__status">${p.published ? badge("published") : badge("draft", "Hidden")} ${p.native_required ? badge(p.native_state === "native_verified" ? "ok" : p.native_state === "unavailable" ? "blocked" : "muted", pf.NATIVE_LABEL[p.native_state ?? "checking"]) : d.kind === "live" ? badge("ok", "Live website") : d.kind === "remote" ? badge("ok", "Live website · remote view") : d.kind === "embed" ? badge("muted", "Demo") : badge("muted", "Screenshot")} ${b.length && !p.published ? badge("blocked", `${b.length} to publish`) : ""}</span>
+<span class="pf-order__status">${p.published ? badge("published") : badge("draft", "Hidden")} ${(() => { const g = ownerProgress(p); return badge(g.done ? "ok" : g.attention ? "blocked" : "muted", g.done ? "Native · verified" : g.attention ? `Needs attention · ${g.label}` : g.label); })()} ${b.length && !p.published ? badge("blocked", `${b.length} to publish`) : ""}</span>
 <span class="pf-order__moves">${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Up", { hidden: { dir: "up" }, size: "sm" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Down", { hidden: { dir: "down" }, size: "sm" })}</span></li>`;
   };
   return staffShell(ctx, "Portfolio", html`${pageHead("Portfolio", undefined, "Content")}
@@ -1295,37 +1282,39 @@ ${input({ name: "poster_mobile_asset", label: "Bundled mobile poster", value: p.
 <div class="form-actions">${button("Save demo settings", { variant: "secondary", size: "sm" })}</div></form></div>`;
 }
 
-/** The automatic display-mode card of entries created before native readiness (unchanged behaviour). */
-function legacyEmbedCard(ctx: AppContext, p: pf.PortfolioProject, mode: string, remoteOn: boolean): SafeHtml {
-  return html`<div class="card" data-testid="pf-embed" data-display-mode="${mode}"><div class="row row--between"><div>${mode === "embed" ? badge("ok", MODE_LABEL.embed) : mode === "remote" ? badge(remoteOn ? "ok" : "blocked", MODE_LABEL.remote) : mode === "unavailable" ? badge("blocked", MODE_LABEL.unavailable) : badge("muted", "Not checked yet")}
-<span class="faint">${p.embed_checked_at ? `Checked ${formatDateTime(p.embed_checked_at)}` : ""}${p.embed_detail ? ` · ${p.embed_detail}` : ""}</span></div>
-${actionForm(ctx, `/staff/portfolio/${p.id}/embed-check`, "Check again", { variant: "secondary", size: "sm" })}</div>
-${p.display_reason ? html`<p data-testid="pf-display-reason">${p.display_reason}</p>` : ""}
-${mode === "remote" ? html`<p class="muted" data-testid="pf-remote-limits">${REMOTE_LIMITS}${remoteOn ? "" : " The remote browser is switched off in this environment, so visitors currently see the screenshot and the live link."}</p>`
-  : mode === "unavailable" ? html`<p class="muted">Visitors see a genuine screenshot (labelled as a screenshot) and a Visit live website button. Nothing is changed on the website.</p>` : ""}
-<p class="muted">The display method is chosen automatically and re-checked every day: native embed when the site permits framing by ${new URL(ctx.baseUrl).origin}, otherwise Crestmont's remote browser, otherwise the honest fallback.</p></div>
-`;
-}
-
-/** Native readiness of a new entry (src/services/native/): state, exact reason, provider, change and the real-browser
- *  verification — so staff always see why a website is or is not shown natively and what (if anything) is needed. */
+/** Native readiness (src/services/native/), for every entry — in the owner's words first: the five stages, where this
+ *  website is, and only when a person must act, the one thing to do. The exact developer detail (reason, diagnosis
+ *  codes, provider, change, each verification check, measured direct-vs-embedded performance) is kept below it. */
 function nativeCard(ctx: AppContext, p: pf.PortfolioProject): SafeHtml {
   const st = p.native_state ?? "checking";
-  const tone = st === "native_verified" ? "ok" : st === "unavailable" ? "blocked" : st === "authorization_required" ? "warn" : "muted";
-  let change: { kind?: string; pr?: { url?: string; repo?: string; path?: string }; host?: string; paths?: number; ref?: string; detail?: string } | null = null;
+  const g = ownerProgress(p);
+  let change: { kind?: string; pr?: { url?: string; repo?: string; path?: string }; host?: string; paths?: number; ref?: string; detail?: string; rewrite?: boolean } | null = null;
   try { change = p.native_change ? JSON.parse(p.native_change) : null; } catch { change = null; }
-  let ver: { ok?: boolean; at?: string; checks?: { name: string; ok: boolean; detail: string }[] } | null = null;
+  let ver: { ok?: boolean; at?: string; checks?: { name: string; ok: boolean; detail: string }[]; findings?: { code: string; kind: string; blocking: boolean; detail: string }[] } | null = null;
   try { ver = p.native_verification ? JSON.parse(p.native_verification) : null; } catch { ver = null; }
+  let diag: { codes?: string[]; developer?: string } | null = null;
+  try { diag = p.native_diagnosis ? JSON.parse(p.native_diagnosis) : null; } catch { diag = null; }
+  let perf: { at?: string; verdict?: string; environment?: string; budgets?: string; direct?: Record<string, unknown> | null; embedded?: Record<string, unknown> | null; mobile?: Record<string, unknown> | null } | null = null;
+  try { perf = p.native_perf ? JSON.parse(p.native_perf) : null; } catch { perf = null; }
   const changeRow = !change ? "None needed so far"
     : change.kind === "github-pr" ? html`Pull request in ${change.pr?.repo ?? "the repository"} (${change.pr?.path ?? ""}): <a href="${safeUrl(change.pr?.url ?? "#")}" rel="noopener" target="_blank">${change.pr?.url ?? ""}</a>`
-    : change.kind === "cloudflare-rule" ? `Cloudflare response-header rule ${change.ref ?? ""} for ${change.host ?? ""} (${change.paths ?? 0} public paths)` : (change.detail ?? "—");
-  return html`<div class="card" data-testid="pf-native" data-native-state="${st}"><div class="row row--between"><div>${badge(tone, pf.NATIVE_LABEL[st])}
-<span class="faint">${p.native_updated_at ? `Updated ${formatDateTime(p.native_updated_at)}` : ""}${p.embed_detail ? ` · ${p.embed_detail}` : ""}</span></div>
+    : change.kind === "cloudflare-rule" ? `Cloudflare response-header rule ${change.ref ?? ""} for ${change.host ?? ""} (${change.paths ?? 0} public paths${change.rewrite ? "; only frame-ancestors of the site's own policy replaced" : ""})` : (change.detail ?? "—");
+  const metric = (m: Record<string, unknown> | null | undefined) => !m ? "not measured" : [["LCP", m.lcp, " ms"], ["CLS", m.cls, ""], ["TBT", m.tbt, " ms"], ["idle", m.idleFps, " fps"], ["scrolling", m.scrollFps, " fps"], ["click", m.interaction, " ms"], ["errors", m.errors, ""], ["failed requests", m.failedRequests, ""]].filter(([, v]) => v !== null && v !== undefined).map(([k, v, u]) => `${k} ${v}${u}`).join(" · ");
+  return html`<div class="card" data-testid="pf-native" data-native-state="${st}" data-owner-stage="${g.stage}">
+<div class="row row--between"><div>${badge(g.done ? "ok" : g.attention ? "blocked" : "muted", g.done ? "Ready for portfolio publication" : g.attention ? "Needs attention" : "In progress")}
+<span class="faint">${p.native_updated_at ? `Updated ${formatDateTime(p.native_updated_at)}` : ""}</span></div>
 ${actionForm(ctx, `/staff/portfolio/${p.id}/embed-check`, "Check again", { variant: "secondary", size: "sm" })}</div>
+<ol class="checklist" data-testid="pf-native-stages">${STAGES.map((label, i) => html`<li data-stage="${i}" ${i === g.stage ? html`aria-current="step"` : ""}>${i < g.stage || g.done ? "✓" : i === g.stage ? (g.attention ? "!" : "…") : "○"} ${i === g.stage ? html`<strong>${label}</strong>` : label}</li>`)}</ol>
+<p data-testid="pf-native-owner">${g.message}</p>
+${g.action ? html`<div class="alert alert--warn" role="status" data-testid="pf-native-action"><strong>What to do:</strong> ${g.action}</div>` : ""}
+<details data-testid="pf-native-developer"><summary>Developer report</summary>
 <p data-testid="pf-native-reason">${p.native_reason ?? "Crestmont is checking the live website."}</p>
-${dl([["Hosting (discovered)", p.native_provider ?? "Not discovered yet"], ["Change", changeRow], ["Real-browser verification", ver?.at ? `${ver.ok ? "Passed" : "Failed"} ${formatDateTime(ver.at)}` : "Not run yet"]])}
+${dl([["State", pf.NATIVE_LABEL[st]], ["Diagnosis", diag?.codes?.length ? diag.codes.join(", ") : "—"], ["Hosting (discovered)", p.native_provider ?? "Not discovered yet"], ["Change", changeRow], ["Real-browser verification", ver?.at ? `${ver.ok ? "Passed" : "Failed"} ${formatDateTime(ver.at)}` : "Not run yet"], ["Last embedding check", p.embed_detail ?? "—"]])}
 ${ver?.checks?.length ? html`<ul class="checklist" data-testid="pf-native-checks">${ver.checks.map((c) => html`<li>${c.ok ? "✓" : "✗"} <strong>${c.name}</strong> — ${c.detail}</li>`)}</ul>` : ""}
-<p class="muted">New entries are shown only as the real website in a native frame, after a real browser has verified it. Crestmont prepares owned websites itself through the connected Cloudflare, Vercel and GitHub accounts — only their public pages may be framed by ${new URL(ctx.baseUrl).origin}; sign-in, account, booking, checkout and payment pages keep refusing. It is never replaced by the remote browser, a demo or a screenshot. Progress is checked every 15 minutes.</p></div>`;
+${ver?.findings?.length ? html`<ul class="checklist" data-testid="pf-native-findings">${ver.findings.map((f) => html`<li>${f.kind === "embed" ? "Frame" : f.kind === "site" ? "Website" : "Test environment"} · <code>${f.code}</code>${f.blocking ? " (blocking)" : ""} — ${f.detail}</li>`)}</ul>` : ""}
+${perf ? html`<div data-testid="pf-native-perf">${dl([["Embedded (in Crestmont)", metric(perf.embedded)], ["Direct (the site on its own)", metric(perf.direct)], ["Phone (embedded, 390 px)", metric(perf.mobile)], ["Verdict", perf.verdict ?? "—"], ["Test environment", perf.environment ?? "—"], ["Budgets", perf.budgets ?? "—"]])}</div>` : ""}
+</details>
+<p class="muted">Every portfolio website follows one standard: it is shown only as the real website in a native frame, after a real browser has verified it. Crestmont prepares owned websites itself through the connected Cloudflare, Vercel and GitHub accounts — only their public pages may be framed by ${new URL(ctx.baseUrl).origin}; sign-in, account, booking, application, checkout and payment pages keep refusing. It is never replaced by a remote stream, a demo or a screenshot. Progress continues automatically every 15 minutes; verified websites are re-checked daily.</p></div>`;
 }
 
 async function portfolioEditor(ctx: AppContext, id: string, opts: { errors?: string[]; values?: pf.ProjectInput; status?: number } = {}): Promise<Response> {
@@ -1343,19 +1332,15 @@ ${fileInput("screenshot", fid ? "Replace with a new genuine capture" : "Upload a
 ${input({ name: "captured_on", label: "Captured on", type: "date", required: true })}
 <div class="form-actions">${button(fid ? "Replace screenshot" : "Upload screenshot", { variant: "secondary", size: "sm" })}</div></form></div>`;
   };
-  const live = pf.liveEmbed(p) || p.display_mode === "remote";
-  const mode = p.display_mode, remoteOn = remoteBrowserConfig(ctx.env).enabled;
-  // The staff preview of an unpublished Mode B project runs through a short-lived preview link (the remote-session API
-  // does not read staff cookies): 30 minutes, this project only, viewing only.
-  const previewToken = mode === "remote" && remoteOn ? await issuePreviewToken(ctx.db, p.id, 30, "staff-editor", Date.now()) : undefined;
+  const live = !!pf.liveEmbed(p);
   return staffShell(ctx, p.name, html`${pageHead(p.name, html`${linkButton("All projects", "/staff/portfolio", "ghost", "sm")}${p.published ? linkButton("View public page", `/portfolio/${p.slug}`, "ghost", "sm") : ""}`, "Portfolio")}
 ${formErrors(opts.errors ?? [])}
 <div class="card"><div class="row row--between"><div>${p.published ? badge("published") : badge("draft", "Unpublished")} <span class="faint">Updated ${formatDateTime(p.updated_at)}</span></div>
 <div>${p.archived_at ? html`${badge("muted", "Archived")} ${actionForm(ctx, `/staff/portfolio/${p.id}/restore`, "Restore", { variant: "secondary" })}` : html`${p.published ? actionForm(ctx, `/staff/portfolio/${p.id}/unpublish`, "Unpublish", { confirm: "Remove this project from the public portfolio?" }) : actionForm(ctx, `/staff/portfolio/${p.id}/publish`, "Publish", { variant: "primary" })} ${actionForm(ctx, `/staff/portfolio/${p.id}/archive`, "Archive", { variant: "ghost", confirm: "Archive this project? It is hidden from the site and the list; its details and images are kept and it can be restored." })}`}</div></div>
 ${blockers.length ? html`<div class="alert alert--warn" role="status"><strong>Publishing is blocked until:</strong><ul>${blockers.map((b) => html`<li>${b}</li>`)}</ul></div>` : html`<p class="muted">All publishing requirements are met.</p>`}</div>
 <h2 class="h4">Live preview</h2>
-${p.native_required ? nativeCard(ctx, p) : legacyEmbedCard(ctx, p, mode ?? "unchecked", remoteOn)}
-${portfolioExplorer(ctx, [p], { variant: "case", headingLevel: 2, previewToken })}
+${nativeCard(ctx, p)}
+${portfolioExplorer(ctx, [p], { variant: "case", headingLevel: 2 })}
 <div class="grid grid-2"><div class="card"><h3 class="card__title">Live link verification</h3>${dl([["Live link", html`<a href="${safeUrl(p.live_url)}" rel="noopener" target="_blank">${p.live_url}</a>`], ["Last verified", formatDate(p.link_verified_at)]])}
 <form method="post" action="/staff/portfolio/${p.id}/verify-link">${csrf(ctx)}<input type="hidden" name="verified_on" value="${new Date().toISOString().slice(0, 10)}">
 <p class="muted">Confirm only after looking at the preview above (or opening the link) and seeing the correct, working website.</p><div class="form-actions">${button("The preview shows the correct website — record verification", { variant: "secondary", size: "sm" })}</div></form></div>

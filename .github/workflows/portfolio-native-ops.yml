@@ -28,7 +28,7 @@ on:
         type: choice
         options: [check, status, onboard, resume]
       url:
-        description: "onboard: the website's production address (https://…)"
+        description: "onboard: the website's production address (https://…), or up to 3 comma-separated"
         required: false
         type: string
       urls:
@@ -66,7 +66,7 @@ jobs:
           [[ "$ACTION" =~ ^(check|status|onboard|resume)$ ]] || { echo "::error::action must be check, status, onboard or resume"; exit 1; }
           [[ -z "$SLUG_INPUT" || "$SLUG_INPUT" =~ ^[a-z0-9][a-z0-9-]{0,79}$ ]] || { echo "::error::slug must be lowercase letters, digits and dashes"; exit 1; }
           [[ ! "$ACTION" =~ ^(status|resume)$ || -n "$SLUG_INPUT" ]] || { echo "::error::$ACTION needs slug"; exit 1; }
-          [[ -z "$URL_INPUT" || "$URL_INPUT" =~ ^https://[A-Za-z0-9.-]+(/[A-Za-z0-9/._~-]*)?$ ]] || { echo "::error::url must be a plain https address"; exit 1; }
+          [[ -z "$URL_INPUT" || "$URL_INPUT" =~ ^https://[A-Za-z0-9.-]+(/[A-Za-z0-9/._~-]*)?(,[[:space:]]*https://[A-Za-z0-9.-]+(/[A-Za-z0-9/._~-]*)?){0,2}$ ]] || { echo "::error::url must be up to 3 comma-separated plain https addresses"; exit 1; }
           [[ -z "$URLS_INPUT" || "$URLS_INPUT" =~ ^(https://[A-Za-z0-9.-]+/?)(,[[:space:]]*https://[A-Za-z0-9.-]+/?){0,11}$ ]] || { echo "::error::urls must be up to 12 comma-separated https origins"; exit 1; }
           [[ "$ACTION" != "onboard" || -n "$URL_INPUT" ]] || { echo "::error::onboard needs url"; exit 1; }
           [ -n "$PRODUCTION_URL" ] || { echo "::error::PRODUCTION_URL (var) is not set"; exit 1; }
@@ -107,44 +107,62 @@ jobs:
             node scripts/native-ops-report.mjs check "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          field() { node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(r[process.argv[2]]??"")' "$work/r.json" "$1"; }
+          targets="$RUNNER_TEMP/native-targets.tsv"; : > "$targets"
+          # One entry at a time (onboard: up to 3 addresses; resume: the slug), each followed until it settles.
+          follow() { # $1 = live address
+            node scripts/native-ops-report.mjs step "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+            local slug; slug=$(field slug)
+            # One ordinary step a minute (the 15-minute job would too), up to 45 minutes, until it settles.
+            for i in $(seq 1 45); do
+              case "$(field state)" in native_verified|authorization_required|unavailable) break ;; esac
+              sleep 60
+              ask "$(node -e 'console.log(JSON.stringify({ action: "advance", slug: process.argv[1] }))' "$slug")"
+              [ "$http" = "200" ] || { echo "::warning::advance HTTP $http"; continue; }
+              node scripts/native-ops-report.mjs step "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+            done
+            printf '%s\t%s\t%s\t%s\n' "$slug" "$(field state)" "$(field preview)" "$1" >> "$targets"
+          }
           if [ "$ACTION" = "onboard" ]; then
-            ask "$(node -e 'console.log(JSON.stringify({ action: "onboard", url: process.argv[1] }))' "$URL_INPUT")"
-            [ "$http" = "200" ] || { echo "::error::onboard HTTP $http: $(answer)"; exit 1; }
+            IFS=',' read -ra list <<< "$URL_INPUT"
+            for raw in "${list[@]}"; do
+              u="$(echo "$raw" | xargs)"
+              ask "$(node -e 'console.log(JSON.stringify({ action: "onboard", url: process.argv[1] }))' "$u")"
+              [ "$http" = "200" ] || { echo "::error::onboard $u HTTP $http: $(answer)"; continue; }
+              follow "$u"
+            done
           else
             ask "$(node -e 'console.log(JSON.stringify({ action: "advance", slug: process.argv[1] }))' "$SLUG_INPUT")"
             [ "$http" = "200" ] || { echo "::error::resume HTTP $http: $(answer)"; exit 1; }
+            follow "${LIVE_FROM_STATE:-}"
           fi
-          node scripts/native-ops-report.mjs step "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
-          field() { node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(r[process.argv[2]]??"")' "$work/r.json" "$1"; }
-          slug=$(field slug); live="${LIVE_FROM_STATE:-$URL_INPUT}"
-          # Follow it (the 15-minute job would too): up to 45 minutes, one ordinary step a minute, until it settles.
-          for i in $(seq 1 45); do
-            case "$(field state)" in native_verified|authorization_required|unavailable) break ;; esac
-            sleep 60
-            ask "$(node -e 'console.log(JSON.stringify({ action: "advance", slug: process.argv[1] }))' "$slug")"
-            [ "$http" = "200" ] || { echo "::warning::advance HTTP $http"; continue; }
-            node scripts/native-ops-report.mjs step "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
-          done
-          { echo "state=$(field state)"; echo "preview=$(field preview)"; echo "live=$live"; } >> "$GITHUB_OUTPUT"
+          cat "$targets"
+          { echo "states=$(cut -f1,2 "$targets" | tr '\t\n' ': ' | sed 's/ $//')"; echo "verified=$(awk -F'\t' '$2=="native_verified" && $3!=""' "$targets" | wc -l | tr -d ' ')"; echo "all=$(wc -l < "$targets" | tr -d ' ')"; } >> "$GITHUB_OUTPUT"
       - name: Install Chromium (pinned Playwright)
-        if: steps.ops.outputs.preview != ''
+        if: steps.ops.outputs.verified != '' && steps.ops.outputs.verified != '0'
         run: |
           npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
       - name: The real website in Crestmont's native frame — content, scrolling, animation, phone width, no remote browser
-        if: steps.ops.outputs.preview != ''
+        if: steps.ops.outputs.verified != '' && steps.ops.outputs.verified != '0'
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
-          PREVIEW: ${{ steps.ops.outputs.preview }}
-          LIVE: ${{ steps.ops.outputs.live }}
         run: |
           set -o pipefail
-          node scripts/native-onboard-check.mjs "$PRODUCTION_URL$PREVIEW" "$LIVE" | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=0
+          while IFS=$'\t' read -r slug state preview live; do
+            [ "$state" = "native_verified" ] && [ -n "$preview" ] || continue
+            echo "### $slug" | tee -a "$GITHUB_STEP_SUMMARY"
+            node scripts/native-onboard-check.mjs "$PRODUCTION_URL$preview" "$live" | tee -a "$GITHUB_STEP_SUMMARY" || rc=1
+          done < "$RUNNER_TEMP/native-targets.tsv"
+          exit "$rc"
       - name: Outcome
         if: always()
         env:
-          STATE: ${{ steps.ops.outputs.state }}
+          STATES: ${{ steps.ops.outputs.states }}
+          VERIFIED: ${{ steps.ops.outputs.verified }}
+          ALL: ${{ steps.ops.outputs.all }}
         run: |
           [[ "$ACTION" =~ ^(check|status)$ ]] && exit 0
-          echo "Native state: ${STATE:-unknown}"
-          [ "$STATE" = "native_verified" ] || { echo "::warning title=Not verified yet::${STATE:-unknown} — see the steps above for the exact reason and what is needed."; }
+          echo "Native states: ${STATES:-unknown} (${VERIFIED:-0} of ${ALL:-0} verified)"
+          [ "${VERIFIED:-0}" = "${ALL:-x}" ] || echo "::warning title=Not every website is verified yet::${STATES:-unknown} — see the steps above for the exact reason and what is needed."
