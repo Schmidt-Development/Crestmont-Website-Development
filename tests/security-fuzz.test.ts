@@ -187,6 +187,8 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/ops/database-backup": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
     "POST /api/ops/portfolio-embeds": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
     "POST /api/ops/portfolio-intake": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
+    // Accepts only a one-time challenge; a signed body is authenticated and then refused (403), never a 5xx.
+    "POST /api/ops/portfolio-native": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
     "POST /api/webhooks/stripe": async (b) => { const t = ts(); return { "stripe-signature": `t=${t},v1=${await hmacSha256Hex(SECRETS.stripe, `${t}.${b}`)}` }; },
     "POST /api/webhooks/voice": async (b) => ({ "x-crestmont-voice-signature": await signVoiceEvent(SECRETS.voice, b) }),
     "POST /api/webhooks/retell": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),

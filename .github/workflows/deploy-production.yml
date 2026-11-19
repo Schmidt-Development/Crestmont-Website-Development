@@ -364,6 +364,25 @@ jobs:
           node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`### Portfolio display modes (remote browser ${r.remoteBrowser.enabled?"on":"OFF"}, ${r.remoteBrowser.maxConcurrent} concurrent, ${r.remoteBrowser.dailyMinutes} min/day)`);for(const x of r.results)console.log(`- ${x.url} → **${x.mode}** (${x.slug}${x.created?", added unpublished":", existing"}${x.published?", published":""}) — ${x.reason}`)' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "json=$(base64 -w0 "$work/r.json")" >> "$GITHUB_OUTPUT"
 
+      # Native onboarding connections (2026-11-19), read-only: the production Worker verifies its own Cloudflare / Vercel /
+      # GitHub connections and reports what they authorize (names only, never a token), and which connected account
+      # serves each portfolio website and test candidate. Nothing is created or changed; never fails the release.
+      - name: Native onboarding connections (read-only)
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          node --no-warnings scripts/ops-challenge.ts --purpose portfolio_native --out-sql "$work/c.sql" --out-nonce "$work/nonce" > /dev/null
+          echo "::add-mask::$(cat "$work/nonce")"
+          $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
+          body=$(node -e 'console.log(JSON.stringify({ challenge: process.argv[1], action: "check", urls: ["https://leadhavencollective.com/", "https://geteveryinvoicepaid.com/", "https://betterlansingmechanics.com/", "https://glasslyautoglass.com/", "https://lansingcarrentals.com/", "https://mentorship.lansingcarrentals.com/", "https://lendingforbeginners.com/", "https://premiuminvoices.com/"] }))' "$(cat "$work/nonce")")
+          http=$(curl -s -o "$work/r.json" -w '%{http_code}' --max-time 280 -X POST -H 'content-type: application/json' --data "$body" "$PRODUCTION_URL/api/ops/portfolio-native" || echo 000)
+          [ "$http" = "200" ] || { echo "::warning title=Native connections::HTTP $http"; exit 1; }
+          node scripts/native-ops-report.mjs check "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Post-deploy production checks (LAUNCH-003)
         id: checks
         run: >

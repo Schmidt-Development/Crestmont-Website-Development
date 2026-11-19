@@ -16,7 +16,11 @@ export interface Site {
 }
 interface Rule { id: string; ref?: string; expression: string; action: string; action_parameters: { headers: Record<string, { operation: string; value?: string }> }; enabled?: boolean; description?: string }
 interface Zone { id: string; name: string; account: string; rulesets: { id: string; rules: Rule[] } | null; dns: { name: string; type: string; proxied: boolean }[]; workerDomains: { hostname: string; service: string }[] }
-interface Repo { full: string; push: boolean; protectedReviews: boolean; branches: Record<string, { sha: string; files: Record<string, string> }>; pulls: { number: number; head: string; base: string; state: "open" | "closed"; merged: boolean; merge_commit_sha: string | null; title: string }[]; closeNextPr?: boolean }
+interface Repo { full: string; push: boolean; protectedReviews: boolean; branches: Record<string, { sha: string; files: Record<string, string> }>; pulls: { number: number; head: string; base: string; state: "open" | "closed"; merged: boolean; merge_commit_sha: string | null; title: string; created_at: string }[]; closeNextPr?: boolean;
+  /** What CI reports on a PR's head commit (default: one passing check run "build"). */
+  checks: { name: string; status: string; conclusion: string | null }[]; statuses: { context: string; state: string }[];
+  /** Branch protection without reviews: required status checks; unreadable = the token cannot read protection. */
+  requiredChecks: string[] | null; protectionUnreadable?: boolean; checksUnreadable?: boolean; changesRequested?: boolean }
 interface Deploy { uid: string; commit: string; state: "BUILDING" | "READY" | "ERROR"; polls: number; files: Record<string, string> }
 interface VProject { id: string; name: string; domain: string; verified: boolean; repo: string | null; branch: string; root: string; deployments: Deploy[]; failDeploy?: boolean }
 interface PProject { name: string; account: string; domain: string; repo: string | null; branch: string; destination: string; buildCommand: string; deployments: { id: string; commit: string; stage: "success" | "failure" | "active"; polls: number; files: Record<string, string> }[]; failDeploy?: boolean }
@@ -33,6 +37,8 @@ export class NativeWorld {
   pprojects: PProject[] = [];
   repos = new Map<string, Repo>();
   calls: string[] = [];
+  /** Every merge Crestmont asked for: repo#pr@head-sha. */
+  mergeCalls: string[] = [];
   /** Requests that changed something at a provider (for idempotency assertions). */
   writes: string[] = [];
 
@@ -41,8 +47,9 @@ export class NativeWorld {
     this.zones.push({ id: `zone_${name.replace(/\W/g, "")}`.padEnd(32, "0").slice(0, 32), name, account, rulesets: null, dns: (opts.proxied ?? []).map((n) => ({ name: n, type: "A", proxied: true })), workerDomains: opts.workerDomain ? [opts.workerDomain] : [] });
     return this;
   }
-  repo(full: string, opts: { push?: boolean; protectedReviews?: boolean; branch?: string; files?: Record<string, string> } = {}) {
-    this.repos.set(full, { full, push: opts.push ?? true, protectedReviews: opts.protectedReviews ?? false, branches: { [opts.branch ?? "main"]: { sha: sha(), files: { ...(opts.files ?? {}) } } }, pulls: [] });
+  repo(full: string, opts: { push?: boolean; protectedReviews?: boolean; branch?: string; files?: Record<string, string>; checks?: Repo["checks"]; statuses?: Repo["statuses"]; requiredChecks?: string[] } = {}) {
+    this.repos.set(full, { full, push: opts.push ?? true, protectedReviews: opts.protectedReviews ?? false, branches: { [opts.branch ?? "main"]: { sha: sha(), files: { ...(opts.files ?? {}) } } }, pulls: [],
+      checks: opts.checks ?? [{ name: "build", status: "completed", conclusion: "success" }], statuses: opts.statuses ?? [], requiredChecks: opts.requiredChecks ?? null });
     return this;
   }
   vercel(p: Omit<VProject, "deployments">) { this.vprojects.push({ ...p, deployments: [] }); return this; }
@@ -132,10 +139,11 @@ export class NativeWorld {
   private cloudflare(u: URL, method: string, body: { rules?: Rule[] } & Rule | null): Response {
     const p = u.pathname.replace("/client/v4", "");
     let m: RegExpExecArray | null;
-    if (p === "/accounts") return json({ result: [...new Set([...this.zones.map((z) => z.account), ...this.pprojects.map((x) => x.account)])].map((id) => ({ id })) });
-    if (p === "/zones") { const z = this.zones.filter((x) => x.name === u.searchParams.get("name")); return json({ success: true, result: z.map((x) => ({ id: x.id, name: x.name, status: "active", account: { id: x.account } })) }); }
+    if (p === "/accounts") return json({ result: [...new Set([...this.zones.map((z) => z.account), ...this.pprojects.map((x) => x.account)])].map((id) => ({ id, name: `Account ${id.slice(0, 4)}` })) });
+    if (p === "/user/tokens/verify") return json({ result: { status: "active" } });
+    if (p === "/zones") { const z = this.zones.filter((x) => !u.searchParams.get("name") || x.name === u.searchParams.get("name")); return json({ success: true, result: z.map((x) => ({ id: x.id, name: x.name, status: "active", account: { id: x.account } })) }); }
     if ((m = /^\/zones\/([^/]+)\/dns_records$/.exec(p))) { const z = this.zones.find((x) => x.id === m![1]); return json({ result: (z?.dns ?? []).filter((r) => r.name === u.searchParams.get("name")) }); }
-    if ((m = /^\/accounts\/([^/]+)\/workers\/domains$/.exec(p))) return json({ result: this.zones.filter((z) => z.account === m![1]).flatMap((z) => z.workerDomains).filter((d) => d.hostname === u.searchParams.get("hostname")) });
+    if ((m = /^\/accounts\/([^/]+)\/workers\/domains$/.exec(p))) return json({ result: this.zones.filter((z) => z.account === m![1]).flatMap((z) => z.workerDomains).filter((d) => !u.searchParams.get("hostname") || d.hostname === u.searchParams.get("hostname")) });
     if ((m = /^\/zones\/([^/]+)\/workers\/routes$/.exec(p))) return json({ result: [] });
     if ((m = /^\/accounts\/([^/]+)\/pages\/projects$/.exec(p))) return json({ result: this.pprojects.filter((x) => x.account === m![1]).map((x) => ({ name: x.name, domains: [x.domain], source: x.repo ? { type: "github", config: { owner: x.repo.split("/")[0], repo_name: x.repo.split("/")[1], production_branch: x.branch } } : undefined, build_config: { destination_dir: x.destination, root_dir: "", build_command: x.buildCommand } })), result_info: { total_pages: 1 } });
     if ((m = /^\/accounts\/([^/]+)\/pages\/projects\/([^/]+)\/deployments$/.exec(p))) {
@@ -162,6 +170,8 @@ export class NativeWorld {
 
   private vercelApi(u: URL): Response {
     let m: RegExpExecArray | null;
+    if (u.pathname === "/v2/user") return json({ user: { username: "test-owner" } });
+    if (u.pathname === "/v2/teams") return json({ teams: [] });
     if (u.pathname === "/v9/projects") return json({ projects: this.vprojects.map((p) => ({ id: p.id, name: p.name, framework: "nextjs", rootDirectory: p.root || null, link: p.repo ? { type: "github", org: p.repo.split("/")[0], repo: p.repo.split("/")[1], productionBranch: p.branch } : undefined, targets: { production: { alias: [p.domain] } } })), pagination: { next: null } });
     if ((m = /^\/v9\/projects\/([^/]+)\/domains\/([^/]+)$/.exec(u.pathname))) { const p = this.vprojects.find((x) => x.id === m![1]); return p && p.domain === m[2] ? json({ name: p.domain, verified: p.verified, redirect: null }) : json({}, 404); }
     if (u.pathname === "/v6/deployments") {
@@ -187,14 +197,23 @@ export class NativeWorld {
   }
 
   private github(u: URL, method: string, body: Record<string, unknown> | null): Response {
+    if (u.pathname === "/user") return json({ login: "test-owner" });
+    if (u.pathname === "/user/repos") return json([...this.repos.values()].map((r) => ({ full_name: r.full, archived: false, default_branch: Object.keys(r.branches)[0], permissions: { push: r.push, admin: false } })));
     const m = /^\/repos\/([^/]+\/[^/]+)(\/.*)?$/.exec(u.pathname);
     const r = m ? this.repos.get(m[1]) : undefined;
     if (!r) return json({ message: "Not Found" }, 404);
     const rest = m![2] ?? "";
     let x: RegExpExecArray | null;
     if (!rest) return json({ full_name: r.full, default_branch: "main", archived: false, permissions: { push: r.push, pull: true } });
-    if ((x = /^\/branches\/([^/]+)$/.exec(rest))) return r.branches[decodeURIComponent(x[1])] ? json({ name: x[1], protected: r.protectedReviews }) : json({}, 404);
-    if ((x = /^\/branches\/([^/]+)\/protection$/.exec(rest))) return r.protectedReviews ? json({ required_pull_request_reviews: { required_approving_review_count: 1 } }) : json({}, 404);
+    if ((x = /^\/branches\/([^/]+)$/.exec(rest))) return r.branches[decodeURIComponent(x[1])] ? json({ name: x[1], protected: r.protectedReviews || !!r.requiredChecks || !!r.protectionUnreadable }) : json({}, 404);
+    if ((x = /^\/branches\/([^/]+)\/protection$/.exec(rest))) {
+      if (r.protectionUnreadable) return json({ message: "Resource not accessible by integration" }, 403);
+      if (r.protectedReviews) return json({ required_pull_request_reviews: { required_approving_review_count: 1 } });
+      return r.requiredChecks ? json({ required_status_checks: { contexts: r.requiredChecks, checks: r.requiredChecks.map((c) => ({ context: c })) } }) : json({}, 404);
+    }
+    if ((x = /^\/commits\/([^/]+)\/check-runs$/.exec(rest))) return r.checksUnreadable ? json({ message: "Resource not accessible by integration" }, 403) : json({ total_count: r.checks.length, check_runs: r.checks });
+    if ((x = /^\/commits\/([^/]+)\/status$/.exec(rest))) return json({ state: "success", statuses: r.statuses, total_count: r.statuses.length });
+    if ((x = /^\/pulls\/(\d+)\/reviews$/.exec(rest))) return json(r.changesRequested ? [{ user: { login: "reviewer" }, state: "CHANGES_REQUESTED" }] : []);
     if ((x = /^\/git\/ref\/heads\/(.+)$/.exec(rest))) { const b = r.branches[decodeURIComponent(x[1])]; return b ? json({ object: { sha: b.sha } }) : json({}, 404); }
     if (rest === "/git/refs" && method === "POST") { const name = String(body!.ref).replace("refs/heads/", ""); const from = Object.values(r.branches).find((b) => b.sha === body!.sha)!; r.branches[name] = { sha: sha(), files: { ...from.files } }; return json({ ref: body!.ref }, 201); }
     if ((x = /^\/git\/refs\/heads\/(.+)$/.exec(rest)) && method === "PATCH") { const from = Object.values(r.branches).find((b) => b.sha === body!.sha)!; r.branches[decodeURIComponent(x[1])] = { sha: sha(), files: { ...from.files } }; return json({}); }
@@ -206,16 +225,20 @@ export class NativeWorld {
       return json({ commit: { sha: b.sha } });
     }
     if (rest === "/pulls" && method === "GET") { const head = (u.searchParams.get("head") ?? "").split(":")[1]; return json(r.pulls.filter((p) => p.state === "open" && p.head === head).map((p) => ({ number: p.number, html_url: `https://github.com/${r.full}/pull/${p.number}`, head: { ref: p.head } }))); }
-    if (rest === "/pulls" && method === "POST") { const n = r.pulls.length + 1; r.pulls.push({ number: n, head: String(body!.head), base: String(body!.base), state: "open", merged: false, merge_commit_sha: null, title: String(body!.title) }); return json({ number: n, html_url: `https://github.com/${r.full}/pull/${n}` }, 201); }
+    if (rest === "/pulls" && method === "POST") { const n = r.pulls.length + 1; r.pulls.push({ number: n, head: String(body!.head), base: String(body!.base), state: "open", merged: false, merge_commit_sha: null, title: String(body!.title), created_at: new Date().toISOString() }); return json({ number: n, html_url: `https://github.com/${r.full}/pull/${n}` }, 201); }
     if ((x = /^\/pulls\/(\d+)$/.exec(rest))) {
       const pr = r.pulls.find((p) => p.number === Number(x![1]));
       if (!pr) return json({}, 404);
       if (r.closeNextPr && pr.state === "open") { pr.state = "closed"; r.closeNextPr = false; }
-      return json({ state: pr.state, merged: pr.merged, merge_commit_sha: pr.merge_commit_sha, mergeable: true, mergeable_state: r.protectedReviews ? "blocked" : "clean", html_url: `https://github.com/${r.full}/pull/${pr.number}` });
+      const failing = r.checks.some((c) => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion ?? ""));
+      const running = r.checks.some((c) => c.status !== "completed");
+      const state = r.protectedReviews ? "blocked" : running ? "unstable" : failing ? "unstable" : "clean";
+      return json({ number: pr.number, state: pr.state, draft: false, merged: pr.merged, merge_commit_sha: pr.merge_commit_sha, mergeable: true, mergeable_state: state, head: { sha: r.branches[pr.head]?.sha ?? "0".repeat(40) }, base: { ref: pr.base }, created_at: pr.created_at, html_url: `https://github.com/${r.full}/pull/${pr.number}` });
     }
     if ((x = /^\/pulls\/(\d+)\/merge$/.exec(rest)) && method === "PUT") {
       const pr = r.pulls.find((p) => p.number === Number(x![1]))!;
       if (r.protectedReviews) return json({ message: "At least 1 approving review is required" }, 405);
+      this.mergeCalls.push(`${r.full}#${pr.number}@${String(body?.sha ?? "")}`);
       this.merge(r, pr);
       return json({ merged: true, sha: pr.merge_commit_sha });
     }

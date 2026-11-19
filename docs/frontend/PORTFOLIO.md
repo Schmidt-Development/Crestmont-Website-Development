@@ -100,6 +100,23 @@ end"), including a WebGL scene, and its negatives (WebGL never draws, blank page
 browser refuses). The provider adapters have **not** yet been exercised against the live Cloudflare/Vercel/GitHub APIs
 of the Owner's accounts: that needs the connections above, and a first real onboarding is the remaining proof.
 
+**Automatic merging fails closed (2026-11-19, `github.ts mergeGate`).** Crestmont merges its own header PR only when it
+has verified, itself: the PR is open and not a draft; GitHub reports it `clean` or `has_hooks` (never `unstable`,
+`blocked`, `behind`, `dirty` or unknown); the base branch's protection was read and requires no review; every check run
+and commit status on the PR's head commit completed successfully, including each required check; and no reviewer
+requested changes. Anything it cannot read (a token without Checks / Commit statuses / Administration read, an API
+error, a truncated list) hands the PR to the Owner instead. A repository without any CI is merged only after the PR has
+waited 10 minutes with no check reported and only when none is required. The merge names the verified head commit.
+
+**Operations (`.github/workflows/portfolio-native-ops.yml`, production, Owner-approved, main only).** `check` asks the
+production Worker to verify its connections read-only — identity, accounts, zones, Workers domains, Pages and Vercel
+projects, repositories, the permissions each lacks — and which connected account serves each address (nothing changes;
+the same check runs after every production release). `onboard` runs the controlled onboarding of one owned website as
+Staff → Portfolio → Add would (unpublished; an unpublished acceptance entry for the same site is converted, never a
+published one), follows it until it settles, and opens its preview in Chromium to confirm the native frame, content,
+scrolling, animation, phone width, protected pages and that no remote browser is used. The Worker's answers carry names
+and identifiers only, never a token.
+
 **Websites Crestmont builds** are native-ready by default: both starters carry the standard in `public/_headers`
 (`scripts/lib/embedding.mjs` / `scripts/embedding.mjs`, identical copies) — every page `X-Frame-Options: DENY`; the
 built public pages (generated from the .html files; admin, booking/token and error pages excluded) detach it and add

@@ -1,0 +1,120 @@
+name: Portfolio native onboarding (production)
+
+# Native readiness operations on production (Owner, 2026-11-19), through the production Worker itself — the only place
+# the provider connections (PORTFOLIO_CLOUDFLARE_TOKEN / PORTFOLIO_VERCEL_TOKEN / PORTFOLIO_GITHUB_TOKEN, Worker
+# secrets) exist. Runs only from main, in the `production` environment (the Owner approves each run).
+#   check    read-only: which accounts, zones, projects, domains and repositories each connection authorizes, the
+#            permissions it lacks, and for each address its framing answer and the connected account that serves it.
+#            Nothing is created or changed anywhere.
+#   onboard  the controlled onboarding of ONE owned website, exactly as Staff → Portfolio → Add: unpublished; Crestmont
+#            prepares only its public pages through the connection that serves it (a protected repository waits for
+#            the Owner's merge), follows the deployment, verifies it in a real browser, then this job opens the preview
+#            and checks it in Chromium (native frame, content, scrolling, animation, phone width, no remote browser,
+#            protected pages refused). Nothing is published; no consent or relationship is recorded.
+# Each request uses a one-time challenge written with the production Cloudflare token (src/services/ops-challenge.ts).
+# No token value is ever printed: the Worker's answers contain names and identifiers only.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "check (read-only) or onboard (one website)"
+        required: true
+        type: choice
+        options: [check, onboard]
+      url:
+        description: "onboard: the website's production address (https://…)"
+        required: false
+        type: string
+      urls:
+        description: "check: addresses to discover (comma-separated; empty = the portfolio's sites and the test candidates)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portfolio-native-ops
+  cancel-in-progress: false
+
+jobs:
+  native:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      ACTION: ${{ inputs.action }}
+      URL_INPUT: ${{ inputs.url }}
+      URLS_INPUT: ${{ inputs.urls }}
+    steps:
+      - name: Validate inputs (F-23)
+        run: |
+          [[ "$ACTION" =~ ^(check|onboard)$ ]] || { echo "::error::action must be check or onboard"; exit 1; }
+          [[ -z "$URL_INPUT" || "$URL_INPUT" =~ ^https://[A-Za-z0-9.-]+(/[A-Za-z0-9/._~-]*)?$ ]] || { echo "::error::url must be a plain https address"; exit 1; }
+          [[ -z "$URLS_INPUT" || "$URLS_INPUT" =~ ^(https://[A-Za-z0-9.-]+/?)(,[[:space:]]*https://[A-Za-z0-9.-]+/?){0,11}$ ]] || { echo "::error::urls must be up to 12 comma-separated https origins"; exit 1; }
+          [[ "$ACTION" != "onboard" || -n "$URL_INPUT" ]] || { echo "::error::onboard needs url"; exit 1; }
+          [ -n "$PRODUCTION_URL" ] || { echo "::error::PRODUCTION_URL (var) is not set"; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Ask the production Worker (one-time challenges written with wrangler)
+        id: ops
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          ask() { # $1 = JSON body without the challenge; writes $work/r.json, prints the HTTP status
+            rm -f "$work/c.sql" "$work/nonce"
+            node --no-warnings scripts/ops-challenge.ts --purpose portfolio_native --out-sql "$work/c.sql" --out-nonce "$work/nonce" > /dev/null
+            echo "::add-mask::$(cat "$work/nonce")"
+            $WRANGLER d1 execute crestmont-production --remote --env production --file "$work/c.sql" --yes > /dev/null
+            body=$(node -e 'const b=JSON.parse(process.argv[1]);b.challenge=process.argv[2];console.log(JSON.stringify(b))' "$1" "$(cat "$work/nonce")")
+            curl -s -o "$work/r.json" -w '%{http_code}' --max-time 300 -X POST -H 'content-type: application/json' --data "$body" "$PRODUCTION_URL/api/ops/portfolio-native" || echo 000
+          }
+          if [ "$ACTION" = "check" ]; then
+            urls="${URLS_INPUT:-https://leadhavencollective.com/, https://geteveryinvoicepaid.com/, https://betterlansingmechanics.com/, https://glasslyautoglass.com/, https://lansingcarrentals.com/, https://mentorship.lansingcarrentals.com/, https://lendingforbeginners.com/, https://premiuminvoices.com/}"
+            req=$(node -e 'console.log(JSON.stringify({ action: "check", urls: process.argv[1].split(",").map((s) => s.trim()).filter(Boolean) }))' "$urls")
+            http=$(ask "$req"); [ "$http" = "200" ] || { echo "::error::HTTP $http: $(head -c 400 "$work/r.json" 2>/dev/null)"; exit 1; }
+            node scripts/native-ops-report.mjs check "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          req=$(node -e 'console.log(JSON.stringify({ action: "onboard", url: process.argv[1] }))' "$URL_INPUT")
+          http=$(ask "$req"); [ "$http" = "200" ] || { echo "::error::onboard HTTP $http: $(head -c 400 "$work/r.json" 2>/dev/null)"; exit 1; }
+          node scripts/native-ops-report.mjs step "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          slug=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).slug)' "$work/r.json")
+          # Follow it (the 15-minute job would too): up to 45 minutes, one step a minute, until it settles.
+          for i in $(seq 1 45); do
+            state=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).state)' "$work/r.json")
+            case "$state" in native_verified|authorization_required|unavailable) break ;; esac
+            sleep 60
+            http=$(ask "$(node -e 'console.log(JSON.stringify({ action: "advance", slug: process.argv[1] }))' "$slug")")
+            [ "$http" = "200" ] || { echo "::warning::advance HTTP $http"; continue; }
+            node scripts/native-ops-report.mjs step "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`state=${r.state}`);console.log(`preview=${r.preview??""}`)' "$work/r.json" >> "$GITHUB_OUTPUT"
+      - name: Install Chromium (pinned Playwright)
+        if: steps.ops.outputs.preview != ''
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      - name: The real website in Crestmont's native frame — content, scrolling, animation, phone width, no remote browser
+        if: steps.ops.outputs.preview != ''
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PREVIEW: ${{ steps.ops.outputs.preview }}
+        run: node scripts/native-onboard-check.mjs "$PRODUCTION_URL$PREVIEW" "$URL_INPUT" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Outcome
+        if: always()
+        env:
+          STATE: ${{ steps.ops.outputs.state }}
+        run: |
+          [ "$ACTION" = "check" ] && exit 0
+          echo "Native state: ${STATE:-unknown}"
+          [ "$STATE" = "native_verified" ] || { echo "::warning title=Not verified yet::${STATE:-unknown} — see the steps above for the exact reason and what is needed."; }
