@@ -4,7 +4,7 @@
 // and Vercel's own Git integration deploys it; deployment completion is read back from Vercel.
 import { call, type NativeConnections } from "./connections.ts";
 
-export interface VercelTarget { kind: "vercel"; projectId: string; project: string; framework: string | null; repo: string | null; repoType: string | null; branch: string; rootDirectory: string }
+export interface VercelTarget { kind: "vercel"; /** Which authorized Vercel account serves it (0 = the first). */ conn?: number; projectId: string; project: string; framework: string | null; repo: string | null; repoType: string | null; branch: string; rootDirectory: string }
 interface Project { id: string; name: string; framework?: string | null; rootDirectory?: string | null; link?: { type?: string; org?: string; repo?: string; productionBranch?: string }; alias?: { domain: string }[]; targets?: { production?: { alias?: string[] } } }
 
 export async function discoverVercel(f: typeof fetch, conn: NonNullable<NativeConnections["vercel"]>, host: string): Promise<{ target: VercelTarget | null; detail: string }> {

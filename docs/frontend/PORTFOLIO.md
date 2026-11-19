@@ -26,6 +26,67 @@ This is recorded through the existing relationship-evidence fields (`relationshi
 `scripts/portfolio-setup.ts`. The relationship text is "Founder-owned business — website designed and developed
 in-house by the Crestmont team". Do not ask the Founder for this again.
 
+## One native-first portfolio engine (Owner, 2026-11-19: "UNIVERSAL NATIVE PORTFOLIO ENGINE")
+
+Every portfolio entry — existing and future — follows one standard. There is no "legacy" path and no remote streaming:
+
+* **Display** (`portfolio.ts previewState`): the REAL production website in a native iframe, rendered by the visitor's own
+  browser, once a real browser has verified it and its own headers still permit this origin. Otherwise an honest notice
+  ("The live website can't be shown here right now — please visit it directly.") with the live link. Never a remote
+  stream, never a demo or a screenshot presented as the website. `selectDisplayMode` never returns `remote`; staging and
+  production run with `REMOTE_BROWSER = "off"` (the `BROWSER` binding stays for verification; the remote-session API
+  refuses every portfolio project). The dormant remote-browser service code is still unit-tested in isolation.
+* **Migration 0111** converted every older entry (`native_migrated_at`): `native_required = 1`, state `checking`, a
+  remote display became `unavailable`, each conversion audited (`portfolio.native_first_migration`). Content, order,
+  images, relationship documentation, consent and the published flag are untouched. A published converted entry whose
+  website already permits this origin keeps its working native display while it is verified (unless the last diagnosis
+  says the frame itself fails); new publications need `native_verified`.
+* **Verification** (`native/verify.ts`, Browser Run in production): the site is loaded directly AND inside Crestmont's
+  frame in the same Chromium, same viewport. Canvases are classified before they are judged — hidden, offscreen,
+  decorative (aria-hidden, behind content, pointer-events none, faint, small), deferred (re-checked after 3 s),
+  OffscreenCanvas, essential — with draw-call counters and context type injected at document start. Only an essential
+  canvas that renders nothing fails; it is an *embedding* failure only when the direct visit renders it, otherwise the
+  website's own defect (`site_render_defect`); a browser that cannot run WebGL is reported (`gpu_limited`), never a pass
+  or fail. Performance is measured in both modes: TTFB, FCP, LCP, CLS, long tasks (TBT), idle and scrolling frame rate,
+  a real click's event duration (the lab stand-in for INP; field INP ≤ 200 ms at p75 needs real-user data), script errors
+  and failed requests, plus the phone view. A slow website is reported as the website's (`site_slow`); only a material
+  embedded-vs-direct difference is attributed to the frame (`iframe_overhead`). The test environment (renderer,
+  software/GPU, viewport) is recorded with the numbers. Each verification costs about a minute of Browser Run, at most
+  `PORTFOLIO_NATIVE_VERIFY_DAILY` (10) a day.
+* **Diagnosis** (`native/diagnostics.ts`): one catalogue of causes (restrictive CSP/XFO, conflicting or per-request
+  policies, DNS-only zones, missing authorization, unlinked or read-only repositories, failed/pending deployments, rules
+  without effect, module errors, WebGL/GPU, hydration, overhead, protected routes exposed, budget, regression…), each
+  with an owner message, whether the frame or the website is at fault, the automatic repair, how it is verified and
+  rolled back, and — only when a person must act — the one action. Stored as `native_diagnosis`; measured performance as
+  `native_perf`.
+* **Owner experience**: Staff → Portfolio shows five plain-English stages (Finding your website → Preparing native
+  compatibility → Testing the real website → Optimizing and verifying → Ready for portfolio publication), one action when
+  needed, and a collapsed developer report (reason, codes, provider, change, every check, findings, direct-vs-embedded
+  performance, environment and budgets).
+* **Regression monitoring and repair**: the daily embed check marks a verified site that stops permitting framing
+  (`portfolio.native_regression`); the 15-minute job re-checks verified entries daily (a full verification weekly) and
+  repairs a regression with the same narrowly scoped change — the Cloudflare rule updated in place by its ref (a
+  changed site policy is matched again), or the repository change proposed again — at most once a day. Native
+  readiness is reported per entry in every release's production data report, separately from uptime.
+* **Multi-account connections**: `PORTFOLIO_{CLOUDFLARE,VERCEL,GITHUB}_TOKEN_2 … _5` (with `_ACCOUNTS_n` / `_TEAM_n`) are
+  searched after the first; whichever account serves a website is recorded on its target (`conn`) and used for it.
+* **Optional GitHub App** (`PORTFOLIO_GITHUB_APP_ID`, `PORTFOLIO_GITHUB_APP_PRIVATE_KEY`, `PORTFOLIO_GITHUB_APP_INSTALLATION_ID`):
+  an App installation can be granted Checks: read, which fine-grained tokens cannot. When configured it is tried first
+  (RS256 app JWT → installation token, refreshed before expiry), and the fail-closed merge gate can verify check runs and
+  merge on its own; without it, header PRs wait for the Owner's merge.
+* **Viewer** (`public/assets/portfolio.js`): only the active project's website is loaded (lazily, near the viewport); at
+  most two stay mounted (the current one and the last visited), older ones are unloaded; viewport switches change CSS
+  sizes only (no reload); scrolling stays inside the frame. Each framed website receives exact-origin
+  `{source:"crestmont-portfolio", type:"visibility", visible}` messages (switching projects, leaving the screen, hidden
+  page). Websites Crestmont builds include `/assets/crestmont-visibility.js` (both starters, identical), which accepts
+  only Crestmont's origins from the framing window and pauses its own CSS animations while not visible.
+* **Proof**: `tests/portfolio-native*.test.ts` (Workers, Pages, Vercel, restrictive CSP rewrite, deployment failure,
+  rule without effect, multi-account, regression repair, GitHub App, merge gate), `tests/portfolio-native-browser.test.ts`
+  (real Chromium: working WebGL, decorative empty canvas, deferred scene, broken scene = website defect, blank bundle,
+  browser-refused frame), and CI's `portfolio-native-display` job (`scripts/native-display-check.mjs`: the normal Staff →
+  Portfolio → Add flow with the real verifier, publishing, desktop/phone visitors, no stream, frame budget, visibility
+  protocol). On production, `scripts/live-native-acceptance.mjs` replaces the old Mode B acceptance.
+
 ## Automatic native readiness for new websites (Owner, 2026-11-18)
 
 > "When I add a website I own, I should not have to modify its security headers manually … Crestmont should
@@ -269,7 +330,7 @@ over a recorded withdrawal. Withdraw it in Staff → Portfolio like any other co
 - *Limitation:* a browser does not tell the framing page whether a cross-origin frame was refused, so the explorer
   relies on the server-side check; that is why it is repeated daily and after every release.
 
-## Display modes (Owner, 2026-11-16)
+## Display modes (Owner, 2026-11-16) — superseded on 2026-11-19 by the native-first engine above (kept for history)
 
 > "Fix Crestmont Website Development's portfolio system so that new websites can be added and displayed interactively
 > without requiring any modifications to the destination websites. We are permanently ending the workflow of

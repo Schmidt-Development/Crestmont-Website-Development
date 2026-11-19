@@ -11,8 +11,8 @@ let pos = db.prepare("SELECT COALESCE(MAX(position), 0) AS p FROM portfolio_proj
 for (const slug of (list ?? "").split(",").filter(Boolean)) {
   const url = `https://${slug}.fixture-portfolio.com/`;
   db.prepare("DELETE FROM portfolio_projects WHERE slug = ?").run(slug);
-  db.prepare(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, position, published, updated_at, created_at, embed_status, embed_url, embed_checked_at, embed_detail, native_required, native_state)
-    VALUES (?, ?, ?, 'Testing', ?, 'TEST DATA', 'TEST DATA fixture site for the scroll-isolation regression check.', '[]', ?, 1, ?, ?, 'allowed', ?, ?, 'fixture', 0, 'legacy')`)
-    .run(`pf_fx_${slug.replace(/-/g, "_")}`, slug, slug.replace(/-/g, " "), url, ++pos, now, now, url, now);
+  db.prepare(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, position, published, updated_at, created_at, embed_status, embed_url, embed_checked_at, embed_detail, native_required, native_state, native_verified_at)
+    VALUES (?, ?, ?, 'Testing', ?, 'TEST DATA', 'TEST DATA fixture site for the scroll-isolation regression check.', '[]', ?, 1, ?, ?, 'allowed', ?, ?, 'fixture', 1, 'native_verified', ?)`)
+    .run(`pf_fx_${slug.replace(/-/g, "_")}`, slug, slug.replace(/-/g, " "), url, ++pos, now, now, url, now, now);
 }
 console.log(`seeded ${list}`);

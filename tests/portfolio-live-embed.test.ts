@@ -63,37 +63,47 @@ test("[PORT-006] [PORT-007] the check only loads public https pages and follows 
   assert.equal(pageFacts(`<title>A &amp;quot;B&amp;quot; &amp;lt;C&amp;gt;</title>`).title, "A &quot;B&quot; &lt;C&gt;", "entities are decoded once, never twice");
 });
 
-test("[PORT-006] [PORT-007] screenshots are optional only while the live site is verified embeddable; otherwise they stay required", () => {
-  const base = { desktop_screenshot_file_id: null, mobile_screenshot_file_id: null, poster_desktop_asset: null, poster_mobile_asset: null, relationship: "Founder-owned", relationship_documented_at: "2026-11-15T00:00:00.000Z", link_verified_at: "2026-11-15T00:00:00.000Z", portfolio_consent_at: "2026-11-15T00:00:00.000Z", portfolio_consent_withdrawn_at: null } as unknown as PortfolioProject;
+test("[PORT-006] [PORT-007] one native-first standard: only the verified live website publishes; screenshots never substitute for it", () => {
+  const base = { desktop_screenshot_file_id: null, mobile_screenshot_file_id: null, poster_desktop_asset: null, poster_mobile_asset: null, relationship: "Founder-owned", relationship_documented_at: "2026-11-15T00:00:00.000Z", link_verified_at: "2026-11-15T00:00:00.000Z", portfolio_consent_at: "2026-11-15T00:00:00.000Z", portfolio_consent_withdrawn_at: null, native_required: 1 } as unknown as PortfolioProject;
   const now = new Date().toISOString();
-  assert.deepEqual(publishBlockers({ ...base, embed_status: "allowed", embed_url: "https://leadhavencollective.com/", embed_checked_at: now }), [], "a live, interactive entry publishes without screenshots");
+  const live = { embed_status: "allowed", embed_url: "https://leadhavencollective.com/", embed_checked_at: now } as const;
+  assert.deepEqual(publishBlockers({ ...base, ...live, native_state: "native_verified" }), [], "the verified native website publishes without screenshots");
+  assert.match(publishBlockers({ ...base, ...live, native_state: "checking" }).join(" "), /not verified as a native embed yet/, "permitting framing is not enough: a real browser must verify it");
   const stale = new Date(Date.now() - EMBED_MAX_AGE_MS - 60_000).toISOString();
   assert.equal(liveEmbed({ embed_status: "allowed", embed_url: "https://leadhavencollective.com/", embed_checked_at: stale }), null, "a stale check no longer counts");
-  const blocked = publishBlockers({ ...base, embed_status: "blocked", embed_url: "https://leadhavencollective.com/", embed_checked_at: now });
-  assert.equal(blocked.length, 2);
-  assert.match(blocked[0], /does not permit embedding/);
+  // A site that refuses framing never publishes on screenshots instead — not even with every screenshot uploaded.
+  const shots = { desktop_screenshot_file_id: "d", mobile_screenshot_file_id: "m" };
+  const blocked = publishBlockers({ ...base, ...shots, embed_status: "blocked", embed_url: "https://leadhavencollective.com/", embed_checked_at: now, native_state: "unavailable" } as PortfolioProject);
+  assert.equal(blocked.length, 1);
+  assert.match(blocked[0], /not verified as a native embed yet/);
   // Consent can never be skipped.
-  assert.ok(publishBlockers({ ...base, portfolio_consent_at: null, embed_status: "allowed", embed_url: "https://leadhavencollective.com/", embed_checked_at: now }).some((b) => /opt-in/.test(b)));
+  assert.ok(publishBlockers({ ...base, ...live, native_state: "native_verified", portfolio_consent_at: null }).some((b) => /opt-in/.test(b)));
 });
 
-test("[PORT-006] [PORT-007] the real production website always wins over a demo: native frame, then remote viewer, then the demo (Owner, 2026-11-18)", () => {
+test("[PORT-006] [PORT-007] what a visitor sees: the verified real website natively, or an honest notice — never a remote stream or a demo in its place (2026-11-19)", () => {
   const demo = "https://site-portfolio-demo.example-demos.dev/";
   const approved = new Set([new URL(demo).origin]);
   const now = new Date().toISOString();
-  const p = (o: Partial<PortfolioProject>) => ({ live_url: "https://site.fixture-portfolio.com", demo_url: demo, demo_status: "ready", demo_verified_at: now, embed_status: "none", embed_url: null, embed_checked_at: null, display_mode: "unchecked", ...o }) as unknown as PortfolioProject;
-  // A ready, verified, approved demo no longer overrides a live website that permits this site.
-  const native = previewState(p({ embed_status: "allowed", embed_url: "https://site.fixture-portfolio.com/", embed_checked_at: now, display_mode: "embed" }), approved, Date.now(), true);
+  const p = (o: Partial<PortfolioProject>) => ({ live_url: "https://site.fixture-portfolio.com", demo_url: demo, demo_status: "ready", demo_verified_at: now, embed_status: "none", embed_url: null, embed_checked_at: null, display_mode: "unchecked", native_required: 1, native_state: "checking", published: 0, ...o }) as unknown as PortfolioProject;
+  const allowed = { embed_status: "allowed", embed_url: "https://site.fixture-portfolio.com/", embed_checked_at: now, display_mode: "embed" } as const;
+  // Verified: the real website, natively — a ready, approved demo never overrides it.
+  const native = previewState(p({ ...allowed, native_state: "native_verified" }), approved, Date.now(), true);
   assert.equal(native.kind, "live");
   assert.equal(native.kind === "live" && native.origin, "https://site.fixture-portfolio.com");
-  // A site that refuses framing is shown through the remote viewer — the real website, not the demo.
-  const remote = previewState(p({ embed_status: "blocked", embed_url: "https://site.fixture-portfolio.com/", embed_checked_at: now, display_mode: "remote" }), approved, Date.now(), true);
-  assert.deepEqual(remote, { kind: "remote", url: "https://site.fixture-portfolio.com/" });
-  // Only when neither live method is available does the demo appear (honestly labelled as a demo by the explorer).
-  assert.equal(previewState(p({ embed_status: "blocked", display_mode: "remote" }), approved, Date.now(), false).kind, "embed", "remote browser off → demo");
-  assert.equal(previewState(p({ embed_status: "error", display_mode: "unavailable" }), approved, Date.now(), true).kind, "embed", "site unavailable → demo");
-  // A stale permission is not trusted; the remote viewer or the demo takes over.
+  // Refusing framing: an honest notice — never the remote viewer, never the demo (even with the remote browser on).
+  assert.deepEqual(previewState(p({ embed_status: "blocked", embed_url: "https://site.fixture-portfolio.com/", embed_checked_at: now, display_mode: "remote" }), approved, Date.now(), true), { kind: "none" });
+  assert.deepEqual(previewState(p({ embed_status: "error", display_mode: "unavailable" }), approved, Date.now(), true), { kind: "none" });
+  // Not yet verified (new entry): not shown live yet.
+  assert.deepEqual(previewState(p({ ...allowed }), approved), { kind: "none" });
+  // A published entry converted from the old standard keeps its working native display while it is verified…
+  assert.equal(previewState(p({ ...allowed, published: 1, native_migrated_at: "2026-11-19T12:00:00.000Z" }), approved).kind, "live");
+  // …unless the last diagnosis found that the frame itself fails.
+  assert.deepEqual(previewState(p({ ...allowed, published: 1, native_migrated_at: "2026-11-19T12:00:00.000Z", native_state: "unavailable", native_diagnosis: JSON.stringify({ codes: ["iframe_render_failure"], embedFailure: true }) }), approved), { kind: "none" });
+  // …and a website's own defect (the same with or without Crestmont) does not hide the real site from its visitors.
+  assert.equal(previewState(p({ ...allowed, published: 1, native_migrated_at: "2026-11-19T12:00:00.000Z", native_state: "unavailable", native_diagnosis: JSON.stringify({ codes: ["site_render_defect"], embedFailure: false }) }), approved).kind, "live");
+  // A stale permission is not trusted.
   const stale = new Date(Date.now() - EMBED_MAX_AGE_MS - 60_000).toISOString();
-  assert.equal(previewState(p({ embed_status: "allowed", embed_url: "https://site.fixture-portfolio.com/", embed_checked_at: stale, display_mode: "embed" }), approved, Date.now(), true).kind, "embed");
+  assert.deepEqual(previewState(p({ ...allowed, embed_checked_at: stale, native_state: "native_verified" }), approved), { kind: "none" });
 });
 
 /** A staff-side stub of two websites: one permits Crestmont (the test origin), one refuses framing. */
@@ -200,7 +210,7 @@ test("[PORT-006] [PORT-007] enter a URL → confirm details → native verificat
   t.close();
 });
 
-test("[PORT-006] [PORT-007] daily re-check and the release pipeline: a site that stops permitting framing falls back to its screenshot", async () => {
+test("[PORT-006] [PORT-007] daily re-check and the release pipeline: a site that stops permitting framing is no longer shown live", async () => {
   let permit = true;
   const t0 = await createTestApp(); const origin = new URL(t0.env.APP_URL!).origin; t0.close();
   const stub: typeof fetch = async () => new Response("<title>x</title>", { headers: { "content-type": "text/html", ...(permit ? { "content-security-policy": `frame-ancestors ${origin}` } : { "x-frame-options": "DENY" }) } });
@@ -237,9 +247,9 @@ test("[PORT-006] [PORT-007] migration 0108: Lead Haven Collective keeps its exis
   // A record the Owner created in Staff → Portfolio (blocked by the old screenshot rule): its copy must survive.
   const t = await createTestApp();
   t.db.raw.exec(`DELETE FROM portfolio_projects WHERE slug = 'lead-haven-collective'`);
-  // (created before migration 0110, so it is an existing — not native-required — entry)
-  t.db.raw.exec(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, technology_summary, position, published, updated_at, created_at, native_required, native_state)
-    VALUES ('pf_owner_lhc', 'lead-haven-collective', 'Lead Haven Collective', 'Lead generation', 'https://leadhavencollective.com/', 'Relationship documentation pending', 'OWNER WRITTEN description of Lead Haven Collective.', '["Owner feature one","Owner feature two"]', NULL, 9, 0, '2026-11-14T00:00:00.000Z', '2026-11-14T00:00:00.000Z', 0, 'legacy')`);
+  // (an existing entry, converted to the native-first standard by migration 0111)
+  t.db.raw.exec(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, technology_summary, position, published, updated_at, created_at, native_required, native_state, native_migrated_at)
+    VALUES ('pf_owner_lhc', 'lead-haven-collective', 'Lead Haven Collective', 'Lead generation', 'https://leadhavencollective.com/', 'Relationship documentation pending', 'OWNER WRITTEN description of Lead Haven Collective.', '["Owner feature one","Owner feature two"]', NULL, 9, 0, '2026-11-14T00:00:00.000Z', '2026-11-14T00:00:00.000Z', 1, 'checking', '2026-11-19T12:00:00.000Z')`);
   t.db.raw.exec(sql);
   let p = (await getBySlug(t.db, "lead-haven-collective"))!;
   assert.equal(p.id, "pf_owner_lhc", "the existing record is used");
@@ -251,10 +261,15 @@ test("[PORT-006] [PORT-007] migration 0108: Lead Haven Collective keeps its exis
   assert.match(p.portfolio_consent_evidence!, /2026-11-15/);
   assert.equal(p.publish_when_ready, 1);
   assert.equal(p.published, 0, "not published by the migration itself");
-  // Not publishable until the live check confirms embedding (it has no screenshots).
-  assert.ok(publishBlockers(p).some((b) => /screenshot/.test(b)));
-  const r = await refreshAllEmbeds(t.db, lhcOrigin, allow);
-  assert.deepEqual(r.find((x) => x.slug === "lead-haven-collective"), { slug: "lead-haven-collective", status: "allowed", mode: "embed", detail: `Content-Security-Policy frame-ancestors allows ${CRESTMONT}`, published: true });
+  // Not publishable until a real browser verifies the live website natively (a permitting header alone is not enough).
+  assert.ok(publishBlockers(p).some((b) => /not verified as a native embed yet/.test(b)));
+  let r = await refreshAllEmbeds(t.db, lhcOrigin, allow);
+  assert.deepEqual(r.find((x) => x.slug === "lead-haven-collective"), { slug: "lead-haven-collective", status: "allowed", mode: "embed", detail: `Content-Security-Policy frame-ancestors allows ${CRESTMONT}` });
+  assert.equal((await getBySlug(t.db, "lead-haven-collective"))!.published, 0, "not published on the header check alone");
+  // Once the native verification passes (the 15-minute job's real browser — recorded here as TEST DATA), it publishes.
+  t.db.raw.exec(`UPDATE portfolio_projects SET native_state = 'native_verified', native_verified_at = '${new Date().toISOString()}' WHERE id = 'pf_owner_lhc'`);
+  r = await refreshAllEmbeds(t.db, lhcOrigin, allow);
+  assert.equal(r.find((x) => x.slug === "lead-haven-collective")!.published, true);
   p = (await getBySlug(t.db, "lead-haven-collective"))!;
   assert.equal(p.published, 1);
   assert.equal(p.publish_when_ready, 0, "one time only: a later unpublish by the Owner stands");
@@ -310,14 +325,14 @@ test("[PORT-006] [PORT-007] production wiring: the check passes through the Work
   const down = await checkEmbed("https://leadhavencollective.com/", CRESTMONT, guardFetch(async () => { throw new TypeError("fetch failed"); }));
   assert.match(down.detail, /did not answer \(TypeError: fetch failed\)/);
 
-  // End to end with the guard in place: the daily job publishes Lead Haven Collective (no screenshots needed).
+  // End to end with the guard in place: the daily job's check reaches the site (publishing waits for native verification).
   // (The test app's origin is http://crestmont.test, so the stubbed site permits exactly that origin here.)
   const appNet = guardFetch(async () => new Response("<title>LHC</title>", { headers: { "content-type": "text/html", "content-security-policy": "frame-ancestors http://crestmont.test" } }));
   const t = await createTestApp({ overrides: { portfolioFetch: appNet } } as never);
   const res = await runJobs(t.env, ["portfolio_embeds"]);
-  assert.match(res.portfolio_embeds.detail, /lead-haven-collective:allowed\+published/);
+  assert.match(res.portfolio_embeds.detail, /lead-haven-collective:allowed/);
   const lhc = (await getBySlug(t.db, "lead-haven-collective"))!;
   assert.equal(lhc.embed_status, "allowed", lhc.embed_detail ?? "");
-  assert.equal(lhc.published, 1, "published once every requirement is met — no screenshot needed");
+  assert.equal(lhc.published, 0, "a permitting header alone does not publish: the native verification must pass first");
   t.close();
 });

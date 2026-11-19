@@ -70,7 +70,12 @@ test("[PORT-NATIVE-E2E] a NEW owned website: refuses → prepared through Cloudf
     assert.equal(p.native_state, "native_verified", `${p.native_reason}\n${JSON.stringify(c, null, 1)}`);
     const by = Object.fromEntries(c.map((x) => [x.name, x]));
     for (const n of ["frame", "content", "javascript", "canvas", "scroll", "click", "mobile", "protected pages"]) assert.ok(by[n]?.ok, `${n}: ${by[n]?.detail}`);
-    assert.match(by.canvas.detail, /\d+×\d+ canvas drew \d+% of its area, animating/, "the WebGL scene really drew and animated inside the frame");
+    assert.match(by.canvas.detail, /\d+×\d+ webgl canvas drew \d+% of its area, animating/, "the WebGL scene really drew and animated inside the frame");
+    // The same website was measured directly and inside Crestmont (performance, environment context recorded).
+    assert.match(by.performance.detail, /embedded: LCP .* direct: LCP /);
+    const perf = JSON.parse(p.native_perf ?? "{}");
+    assert.ok(perf.direct && perf.embedded, "direct and embedded performance recorded");
+    assert.match(perf.environment, /viewport 1440×900/);
     assert.match(by.scroll.detail, /A wheel gesture scrolled the site/);                 // 10: scroll and safe interaction
     assert.match(by["protected pages"].detail, /\/book, \/login/);                       // 11: protected pages still refuse
     // 12: publishable after the existing authorization steps, and the public page frames the real site.
@@ -99,7 +104,11 @@ test("[PORT-NATIVE-E2E] real-browser negatives: a WebGL scene that never draws, 
   try {
     const gl = await add("nogl", "https://nogl.fixture-native.com/");
     assert.equal(gl.native_state, "unavailable");
-    assert.match(gl.native_reason!, /canvas: \d+×\d+ canvas drew nothing \(WebGL\/2D failed to render\)/);
+    // Classified as the website's own defect (also when visited directly) — never blamed on Crestmont's frame.
+    assert.match(gl.native_reason!, /canvas: essential \d+×\d+ canvas drew nothing — it was never initialised \(WebGL\/2D failed to render\) — also when visited directly/);
+    const glDiag = JSON.parse(gl.native_diagnosis ?? "{}");
+    assert.ok(glDiag.codes.includes("site_render_defect"), JSON.stringify(glDiag));
+    assert.equal(glDiag.embedFailure, false, "the frame is not what fails");
     const br = await add("broken", "https://broken.fixture-native.com/");
     assert.equal(br.native_state, "unavailable");
     assert.match(br.native_reason!, /content: The framed page is blank or stuck loading .*JavaScript error/);
@@ -107,4 +116,24 @@ test("[PORT-NATIVE-E2E] real-browser negatives: a WebGL scene that never draws, 
     assert.equal(cdn.native_state, "unavailable");
     assert.match(cdn.native_reason!, /frame: The browser did not load https:\/\/cdn\.fixture-native\.com inside Crestmont's frame/);
   } finally { browserVariance.clear(); close(); }
+});
+
+test("[PORT-NATIVE-E2E] context-aware visuals: a decorative empty background canvas and a late-starting 3D scene pass; a visible scene whose draw calls produce nothing is the website's own defect", { skip, timeout: 300_000 }, async () => {
+  const w = new NativeWorld()
+    .site({ host: "decor.fixture-native.com", baseXfo: null, baseCsp: "frame-ancestors http://crestmont.test", pages: { "/": homepage("Decorative Canvas", { webgl: "decorative" }) } })
+    .site({ host: "lazy.fixture-native.com", baseXfo: null, baseCsp: "frame-ancestors http://crestmont.test", pages: { "/": homepage("Lazy Scene", { webgl: "deferred" }) } })
+    .site({ host: "draws.fixture-native.com", baseXfo: null, baseCsp: "frame-ancestors http://crestmont.test", pages: { "/": homepage("Broken Draws", { webgl: "broken-draws" }) } });
+  const { add, close } = await world(w, { PORTFOLIO_CLOUDFLARE_TOKEN: "" });
+  try {
+    const decor = await add("decor", "https://decor.fixture-native.com/");
+    assert.equal(decor.native_state, "native_verified", decor.native_reason!);
+    assert.match(checks(decor).find((c) => c.name === "canvas")!.detail, /decorative layer .* harmless/);
+    const lazy = await add("lazy", "https://lazy.fixture-native.com/");
+    assert.equal(lazy.native_state, "native_verified", lazy.native_reason!);
+    assert.match(checks(lazy).find((c) => c.name === "canvas")!.detail, /webgl canvas drew \d+% of its area/);
+    const draws = await add("draws", "https://draws.fixture-native.com/");
+    assert.equal(draws.native_state, "unavailable");
+    assert.match(draws.native_reason!, /essential 480×480 webgl canvas drew nothing \(\d+ draw calls produced no visible pixels\).*also when visited directly/);
+    assert.ok(JSON.parse(draws.native_diagnosis!).codes.includes("site_render_defect"));
+  } finally { close(); }
 });

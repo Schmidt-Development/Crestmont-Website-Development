@@ -11,10 +11,12 @@
 //   late-paint    frame-ancestors 'none', a dark empty page whose content fades in after 1.5 s (as Get Every Invoice
 //                 Paid does on production)                                → Mode B (remote)
 //   allowed       frame-ancestors <Crestmont origin>                     → Mode A (native embed)
+//   allowed2      the same, a second site (switching projects, the frame budget and the visibility protocol)
 //   unavailable   does not answer                                        → Mode C (honest fallback)
 export const FIXTURE_DOMAIN = "fixture-portfolio.com";
-export const FIXTURES = ["fa-none", "xfo-deny", "heavy-js", "late-paint", "allowed", "unavailable"];
-export const EXPECTED_MODE = { "fa-none": "remote", "xfo-deny": "remote", "heavy-js": "remote", "late-paint": "remote", allowed: "embed", unavailable: "unavailable" };
+export const FIXTURES = ["fa-none", "xfo-deny", "heavy-js", "late-paint", "allowed", "allowed2", "unavailable"];
+// Native-first (2026-11-19): a site that refuses framing is never streamed — honest notice and live link (Mode C).
+export const EXPECTED_MODE = { "fa-none": "unavailable", "xfo-deny": "unavailable", "heavy-js": "unavailable", "late-paint": "unavailable", allowed: "embed", allowed2: "embed", unavailable: "unavailable" };
 
 // Fixed, known positions (CSS px of the remote page) so the check can aim at them at any device width (≥ 390).
 export const LAYOUT = {
@@ -84,6 +86,8 @@ export function fixtureResponse(url, origin) {
   const headers = { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" };
   if (name === "fa-none" || name === "heavy-js" || name === "late-paint") headers["content-security-policy"] = "frame-ancestors 'none'";
   if (name === "xfo-deny") headers["x-frame-options"] = "DENY";
-  if (name === "allowed") headers["content-security-policy"] = `frame-ancestors 'self' ${origin}`;
+  // A correctly prepared site: public pages permit Crestmont; its sign-in page keeps refusing framing (the native
+  // standard — Crestmont's verification refuses a site whose sensitive pages could be framed).
+  if (name === "allowed" || name === "allowed2") headers["content-security-policy"] = u.pathname.startsWith("/login") ? "frame-ancestors 'none'" : `frame-ancestors 'self' ${origin}`;
   return { status: 200, headers, body: page(name, u.pathname, { long: name === "xfo-deny", anim: name === "heavy-js", late: name === "late-paint" }) };
 }

@@ -3,11 +3,11 @@
 // expose, log or commit token values. Confirm which accounts, projects, domains and repositories the connections
 // actually authorize."). Every call here is a GET. The report names accounts, zones, projects, domains and repositories
 // and the permissions that are missing — never a token, never a secret, never response bodies beyond those names.
-import { call, ProviderError, type NativeConnections } from "./connections.ts";
+import { call, githubReady, ProviderError, type NativeConnections } from "./connections.ts";
 
 type Env<T> = { result: T; result_info?: { total_pages?: number; total_count?: number } };
 export interface ProviderReport { connected: boolean; authenticated: boolean; identity: string | null; scope: Record<string, unknown>; missing: string[]; errors: string[] }
-export interface ConnectionsReport { at: string; cloudflare: ProviderReport; vercel: ProviderReport; github: ProviderReport }
+export interface ConnectionsReport { at: string; cloudflare: ProviderReport; vercel: ProviderReport; github: ProviderReport; /** Further authorized accounts (multi-account). */ more?: { label: string; report: ProviderReport }[] }
 
 const empty = (): ProviderReport => ({ connected: false, authenticated: false, identity: null, scope: {}, missing: [], errors: [] });
 const msg = (e: unknown) => (e instanceof ProviderError ? `${e.status || "network"}: ${e.message}` : (e as Error).message).slice(0, 200);
@@ -79,12 +79,24 @@ export async function verifyGithub(f: typeof fetch, conn: NativeConnections["git
   const rep = empty();
   if (!conn) return rep;
   rep.connected = true;
+  if (conn.app) {
+    try { await githubReady(f, [conn]); } catch (e) { rep.errors.push(`GitHub App installation ${conn.app.installation}: ${msg(e)}`); return rep; }
+    // An installation token reads its repositories from /installation/repositories (no /user).
+    const inst = await tryRead(rep, "list the installation's repositories", "GitHub App: Metadata read", () => call<{ repositories: { full_name: string; archived?: boolean; default_branch: string; permissions?: { push?: boolean } }[] }>(f, "github", conn.token, "/installation/repositories", { query: { per_page: "100" } }));
+    if (!inst) return rep;
+    rep.authenticated = true; rep.identity = `GitHub App ${conn.app.id} (installation ${conn.app.installation})`;
+    return probeRepos(f, conn, rep, inst.repositories.map((r) => ({ ...r, permissions: { push: true } })));
+  }
   const me = await tryRead(rep, "read the token's user", "a valid GitHub token", () => call<{ login: string }>(f, "github", conn.token, "/user"));
   const repos = await tryRead(rep, "list repositories", "Metadata: Read", () => call<{ full_name: string; archived?: boolean; default_branch: string; permissions?: { push?: boolean; admin?: boolean } }[]>(f, "github", conn.token, "/user/repos", { query: { per_page: "100", sort: "pushed" } }));
   rep.authenticated = !!me?.login || !!repos;
   if (!rep.authenticated) { rep.errors.push("the token did not authenticate"); return rep; }
   rep.identity = me?.login ?? "fine-grained token";
-  const list = (repos ?? []).filter((r) => !r.archived);
+  return probeRepos(f, conn, rep, repos ?? []);
+}
+
+async function probeRepos(f: typeof fetch, conn: NonNullable<NativeConnections["github"]>, rep: ProviderReport, repos: { full_name: string; archived?: boolean; default_branch: string; permissions?: { push?: boolean; admin?: boolean } }[]): Promise<ProviderReport> {
+  const list = repos.filter((r) => !r.archived);
   // The merge gate needs to read checks, statuses and protection: test them on one writable repository (read-only).
   const probe = list.find((r) => r.permissions?.push);
   const perms: Record<string, string> = {};
@@ -107,5 +119,9 @@ export async function verifyGithub(f: typeof fetch, conn: NativeConnections["git
 
 export async function verifyConnections(f: typeof fetch, conn: NativeConnections): Promise<ConnectionsReport> {
   const [cloudflare, vercel, github] = await Promise.all([verifyCloudflare(f, conn.cloudflare), verifyVercel(f, conn.vercel), verifyGithub(f, conn.github)]);
-  return { at: new Date().toISOString(), cloudflare, vercel, github };
+  const more: { label: string; report: ProviderReport }[] = [];
+  for (const [i, c] of (conn.more?.cloudflare ?? []).entries()) more.push({ label: `cloudflare (account ${i + 2})`, report: await verifyCloudflare(f, c) });
+  for (const [i, c] of (conn.more?.vercel ?? []).entries()) more.push({ label: `vercel (account ${i + 2})`, report: await verifyVercel(f, c) });
+  for (const [i, c] of (conn.more?.github ?? []).entries()) more.push({ label: `github (account ${i + 2})`, report: await verifyGithub(f, c) });
+  return { at: new Date().toISOString(), cloudflare, vercel, github, ...(more.length ? { more } : {}) };
 }

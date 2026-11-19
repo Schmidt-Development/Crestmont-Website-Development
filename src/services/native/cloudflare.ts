@@ -14,7 +14,7 @@
 // already exactly right.
 import { call, type NativeConnections } from "./connections.ts";
 
-export interface CloudflareTarget { kind: "cloudflare"; accountId: string; zoneId: string; zone: string; serving: string;
+export interface CloudflareTarget { kind: "cloudflare"; accountId: string; zoneId: string; zone: string; serving: string; /** Which authorized Cloudflare account serves it (multi-account; 0 = the first). */ conn?: number;
   /** A zone rule can set this host's headers (it is in a connected zone and proxied by Cloudflare). */
   ruleCapable: boolean; pages?: { project: string; repo: string | null; branch: string | null; destination: string; root: string; buildCommand: string } }
 interface Zone { id: string; name: string; status: string; account: { id: string } }

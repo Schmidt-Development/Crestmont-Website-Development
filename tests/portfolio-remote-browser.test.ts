@@ -1,6 +1,7 @@
-// Automatic portfolio display modes and the remote browser (Owner, 2026-11-16: "PERMANENT AUTOMATIC INTERACTIVE
-// PORTFOLIO SYSTEM"). A new website is added by URL alone; Crestmont picks Mode A (native embed), Mode B (remote
-// interactive browser) or Mode C (honest fallback) from the site's own headers — never by changing the site.
+// Portfolio display selection and the (now dormant) remote browser. Since 2026-11-19 ("UNIVERSAL NATIVE PORTFOLIO
+// ENGINE") every entry follows one native-first standard: the real website natively, or an honest notice with the live
+// link — never a remote stream. The remote-browser service code remains and is still tested in isolation, but no
+// portfolio entry can be shown through it and it is switched off in staging and production.
 // These tests pin the selection rules, the security policy, the admission limits, the session core (with a fake
 // Chrome DevTools connection) and the API. The real-browser end-to-end check is scripts/remote-browser-check.mjs (CI).
 // TEST DATA only; every network answer is a local stub.
@@ -30,18 +31,18 @@ const sites = (origin: string): typeof fetch => async (input) => {
 };
 
 // ── Selection rules: the regression guard for the whole system ──
-test("[PORT-006] [PORT-007] display-mode selection: allowed → A, refused → B (C where the remote browser is off), unreachable → C", () => {
+test("[PORT-006] [PORT-007] display selection (native-first, 2026-11-19): allowed → native embed; refused or unreachable → honest notice — never the remote browser, whether it is on or off", () => {
   const cases: [Parameters<typeof selectDisplayMode>[0], boolean, string][] = [
     [{ status: "allowed", detail: "frame-ancestors allows" }, true, "embed"],
     [{ status: "allowed", detail: "no restriction" }, false, "embed"],
-    [{ status: "blocked", detail: "Content-Security-Policy frame-ancestors 'none'" }, true, "remote"],
-    [{ status: "blocked", detail: "X-Frame-Options: DENY" }, true, "remote"],
+    [{ status: "blocked", detail: "Content-Security-Policy frame-ancestors 'none'" }, true, "unavailable"],
+    [{ status: "blocked", detail: "X-Frame-Options: DENY" }, true, "unavailable"],
     [{ status: "blocked", detail: "X-Frame-Options: DENY" }, false, "unavailable"],
     [{ status: "error", detail: "the site did not answer" }, true, "unavailable"],
     [{ status: "error", detail: "a bot check Crestmont does not bypass" }, true, "unavailable"],
   ];
   for (const [r, on, mode] of cases) assert.equal(selectDisplayMode(r, on).mode, mode, `${r.status} / remote ${on ? "on" : "off"}`);
-  assert.match(selectDisplayMode({ status: "blocked", detail: "X" }, true).reason, /site itself is not changed/);
+  assert.match(selectDisplayMode({ status: "blocked", detail: "X" }, true).reason, /prepares owned websites for native display instead of streaming them/);
 });
 
 test("[PORT-006] remote browser is enabled only with REMOTE_BROWSER=on AND its bindings (Browser Run + Durable Object)", () => {
@@ -102,56 +103,35 @@ test("[PORT-006] [PORT-007] add by URL (new entries, 2026-11-18): a site that re
   t.close();
 });
 
-test("[PORT-006] [PORT-007] existing (legacy) entries keep the automatic display modes: refused → Mode B with its limits; publishing and every public surface unchanged", async () => {
+test("[PORT-006] [PORT-007] an existing entry converted to the native-first standard whose site refuses framing is never streamed: honest notice, live link, publishing waits for native verification", async () => {
   const t0 = await createTestApp(); const origin = new URL(t0.env.APP_URL!).origin; t0.close();
   const t = await createTestApp({ ...REMOTE_ON, overrides: { portfolioFetch: sites(origin) } } as never);
   const owner = await createStaff(t.db, "owner");
   const o = await t.client().login(owner.email, TEST_PASSWORD);
   await o.post("/staff/portfolio", { name: "fa-none", slug: "fa-none", industry: "Testing", live_url: "https://fa-none.fixture-portfolio.com/", description: "fa-none is a TEST DATA website.", features: "", technology_summary: "", relationship: "Relationship documentation pending" });
-  // An entry that existed before native readiness (migration 0110 marks those native_required = 0).
-  await t.db.prepare(`UPDATE portfolio_projects SET native_required = 0, native_state = 'legacy' WHERE slug = 'fa-none'`).run();
+  // As migration 0111 leaves an existing entry: converted, published (it was before), its old Mode B display gone.
+  await t.db.prepare(`UPDATE portfolio_projects SET native_migrated_at = '2026-11-19T12:00:00.000Z', published = 1, display_mode = 'unavailable' WHERE slug = 'fa-none'`).run();
   const id = (await getBySlug(t.db, "fa-none"))!.id;
   await o.post(`/staff/portfolio/${id}/embed-check`, {});
   const fa = (await getBySlug(t.db, "fa-none"))!;
-  assert.equal(fa.display_mode, "remote");
+  assert.equal(fa.display_mode, "unavailable");
+  assert.notEqual(fa.native_state, "native_verified");
   const ed = await o.get(`/staff/portfolio/${fa.id}`);
   const edh = await ed.text();
-  assert.match(edh, /data-display-mode="remote"/);
-  assert.match(edh, /Mode B — remote interactive browser/);
-  assert.match(edh, /data-testid="pf-remote-limits"/);
-  assert.match(edh, /data-kind="remote"[^>]*data-remote-slug="fa-none"/);
-  assert.match(edh, /data-preview="[0-9a-f]{48}"/);
+  assert.match(edh, /data-testid="pf-native-stages"/);
+  assert.doesNotMatch(edh, /data-kind="remote"|data-remote-slug|Mode B/);
   assert.doesNotMatch(ed.headers.get("content-security-policy")!, /fa-none\.fixture/, "a blocked site is never framed");
-  assert.equal(ed.headers.get("cache-control"), "no-store");
-  assert.deepEqual(publishBlockers(fa).filter((b) => /screenshot/i.test(b)), []);
-  assert.ok(publishBlockers(fa).some((b) => /opt-in/.test(b)), "owner consent still required");
-  await o.post(`/staff/portfolio/${fa.id}/verify-link`, { verified_on: new Date().toISOString().slice(0, 10) });
-  await o.post(`/staff/portfolio/${fa.id}/relationship`, { relationship: "TEST DATA fixture", evidence: "TEST DATA engagement letter on file" });
-  await o.post(`/staff/portfolio/${fa.id}/consent`, { given_by: "Test Owner", method: "written", given_on: new Date().toISOString().slice(0, 10), evidence: "TEST DATA consent email on file" });
-  assert.equal((await o.post(`/staff/portfolio/${fa.id}/publish`, {})).status, 303);
+  assert.ok(publishBlockers(fa).some((b) => /not verified as a native embed yet/.test(b)), "publishing waits for native verification");
+  // Published already (it was before the conversion): every public surface shows the honest notice and the live link.
   for (const path of ["/portfolio/fa-none", "/portfolio", "/"]) {
     const h = await (await t.client().get(path)).text();
-    assert.match(h, /data-kind="remote"[^>]*data-remote-slug="fa-none"/, path);
-    assert.match(h, /Live website · remote view/, path);
+    assert.doesNotMatch(h, /data-kind="remote"|data-remote-slug|remote view/, path);
     assert.doesNotMatch(h, /data-frame-url="https:\/\/fa-none/, path);
+    assert.match(h, /href="https:\/\/fa-none\.fixture-portfolio\.com\/"[^>]*>Visit live website/, path);
   }
-  t.close();
-});
-
-test("[PORT-006] remote browser off in an environment: refused legacy sites fall back to Mode C with the live link", async () => {
-  const t0 = await createTestApp(); const origin = new URL(t0.env.APP_URL!).origin; t0.close();
-  const t = await createTestApp({ overrides: { portfolioFetch: sites(origin) } } as never);
-  const owner = await createStaff(t.db, "owner");
-  const o = await t.client().login(owner.email, TEST_PASSWORD);
-  await o.post("/staff/portfolio", { name: "fa", slug: "fa", industry: "Testing", live_url: "https://fa-none.fixture-portfolio.com/", description: "fa is a TEST DATA website that refuses framing.", features: "", technology_summary: "", relationship: "Relationship documentation pending" });
-  await t.db.prepare(`UPDATE portfolio_projects SET native_required = 0, native_state = 'legacy' WHERE slug = 'fa'`).run();
-  const id = (await getBySlug(t.db, "fa"))!.id;
-  await o.post(`/staff/portfolio/${id}/embed-check`, {});
-  const p = (await getBySlug(t.db, "fa"))!;
-  assert.equal(p.display_mode, "unavailable");
-  const h = await (await o.get(`/staff/portfolio/${p.id}`)).text();
-  assert.match(h, /Mode C — unavailable/);
-  assert.doesNotMatch(h, /data-kind="remote"/);
+  // The remote-session API refuses it: nothing in the portfolio can start a stream.
+  const res = await t.client().request("POST", "/api/portfolio/remote-sessions", { body: JSON.stringify({ slug: "fa-none" }), headers: { origin: "http://crestmont.test", "content-type": "application/json" } });
+  assert.equal(res.status, 409);
   t.close();
 });
 
@@ -372,14 +352,16 @@ test("[PORT-006] session core: a visitor who leaves, or a browser that crashes, 
   }
 });
 
-test("[PORT-006] staging and production wire the remote browser with caps that stay inside the included allowance", async () => {
+test("[PORT-006] staging and production keep the Browser Run binding for native verification and switch remote streaming off", async () => {
   const toml = (await import("node:fs")).readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
   for (const env of ["staging", "production"]) {
     const block = toml.split(`[env.${env}]`)[1]!.split(/\n\[env\.|\n# Secrets/)[0]!;
     assert.match(block, /browser = \{ binding = "BROWSER" \}/, env);
     assert.match(block, /name = "PORTFOLIO_BROWSER", class_name = "PortfolioBrowser"/, env);
     assert.match(block, /new_sqlite_classes = \["PortfolioBrowser"\]/, env);
-    assert.match(block, /REMOTE_BROWSER = "on", REMOTE_BROWSER_MAX_CONCURRENT = "3", REMOTE_BROWSER_DAILY_MINUTES = "20"/, env);
+    // Native-first (2026-11-19): remote streaming is switched off — no portfolio website is ever streamed, and no
+    // Browser Run time is spent on it (the BROWSER binding stays: it runs the native verification).
+    assert.match(block, /REMOTE_BROWSER = "off"/, env);
   }
   const worker = (await import("node:fs")).readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
   assert.match(worker, /export \{ PortfolioBrowser \}/);
@@ -398,7 +380,7 @@ test("[PORT-006] release acceptance intake: the Add steps for real addresses —
   assert.equal(res.status, 200);
   const j = await res.json() as { remoteBrowser: { enabled: boolean }; results: { slug: string | null; mode: string; created: boolean; published: boolean; preview: string | null; error?: string }[] };
   assert.equal(j.remoteBrowser.enabled, true);
-  assert.deepEqual(j.results.map((r) => [r.mode, r.created, r.published]), [["remote", true, false], ["remote", true, false], ["embed", false, true], ["unavailable", true, false], ["unavailable", false, false]]);
+  assert.deepEqual(j.results.map((r) => [r.mode, r.created, r.published]), [["unavailable", true, false], ["unavailable", true, false], ["embed", false, true], ["unavailable", true, false], ["unavailable", false, false]], "refused sites are never streamed");
   assert.equal(j.results[2]!.slug, "existing-allowed", "an existing project for the same site is re-checked, not duplicated");
   assert.equal(j.results[4]!.error, "invalid", "a private address is refused outright");
   for (const r of j.results.slice(0, 4)) assert.match(r.preview!, /^[0-9a-f]{48}$/);

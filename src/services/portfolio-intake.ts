@@ -1,7 +1,8 @@
 // Release acceptance of the automatic display system on real websites (Owner, 2026-11-16: "use https://premiuminvoices.com/,
 // https://lendingforbeginners.com/ and https://leadhavencollective.com/ … Test the normal Add workflow including
 // automatic mode selection"). For each address it runs the same steps as Staff → Portfolio → Add a project — read the
-// page once, pre-fill name/slug/description, create the project UNPUBLISHED, check it and select its display mode — or,
+// page once, pre-fill name/slug/description, create the project UNPUBLISHED, check it and select its display (the native
+// embed, or the honest unavailable notice — never a remote stream since 2026-11-19) — or,
 // when a project for that site already exists, only re-checks it. Then it issues a one-hour, view-only preview link so
 // the release pipeline can drive the result in a real browser. Nothing is published, no relationship or consent is
 // recorded (those stay for a person with the owner's documentation), and the destination websites are never changed.
@@ -39,9 +40,7 @@ export async function intakeForAcceptance(db: Db, origin: string, fetcher: typeo
       const description = (check.description ?? "").trim().length >= 20 ? check.description!.trim().slice(0, 4000)
         : `${name} — the live website at ${site}. Added for review; the description and features are to be confirmed by staff before publishing.`;
       ({ id } = await pf.createProject(db, SYSTEM, { name, slug, industry: "To be confirmed by staff", live_url: check.url ?? u.toString(), description, features: "", technology_summary: "", relationship: "Relationship documentation pending" }));
-      // Release-acceptance entries exist to exercise the automatic display modes, including the remote browser, on
-      // third-party test sites; they are never published, so they keep the legacy selection (not native-required).
-      await db.prepare(`UPDATE portfolio_projects SET native_required = 0, native_state = 'legacy' WHERE id = ?`).bind(id).run();
+      // One native-first standard (2026-11-19): acceptance entries follow it like every other entry (never streamed).
       await pf.recordEmbedCheck(db, id, check, null, remoteEnabled);
       created = true;
     }

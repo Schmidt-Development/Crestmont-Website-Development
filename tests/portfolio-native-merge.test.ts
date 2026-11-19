@@ -82,3 +82,27 @@ test("[PORT-NATIVE-MERGE] through GitHub: pending → not merged and re-checked;
   assert.equal(x.out.merged, true, x.out.detail); assert.match(x.out.detail, /all 2 check\(s\) passed, including the required build/);
   assert.deepEqual(x.w.mergeCalls, [`owner/x#1@${"b".repeat(40)}`], "the merge names the verified head commit");
 });
+
+test("[PORT-NATIVE-MERGE] optional GitHub App: its RS256 token becomes an installation token; the connection reports automatic merging ON (Checks readable) and the header PR merges only after its checks passed", async () => {
+  const { generateKeyPairSync } = await import("node:crypto");
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+  assert.match(privateKey, /BEGIN RSA PRIVATE KEY/, "GitHub's own key format (PKCS#1)");
+  const { connectionsFrom } = await import("../src/services/native/connections.ts");
+  const { verifyGithub } = await import("../src/services/native/verify-connections.ts");
+  const w = new NativeWorld().repo("owner/x");
+  w.appPublicKey = publicKey;
+  const conn = connectionsFrom({ PORTFOLIO_GITHUB_APP_ID: "123456", PORTFOLIO_GITHUB_APP_INSTALLATION_ID: "987654", PORTFOLIO_GITHUB_APP_PRIVATE_KEY: privateKey, PORTFOLIO_GITHUB_TOKEN: "gh-test-token" });
+  assert.ok(conn.github?.app, "the App is the first GitHub connection");
+  assert.equal(conn.more?.github.length, 1, "the personal token stays as a further account");
+  const rep = await verifyGithub(w.fetchApi, conn.github);
+  assert.equal(rep.authenticated, true, JSON.stringify(rep));
+  assert.match(rep.identity!, /GitHub App 123456 \(installation 987654\)/);
+  assert.match(String(rep.scope.automaticMerging), /^on — /);
+  assert.equal(w.appTokensMinted, 1);
+  // A forged key is refused by GitHub (here: the world checks the signature).
+  const other = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+  const bad = connectionsFrom({ PORTFOLIO_GITHUB_APP_ID: "123456", PORTFOLIO_GITHUB_APP_INSTALLATION_ID: "987654", PORTFOLIO_GITHUB_APP_PRIVATE_KEY: other.privateKey });
+  const badRep = await verifyGithub(w.fetchApi, bad.github);
+  assert.equal(badRep.authenticated, false);
+  assert.match(badRep.errors.join(" "), /GitHub App installation 987654/);
+});

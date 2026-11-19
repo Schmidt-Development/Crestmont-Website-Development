@@ -25,13 +25,14 @@ import { checkEmbed, evaluateFraming, safePublicUrl, type EmbedCheck } from "../
 import { allowEgressHost, untrustedHostAllowed } from "../../lib/egress.ts";
 import * as pf from "../portfolio.ts";
 import { issuePreviewToken } from "../remote-browser/connect.ts";
-import { anyConnection, connectionSummary, ProviderError, type NativeConnections } from "./connections.ts";
+import { allConns, anyConnection, connectionSummary, githubReady, ProviderError, type NativeConnections } from "./connections.ts";
 import { applyCloudflareRule, discoverCloudflare, pagesDeployment, removeCloudflareRule, rewriteFrameAncestors, type CloudflareTarget } from "./cloudflare.ts";
 import { discoverVercel, vercelDeployment, type VercelTarget } from "./vercel.ts";
 import { advancePr, proposeChange, readFile, repoAccess, type ProposedChange } from "./github.ts";
 import { editPagesHeaders, editVercelJson, EditError } from "./editors.ts";
 import { frameAncestorDirectives, frameAncestorsValue, publicPaths, sensitiveLinks } from "./standard.ts";
 import { verifyNative, type FixtureResponder, type OpenBrowser, type VerifyResult } from "./verify.ts";
+import { codesFor, diagnose, type DiagCode } from "./diagnostics.ts";
 
 export interface NativeDeps {
   db: Db; siteOrigin: string; fetchSite: typeof fetch; fetchApi: typeof fetch; conn: NativeConnections;
@@ -40,8 +41,8 @@ export interface NativeDeps {
 }
 type Target = CloudflareTarget | VercelTarget;
 type Change =
-  | { kind: "cloudflare-rule"; zoneId: string; rulesetId: string; ruleId: string; ref: string; host: string; paths: number; appliedAt: string; action: string; rewrite?: boolean }
-  | { kind: "github-pr"; provider: "vercel" | "cloudflare-pages"; pr: ProposedChange; deployDetail?: string }
+  | { kind: "cloudflare-rule"; zoneId: string; rulesetId: string; ruleId: string; ref: string; host: string; paths: number; appliedAt: string; action: string; rewrite?: boolean; regressionRepairAt?: string }
+  | { kind: "github-pr"; provider: "vercel" | "cloudflare-pages"; pr: ProposedChange; deployDetail?: string; regressionRepairAt?: string }
   /** A change that did not work (a rule without effect, a PR closed unmerged). Never retried on its own: only an
    *  explicit staff re-check starts over, so Crestmont does not reapply rules or reopen PRs in a loop. */
   | { kind: "failed"; what: "cloudflare-rule" | "github-pr"; detail: string; at: string };
@@ -49,11 +50,39 @@ export interface Outcome { state: pf.NativeState; reason: string; verification?:
 
 const RULE_GRACE_MS = 10 * 60_000;
 const VERIFIED_FRESH_MS = 7 * 86_400_000;
+/** A regression (a verified site that later refuses framing) is repaired automatically at most once a day. */
+const REPAIR_INTERVAL_MS = 86_400_000;
 const parse = <T>(s: string | null | undefined): T | null => { try { return s ? (JSON.parse(s) as T) : null; } catch { return null; } };
+// Multi-account: the connection that discovered a target (its `conn` index) is the one used for it afterwards.
+const cfOf = (d: NativeDeps, t?: { conn?: number } | null) => allConns(d.conn, "cloudflare")[t?.conn ?? 0] ?? null;
+const vcOf = (d: NativeDeps, t?: { conn?: number } | null) => allConns(d.conn, "vercel")[t?.conn ?? 0] ?? null;
+const ghOf = (d: NativeDeps, c?: { conn?: number } | null) => allConns(d.conn, "github")[c?.conn ?? 0] ?? null;
+/** Finds the site through every authorized account of a provider, in order; the first that serves it wins. */
+async function discoverAll<T extends object>(conns: unknown[], label: string, find: (conn: never) => Promise<{ target: T | null; detail: string }>, notes: string[]): Promise<(T & { conn?: number }) | null> {
+  for (let i = 0; i < conns.length; i++) {
+    const r = await find(conns[i] as never);
+    if (r.target) { notes.push(`${label}${conns.length > 1 ? ` (account ${i + 1})` : ""}: ${r.detail}`); return i ? { ...r.target, conn: i } : r.target; }
+    if (i === conns.length - 1) notes.push(`${label}: ${conns.length > 1 ? `none of ${conns.length} accounts serves it — ` : ""}${r.detail}`);
+  }
+  return null;
+}
+
+/** The stored diagnosis of an outcome: codes from the exact reason, plus the verifier's findings (frame vs website). */
+export function outcomeDiagnosis(o: { state: pf.NativeState; reason: string; verification?: VerifyResult | null }, at = nowIso()) {
+  const codes: DiagCode[] = codesFor(o.state, o.reason);
+  const fs = o.verification?.findings ?? [];
+  for (const f of fs) if ((f.code as DiagCode) && !codes.includes(f.code as DiagCode) && ["iframe_render_failure", "site_render_defect", "js_module_error", "gpu_limited", "iframe_overhead", "site_slow", "interaction_blocked", "scroll_blocked", "mobile_overflow", "frame_not_loaded", "blank_in_frame", "hydration_failure"].includes(f.code)) codes.push(f.code as DiagCode);
+  const d = diagnose(codes, [o.reason, ...fs.map((f) => `${f.kind}/${f.code}${f.blocking ? " (blocking)" : ""}: ${f.detail}`)].join("\n"), at);
+  // The frame itself fails only when a blocking finding is an embedding one (or the reason says the frame refuses).
+  if (fs.length) d.embedFailure = fs.some((f) => f.blocking && f.kind === "embed") || (!o.verification?.ok && !fs.some((f) => f.blocking));
+  if (o.state === "native_verified") d.embedFailure = false;
+  return d;
+}
 
 async function save(db: Db, id: string, prev: pf.PortfolioProject, o: { state: pf.NativeState; reason: string; provider?: string | null; target?: unknown; change?: unknown; verification?: VerifyResult | null }, actorUserId: string | null) {
   const at = nowIso();
-  const sets = ["native_state = ?", "native_reason = ?", "native_updated_at = ?"], vals: unknown[] = [o.state, o.reason.slice(0, 1000), at];
+  const sets = ["native_state = ?", "native_reason = ?", "native_updated_at = ?", "native_diagnosis = ?"], vals: unknown[] = [o.state, o.reason.slice(0, 1000), at, JSON.stringify(outcomeDiagnosis(o, at)).slice(0, 4000)];
+  if (o.verification?.perf) { sets.push("native_perf = ?"); vals.push(JSON.stringify({ at: o.verification.at, ...o.verification.perf }).slice(0, 4000)); }
   if (o.provider !== undefined) { sets.push("native_provider = ?"); vals.push(o.provider); }
   if (o.target !== undefined) { sets.push("native_target = ?"); vals.push(o.target === null ? null : JSON.stringify(o.target)); }
   if (o.change !== undefined) { sets.push("native_change = ?"); vals.push(o.change === null ? null : JSON.stringify(o.change)); }
@@ -95,7 +124,7 @@ async function runVerification(d: NativeDeps, p: pf.PortfolioProject, check: Emb
   if ((await verificationsToday(d.db, now)) >= d.verifyDailyCap) return `Today's real-browser verifications (${d.verifyDailyCap}) are used up; it runs again automatically within a day`;
   const token = await issuePreviewToken(d.db, p.id, 10, "native-verify", now);
   const pageUrl = `${d.siteOrigin}/portfolio/native-verify/${token}`;
-  const res = d.verify ? await d.verify(pageUrl, check.origin!) : await verifyNative(d.openBrowser!, pageUrl, check.origin!, { fixture: d.fixture });
+  const res = d.verify ? await d.verify(pageUrl, check.origin!) : await verifyNative(d.openBrowser!, pageUrl, check.origin!, { fixture: d.fixture, liveUrl: check.url ?? undefined });
   const sens = await sensitiveStillProtected(d, check);
   res.checks.push({ name: "protected pages", ok: sens.ok, detail: sens.detail });
   if (!sens.ok) { res.ok = false; res.summary = `${res.summary.startsWith("Verified") ? "" : res.summary + " · "}protected pages: ${sens.detail}`; }
@@ -111,6 +140,8 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
   const actor = opts.actorUserId ?? null;
   const done = async (o: Outcome & { provider?: string | null; target?: unknown; change?: unknown }) => { await save(d.db, id, p, { ...o, verification: o.verification ?? null }, actor); return o; };
 
+  // A GitHub App connection mints its short-lived installation token before any repository work.
+  await githubReady(d.fetchApi, allConns(d.conn, "github")).catch(() => undefined);
   const check = await checkEmbed(p.live_url, d.siteOrigin, d.fetchSite);
   await pf.recordEmbedCheck(d.db, id, check, actor, d.remoteEnabled);
   if (!safePublicUrl(p.live_url)) return done({ state: "unavailable", reason: "The live link is not a public https:// address" });
@@ -119,7 +150,11 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
 
   if (check.status === "allowed") {
     const fresh = p.native_state === "native_verified" && p.native_verified_at && now - Date.parse(p.native_verified_at) < VERIFIED_FRESH_MS && p.embed_url === check.url;
-    if (fresh && !opts.force) return { state: "native_verified", reason: p.native_reason ?? "Verified" };
+    if (fresh && !opts.force) {
+      // Still verified and still permitted: record the daily re-check (native availability is monitored on its own).
+      await d.db.prepare(`UPDATE portfolio_projects SET native_updated_at = ? WHERE id = ?`).bind(nowIso(), id).run();
+      return { state: "native_verified", reason: p.native_reason ?? "Verified" };
+    }
     const v = await runVerification(d, p, check, now);
     if (typeof v === "string") return done({ state: p.native_state === "native_verified" ? "native_verified" : "checking", reason: `The site permits Crestmont's frame (${check.detail}); ${v}.` });
     return done(v.ok
@@ -133,6 +168,14 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
   }
 
   // ── The site refuses framing ──
+  // Regression repair: a website verified earlier now refuses framing (a later deployment or policy change). Crestmont
+  // prepares it again with the same narrowly scoped, idempotent change (its rule is updated in place by its ref; a
+  // repository change is proposed again on the same branch) — at most once a day, and never for a change that failed.
+  let regression = false;
+  if (p.native_verified_at && change && change.kind !== "failed") {
+    const last = Date.parse(change.regressionRepairAt ?? "") || 0;
+    if (now - last >= REPAIR_INTERVAL_MS) { regression = true; change = null; }
+  }
   if (change?.kind === "failed") return done({ state: "unavailable", reason: `${change.detail} Use "Check again" to start over.` });
   if (change) return followChange(d, p, check, change, now, done);
   if (!anyConnection(d.conn)) return done({ state: "authorization_required", reason: `${check.detail}. ${connectionSummary(d.conn)}: connect the Cloudflare, Vercel and/or GitHub account that hosts this website (Worker secrets PORTFOLIO_CLOUDFLARE_TOKEN, PORTFOLIO_VERCEL_TOKEN, PORTFOLIO_GITHUB_TOKEN) so Crestmont can prepare it. Crestmont never changes a site it cannot prove you control.` });
@@ -143,8 +186,8 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
   const notes: string[] = [];
   try {
     let cf: CloudflareTarget | null = null, vc: VercelTarget | null = null;
-    if (d.conn.cloudflare) { const r = await discoverCloudflare(d.fetchApi, d.conn.cloudflare, host); cf = r.target; notes.push(`Cloudflare: ${r.detail}`); }
-    if (d.conn.vercel) { const r = await discoverVercel(d.fetchApi, d.conn.vercel, host); vc = r.target; notes.push(`Vercel: ${r.detail}`); }
+    cf = await discoverAll<CloudflareTarget>(allConns(d.conn, "cloudflare"), "Cloudflare", (c) => discoverCloudflare(d.fetchApi, c, host), notes);
+    vc = await discoverAll<VercelTarget>(allConns(d.conn, "vercel"), "Vercel", (c) => discoverVercel(d.fetchApi, c, host), notes);
     if (!cf && !vc) return done({ state: "authorization_required", reason: `${check.detail}. ${host} is not served by any connected account (${notes.join("; ")}). If you own it, connect the account that hosts it; Crestmont does not change websites it cannot prove you control.`, provider: null, target: null });
 
     // 1. A proxied Cloudflare zone: Cloudflare's own header rule, no code change, instant, reversible. When the site's
@@ -160,24 +203,28 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
       }
     }
     if (cf?.ruleCapable && (!conflict || rewrite)) {
-      const r = await applyCloudflareRule(d.fetchApi, d.conn.cloudflare!, cf, host, paths, frameAncestorsValue(d.siteOrigin), rewrite);
-      const ch: Change = { kind: "cloudflare-rule", zoneId: cf.zoneId, rulesetId: r.rulesetId, ruleId: r.ruleId, ref: r.ref, host, paths: r.paths, appliedAt: nowIso(), action: r.action, ...(rewrite ? { rewrite: true } : {}) };
-      return done({ state: "preparing", reason: `${describeChange(ch)} Waiting for the site's public pages to answer with the new header.`, provider: `cloudflare-zone (${cf.serving})`, target: cf, change: ch });
+      const r = await applyCloudflareRule(d.fetchApi, cfOf(d, cf)!, cf, host, paths, frameAncestorsValue(d.siteOrigin), rewrite);
+      const ch: Change = { kind: "cloudflare-rule", zoneId: cf.zoneId, rulesetId: r.rulesetId, ruleId: r.ruleId, ref: r.ref, host, paths: r.paths, appliedAt: nowIso(), action: r.action, ...(rewrite ? { rewrite: true } : {}), ...(regression ? { regressionRepairAt: nowIso() } : {}) };
+      return done({ state: "preparing", reason: `${regression ? "Regression repair: the site stopped permitting framing after it was verified. " : ""}${describeChange(ch)} Waiting for the site's public pages to answer with the new header.`, provider: `cloudflare-zone (${cf.serving})`, target: cf, change: ch });
     }
     // 2. A Git-linked Vercel or Pages project: the change goes through that repository.
     const repoTarget = vc?.repo ? { provider: "vercel" as const, repo: vc.repo, branch: vc.branch } : cf?.pages?.repo ? { provider: "cloudflare-pages" as const, repo: cf.pages.repo, branch: cf.pages.branch ?? "main" } : null;
     if (conflict) return done({ state: "unavailable", reason: `${conflict}${rewriteWhy ? `, and Crestmont's Cloudflare rule cannot replace just that directive: ${rewriteWhy}` : ""}. That header comes from the site's own code, so it has to be changed there (only public pages may allow ${new URL(d.siteOrigin).host}); automatic preparation is not attempted. ${notes.join("; ")}.`, provider: vc ? "vercel" : "cloudflare", target: vc ?? cf });
     if (!repoTarget) return done({ state: "unavailable", reason: `${notes.join("; ")}. The project is not linked to a GitHub repository (and is not proxied by a connected Cloudflare zone), so Crestmont has no supported way to change its headers.`, provider: vc ? "vercel" : "cloudflare", target: vc ?? cf });
-    if (!d.conn.github) return done({ state: "authorization_required", reason: `${notes.join("; ")}. Connect GitHub (PORTFOLIO_GITHUB_TOKEN) with access to ${repoTarget.repo} so Crestmont can propose the header change there.`, provider: repoTarget.provider, target: vc ?? cf });
-    const access = await repoAccess(d.fetchApi, d.conn.github, repoTarget.repo, repoTarget.branch);
+    // GitHub: the first authorized account that can push to the repository.
+    let gi = 0, access = { ok: false, detail: "", protectedReviews: false } as Awaited<ReturnType<typeof repoAccess>>;
+    const ghs = allConns(d.conn, "github");
+    for (; gi < ghs.length; gi++) { access = await repoAccess(d.fetchApi, ghs[gi], repoTarget.repo, repoTarget.branch); if (access.ok) break; }
+    if (gi === ghs.length) gi = 0;
+    if (!ghs.length) return done({ state: "authorization_required", reason: `${notes.join("; ")}. Connect GitHub (PORTFOLIO_GITHUB_TOKEN) with access to ${repoTarget.repo} so Crestmont can propose the header change there.`, provider: repoTarget.provider, target: vc ?? cf });
     if (!access.ok) return done({ state: "authorization_required", reason: `${access.detail}.`, provider: repoTarget.provider, target: vc ?? cf });
-    const file = await headerFile(d, repoTarget.provider, vc, cf, repoTarget.repo, repoTarget.branch);
+    const file = await headerFile(d, repoTarget.provider, vc, cf, repoTarget.repo, repoTarget.branch, gi);
     if (typeof file === "string") return done({ state: "unavailable", reason: `${file}. ${notes.join("; ")}.`, provider: repoTarget.provider, target: vc ?? cf });
     const content = repoTarget.provider === "vercel" ? editVercelJson(file.text, paths, frameAncestorsValue(d.siteOrigin)) : editPagesHeaders(file.text, paths, frameAncestorsValue(d.siteOrigin));
     const title = "Allow Crestmont's portfolio to show the public pages natively";
     const body = `Crestmont Website Development shows this website in its portfolio as the real, live site in a native frame.\n\nThis change lets **only these public, read-only pages** be framed by ${frameAncestorsValue(d.siteOrigin).replace("frame-ancestors ", "")}:\n\n${paths.map((x) => `- \`${x}\``).join("\n")}\n\nIt adds \`Content-Security-Policy: ${frameAncestorsValue(d.siteOrigin)}\` on those paths only${repoTarget.provider === "cloudflare-pages" ? " and detaches `X-Frame-Options` there" : ""}. Sign-in, accounts, booking, checkout, payment, API and every other page are not listed and keep refusing framing. No other header, rule or file is changed.\n\nProposed automatically by Crestmont's portfolio onboarding for ${host}.`;
-    const pr = await proposeChange(d.fetchApi, d.conn.github, repoTarget.repo, repoTarget.branch, file.path, content, title, body, !!access.protectedReviews);
-    const ch: Change = { kind: "github-pr", provider: repoTarget.provider, pr };
+    const pr = { ...(await proposeChange(d.fetchApi, ghs[gi], repoTarget.repo, repoTarget.branch, file.path, content, title, body, !!access.protectedReviews)), ...(gi ? { conn: gi } : {}) };
+    const ch: Change = { kind: "github-pr", provider: repoTarget.provider, pr, ...(regression ? { regressionRepairAt: nowIso() } : {}) };
     return followChange(d, { ...p, native_state: "preparing", native_target: JSON.stringify(vc ?? cf) }, check, ch, now, (o) => done({ ...o, provider: repoTarget.provider, target: vc ?? cf, change: ch }));
   } catch (e) {
     const msg = e instanceof ProviderError || e instanceof EditError ? e.message : `Unexpected error: ${(e as Error).message}`;
@@ -198,14 +245,15 @@ async function siteCsp(d: NativeDeps, url: string): Promise<string | null> {
   } catch { return null; } finally { release(); }
 }
 
-async function headerFile(d: NativeDeps, provider: "vercel" | "cloudflare-pages", vc: VercelTarget | null, cf: CloudflareTarget | null, repo: string, branch: string): Promise<{ path: string; text: string | null } | string> {
+async function headerFile(d: NativeDeps, provider: "vercel" | "cloudflare-pages", vc: VercelTarget | null, cf: CloudflareTarget | null, repo: string, branch: string, gi = 0): Promise<{ path: string; text: string | null } | string> {
+  const gh = allConns(d.conn, "github")[gi]!;
   const join = (...xs: string[]) => xs.map((x) => x.replace(/^\/+|\/+$/g, "")).filter(Boolean).join("/");
-  if (provider === "vercel") { const path = join(vc?.rootDirectory ?? "", "vercel.json"); return { path, text: (await readFile(d.fetchApi, d.conn.github!, repo, path, branch))?.text ?? null }; }
+  if (provider === "vercel") { const path = join(vc?.rootDirectory ?? "", "vercel.json"); return { path, text: (await readFile(d.fetchApi, gh, repo, path, branch))?.text ?? null }; }
   const pg = cf!.pages!;
-  if (!pg.buildCommand.trim()) { const path = join(pg.root, pg.destination, "_headers"); return { path, text: (await readFile(d.fetchApi, d.conn.github!, repo, path, branch))?.text ?? null }; }
+  if (!pg.buildCommand.trim()) { const path = join(pg.root, pg.destination, "_headers"); return { path, text: (await readFile(d.fetchApi, gh, repo, path, branch))?.text ?? null }; }
   // With a build step, _headers must come from the folder the build copies as-is; only an existing one is edited.
   for (const c of [join(pg.root, "public", "_headers"), join(pg.root, "static", "_headers"), join(pg.root, pg.destination, "_headers")]) {
-    const f = await readFile(d.fetchApi, d.conn.github!, repo, c, branch);
+    const f = await readFile(d.fetchApi, gh, repo, c, branch);
     if (f) return { path: c, text: f.text };
   }
   return `The Pages project builds with "${pg.buildCommand}" and has no existing _headers file, so Crestmont cannot tell which folder its build publishes unchanged`;
@@ -222,20 +270,22 @@ async function followChange(d: NativeDeps, p: pf.PortfolioProject, check: EmbedC
     if (now - Date.parse(ch.appliedAt) < RULE_GRACE_MS) return done({ state: "preparing", reason: `${describeChange(ch)} Waiting for the site's public pages to answer with the new header (${check.detail}).` });
     // The rule did not take effect (e.g. the origin's response is served in a way zone rules do not rewrite): remove it.
     const cf = parse<CloudflareTarget>(p.native_target);
-    if (cf && d.conn.cloudflare) await removeCloudflareRule(d.fetchApi, d.conn.cloudflare, cf, ch.host).catch(() => false);
+    const cc = cfOf(d, cf);
+    if (cf && cc) await removeCloudflareRule(d.fetchApi, cc, cf, ch.host).catch(() => false);
     const why = `Crestmont's Cloudflare rule for ${ch.host} did not take effect within 10 minutes (the site still answers: ${check.detail}), so it was removed again. The header has to be set where the site's responses are produced.`;
     return done({ state: "unavailable", reason: why, change: { kind: "failed", what: "cloudflare-rule", detail: why, at: nowIso() } satisfies Change });
   }
-  if (!d.conn.github) return done({ state: "authorization_required", reason: `GitHub is no longer connected; ${describeChange(ch)}` });
-  const pr = await advancePr(d.fetchApi, d.conn.github, ch.pr);
+  const gh = ghOf(d, ch.pr as { conn?: number });
+  if (!gh) return done({ state: "authorization_required", reason: `GitHub is no longer connected; ${describeChange(ch)}` });
+  const pr = await advancePr(d.fetchApi, gh, ch.pr);
   const next: Change = { ...ch, pr };
   if (pr.closed) return done({ state: "unavailable", reason: `${pr.detail}. Crestmont does not reopen it by itself.`, change: { kind: "failed", what: "github-pr", detail: `${pr.detail}.`, at: nowIso() } satisfies Change });
   if (!pr.merged) return done({ state: pr.needsApproval ? "authorization_required" : "preparing", reason: pr.detail, change: next });
   // Merged: the provider deploys it through its own Git integration.
   const t = parse<Target>(p.native_target);
   let dep: { state: string; detail: string } = { state: "building", detail: "waiting for the deployment" };
-  if (ch.provider === "vercel" && t?.kind === "vercel" && d.conn.vercel) dep = await vercelDeployment(d.fetchApi, d.conn.vercel, t, pr.mergeSha);
-  else if (ch.provider === "cloudflare-pages" && t?.kind === "cloudflare" && d.conn.cloudflare) { const r = await pagesDeployment(d.fetchApi, d.conn.cloudflare, t); dep = { state: r.commit && pr.mergeSha && r.commit !== pr.mergeSha ? "building" : r.state, detail: r.detail }; }
+  if (ch.provider === "vercel" && t?.kind === "vercel" && vcOf(d, t)) dep = await vercelDeployment(d.fetchApi, vcOf(d, t)!, t, pr.mergeSha);
+  else if (ch.provider === "cloudflare-pages" && t?.kind === "cloudflare" && cfOf(d, t)) { const r = await pagesDeployment(d.fetchApi, cfOf(d, t)!, t); dep = { state: r.commit && pr.mergeSha && r.commit !== pr.mergeSha ? "building" : r.state, detail: r.detail }; }
   next.deployDetail = dep.detail;
   if (dep.state === "failed") return done({ state: "unavailable", reason: `The deployment of ${pr.url} failed (${dep.detail}). Fix the deployment; Crestmont re-checks automatically.`, change: next });
   if (dep.state !== "ready") return done({ state: "preparing", reason: `Merged ${pr.url}; ${dep.detail}.`, change: next });
@@ -243,10 +293,14 @@ async function followChange(d: NativeDeps, p: pf.PortfolioProject, check: EmbedC
 }
 
 /** The 15-minute job: entries in progress every time; settled ones (waiting for authorization, unavailable) at most
- *  every 6 hours, so a missing permission or a fixed deployment is noticed without re-verifying in a loop. Bounded. */
+ *  every 6 hours, so a missing permission or a fixed deployment is noticed without re-verifying in a loop; verified
+ *  ones once a day (regression monitoring). Bounded. */
 export async function advanceAllNative(d: NativeDeps, limit = 10): Promise<{ slug: string; state: string }[]> {
   const settledBefore = new Date((d.now?.() ?? Date.now()) - 6 * 3_600_000).toISOString();
-  const rows = (await d.db.prepare(`SELECT id, slug FROM portfolio_projects WHERE native_required = 1 AND archived_at IS NULL AND (native_state IN ('checking', 'preparing') OR (native_state IN ('authorization_required', 'unavailable') AND COALESCE(native_updated_at, '') < ?)) ORDER BY COALESCE(native_updated_at, '') LIMIT ?`).bind(settledBefore, limit).all<{ id: string; slug: string }>()).results;
+  // Verified entries are re-checked daily (cheap: their headers; a real-browser verification only once it is a week
+  // old), so a later website update that breaks native embedding is noticed and repaired without anyone asking.
+  const verifiedBefore = new Date((d.now?.() ?? Date.now()) - 86_400_000).toISOString();
+  const rows = (await d.db.prepare(`SELECT id, slug FROM portfolio_projects WHERE native_required = 1 AND archived_at IS NULL AND (native_state IN ('checking', 'preparing') OR (native_state IN ('authorization_required', 'unavailable') AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'native_verified' AND COALESCE(native_updated_at, '') < ?)) ORDER BY CASE native_state WHEN 'native_verified' THEN 1 ELSE 0 END, COALESCE(native_updated_at, '') LIMIT ?`).bind(settledBefore, verifiedBefore, limit).all<{ id: string; slug: string }>()).results;
   const out: { slug: string; state: string }[] = [];
   for (const r of rows) { try { out.push({ slug: r.slug, state: (await advanceNative(d, r.id)).state }); } catch (e) { out.push({ slug: r.slug, state: `error: ${(e as Error).message}`.slice(0, 80) }); } }
   return out;
@@ -258,10 +312,10 @@ export async function discoverHosting(d: NativeDeps, host: string): Promise<{ fo
   const notes: string[] = [];
   let found = false;
   try {
-    if (d.conn.cloudflare) { const r = await discoverCloudflare(d.fetchApi, d.conn.cloudflare, host); found ||= !!r.target; notes.push(`Cloudflare: ${r.detail}`); }
-    if (d.conn.vercel) { const r = await discoverVercel(d.fetchApi, d.conn.vercel, host); found ||= !!r.target; notes.push(`Vercel: ${r.detail}`); }
+    found = !!(await discoverAll<CloudflareTarget>(allConns(d.conn, "cloudflare"), "Cloudflare", (c) => discoverCloudflare(d.fetchApi, c, host), notes));
+    found = !!(await discoverAll<VercelTarget>(allConns(d.conn, "vercel"), "Vercel", (c) => discoverVercel(d.fetchApi, c, host), notes)) || found;
   } catch (e) { notes.push((e as Error).message); }
-  if (!d.conn.cloudflare && !d.conn.vercel) notes.push("Only GitHub is connected; a hosting account (Cloudflare or Vercel) is needed to find the site");
+  if (!allConns(d.conn, "cloudflare").length && !allConns(d.conn, "vercel").length) notes.push("Only GitHub is connected; a hosting account (Cloudflare or Vercel) is needed to find the site");
   return { found, detail: notes.join("; ") };
 }
 

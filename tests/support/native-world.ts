@@ -1,3 +1,4 @@
+import { createVerify } from "node:crypto";
 // A hermetic stand-in for the providers the native-readiness automation talks to (Cloudflare, Vercel, GitHub) and for
 // the websites themselves — TEST DATA only, nothing external is contacted. The sites' response headers are derived
 // from what the fake providers actually hold: a Cloudflare rule only changes them when it is in the zone (and
@@ -16,7 +17,7 @@ export interface Site {
   redirectTo?: string;                     // "/" redirects to this absolute URL
 }
 interface Rule { id: string; ref?: string; expression: string; action: string; action_parameters: { headers: Record<string, { operation: string; value?: string }> }; enabled?: boolean; description?: string }
-interface Zone { id: string; name: string; account: string; rulesets: { id: string; rules: Rule[] } | null; dns: { name: string; type: string; proxied: boolean }[]; workerDomains: { hostname: string; service: string }[] }
+interface Zone { id: string; name: string; account: string; /** The API token whose account holds this zone (multi-account). */ token: string; rulesets: { id: string; rules: Rule[] } | null; dns: { name: string; type: string; proxied: boolean }[]; workerDomains: { hostname: string; service: string }[] }
 interface Repo { full: string; push: boolean; protectedReviews: boolean; branches: Record<string, { sha: string; files: Record<string, string> }>; pulls: { number: number; head: string; base: string; state: "open" | "closed"; merged: boolean; merge_commit_sha: string | null; title: string; created_at: string }[]; closeNextPr?: boolean;
   /** What CI reports on a PR's head commit (default: one passing check run "build"). */
   checks: { name: string; status: string; conclusion: string | null }[]; statuses: { context: string; state: string }[];
@@ -44,8 +45,8 @@ export class NativeWorld {
   writes: string[] = [];
 
   site(s: Site) { this.sites.set(s.host, s); return this; }
-  cloudflareZone(name: string, account: string, opts: { proxied?: string[]; workerDomain?: { hostname: string; service: string } } = {}) {
-    this.zones.push({ id: `zone_${name.replace(/\W/g, "")}`.padEnd(32, "0").slice(0, 32), name, account, rulesets: null, dns: (opts.proxied ?? []).map((n) => ({ name: n, type: "A", proxied: true })), workerDomains: opts.workerDomain ? [opts.workerDomain] : [] });
+  cloudflareZone(name: string, account: string, opts: { proxied?: string[]; workerDomain?: { hostname: string; service: string }; token?: string } = {}) {
+    this.zones.push({ id: `zone_${name.replace(/\W/g, "")}`.padEnd(32, "0").slice(0, 32), name, account, token: opts.token ?? "cf-test-token", rulesets: null, dns: (opts.proxied ?? []).map((n) => ({ name: n, type: "A", proxied: true })), workerDomains: opts.workerDomain ? [opts.workerDomain] : [] });
     return this;
   }
   repo(full: string, opts: { push?: boolean; protectedReviews?: boolean; branch?: string; files?: Record<string, string>; checks?: Repo["checks"]; statuses?: Repo["statuses"]; requiredChecks?: string[] } = {}) {
@@ -134,21 +135,33 @@ export class NativeWorld {
     const auth = new Headers(init?.headers).get("authorization") ?? "";
     this.calls.push(`${method} ${u.host}${u.pathname}${u.search}`);
     if (method !== "GET") this.writes.push(`${method} ${u.host}${u.pathname}`);
-    if (!/^Bearer (cf|vc|gh)-test-token$/.test(auth)) return json({ errors: [{ message: "Invalid API token" }], message: "Bad credentials" }, 403);
+    // GitHub App: an RS256 app JWT is exchanged for an installation token (the signature is checked with the App's key).
+    if (u.host === "api.github.com" && /^\/app\/installations\/\d+\/access_tokens$/.test(u.pathname) && method === "POST") {
+      const jwt = auth.replace(/^Bearer /, ""), parts = jwt.split(".");
+      const ok = parts.length === 3 && !!this.appPublicKey && createVerify("RSA-SHA256").update(`${parts[0]}.${parts[1]}`).verify(this.appPublicKey, Buffer.from(parts[2].replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+      if (!ok) return json({ message: "A JSON web token could not be decoded" }, 401);
+      this.appTokensMinted++;
+      return json({ token: "gh-test-token", expires_at: new Date(Date.now() + 3_600_000).toISOString() }, 201);
+    }
+    if (!/^Bearer (cf|vc|gh)\d?-test-token$/.test(auth)) return json({ errors: [{ message: "Invalid API token" }], message: "Bad credentials" }, 403);
+    this.token = auth.slice(7);
     if (u.host === "api.cloudflare.com") return this.cloudflare(u, method, body);
     if (u.host === "api.vercel.com") return this.vercelApi(u);
     if (u.host === "api.github.com") return this.github(u, method, body);
     return json({}, 404);
   };
 
+  private token = "";
+  /** Zones the calling token's account can see (each token is its own Cloudflare account). */
+  private get myZones() { return this.zones.filter((z) => z.token === this.token); }
   private cloudflare(u: URL, method: string, body: { rules?: Rule[] } & Rule | null): Response {
     const p = u.pathname.replace("/client/v4", "");
     let m: RegExpExecArray | null;
-    if (p === "/accounts") return json({ result: [...new Set([...this.zones.map((z) => z.account), ...this.pprojects.map((x) => x.account)])].map((id) => ({ id, name: `Account ${id.slice(0, 4)}` })) });
+    if (p === "/accounts") return json({ result: [...new Set([...this.myZones.map((z) => z.account), ...(this.token === "cf-test-token" ? this.pprojects.map((x) => x.account) : [])])].map((id) => ({ id, name: `Account ${id.slice(0, 4)}` })) });
     if (p === "/user/tokens/verify") return json({ result: { status: "active" } });
-    if (p === "/zones") { const z = this.zones.filter((x) => !u.searchParams.get("name") || x.name === u.searchParams.get("name")); return json({ success: true, result: z.map((x) => ({ id: x.id, name: x.name, status: "active", account: { id: x.account } })) }); }
+    if (p === "/zones") { const z = this.myZones.filter((x) => !u.searchParams.get("name") || x.name === u.searchParams.get("name")); return json({ success: true, result: z.map((x) => ({ id: x.id, name: x.name, status: "active", account: { id: x.account } })) }); }
     if ((m = /^\/zones\/([^/]+)\/dns_records$/.exec(p))) { const z = this.zones.find((x) => x.id === m![1]); return json({ result: (z?.dns ?? []).filter((r) => r.name === u.searchParams.get("name")) }); }
-    if ((m = /^\/accounts\/([^/]+)\/workers\/domains$/.exec(p))) return json({ result: this.zones.filter((z) => z.account === m![1]).flatMap((z) => z.workerDomains).filter((d) => !u.searchParams.get("hostname") || d.hostname === u.searchParams.get("hostname")) });
+    if ((m = /^\/accounts\/([^/]+)\/workers\/domains$/.exec(p))) return json({ result: this.myZones.filter((z) => z.account === m![1]).flatMap((z) => z.workerDomains).filter((d) => !u.searchParams.get("hostname") || d.hostname === u.searchParams.get("hostname")) });
     if ((m = /^\/zones\/([^/]+)\/workers\/routes$/.exec(p))) return json({ result: [] });
     // Like Cloudflare in production: the Pages list refuses a per_page it does not accept (HTTP 400).
     if (/^\/accounts\/[^/]+\/pages\/projects$/.test(p) && u.searchParams.has("per_page")) return json({ success: false, errors: [{ code: 8000024, message: "Invalid list options provided. Review the `page` or `per_page` parameter." }] }, 400);
@@ -203,7 +216,10 @@ export class NativeWorld {
     this.deploy(r.full, pr.base, base.sha, base.files);
   }
 
+  /** The GitHub App's public key (PEM) — set by a test that configures PORTFOLIO_GITHUB_APP_*. */
+  appPublicKey: string | null = null; appTokensMinted = 0;
   private github(u: URL, method: string, body: Record<string, unknown> | null): Response {
+    if (u.pathname === "/installation/repositories") return json({ repositories: [...this.repos.values()].map((r) => ({ full_name: r.full, archived: false, default_branch: Object.keys(r.branches)[0] })) });
     if (u.pathname === "/user") return json({ login: "test-owner" });
     if (u.pathname === "/user/repos") return json([...this.repos.values()].map((r) => ({ full_name: r.full, archived: false, default_branch: Object.keys(r.branches)[0], permissions: { push: r.push, admin: false } })));
     const m = /^\/repos\/([^/]+\/[^/]+)(\/.*)?$/.exec(u.pathname);
@@ -254,11 +270,19 @@ export class NativeWorld {
 }
 
 /** A website's homepage: content, links (public and sensitive), and optionally a WebGL scene or broken script. */
-export function homepage(title: string, opts: { links?: string[]; webgl?: "ok" | "fail"; brokenJs?: boolean } = {}): string {
+export function homepage(title: string, opts: { links?: string[]; webgl?: "ok" | "fail" | "deferred" | "decorative" | "broken-draws"; brokenJs?: boolean } = {}): string {
   const links = (opts.links ?? ["/services", "/about", "/login", "/book"]).map((h) => `<a href="${h}">${h.slice(1)}</a>`).join(" ");
   const gl = opts.webgl === "ok"
     ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>(function(){var c=document.getElementById("globe");var g=c.getContext("webgl");if(!g)return;var t=0;function f(){t+=0.03;g.clearColor(0.05,0.1+0.4*Math.abs(Math.sin(t)),0.6,1);g.clear(g.COLOR_BUFFER_BIT);g.enable(g.SCISSOR_TEST);g.scissor(120+60*Math.sin(t),120,240,240);g.clearColor(0.2,0.8,0.3,1);g.clear(g.COLOR_BUFFER_BIT);g.disable(g.SCISSOR_TEST);requestAnimationFrame(f);}requestAnimationFrame(f);})();</script>`
-    : opts.webgl === "fail" ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>/* the scene fails to initialise: nothing is ever drawn */</script>` : "";
+    : opts.webgl === "fail" ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>/* the scene fails to initialise: nothing is ever drawn */</script>`
+    // A scene that starts 2.5 s after load (lazy 3D, as many sites do): judged once it has had time to initialise.
+    : opts.webgl === "deferred" ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>setTimeout(function(){var c=document.getElementById("globe");var g=c.getContext("webgl");if(!g)return;var t=0;function f(){t+=0.03;g.clearColor(0.6,0.2+0.3*Math.abs(Math.sin(t)),0.1,1);g.clear(g.COLOR_BUFFER_BIT);requestAnimationFrame(f);}requestAnimationFrame(f);},2500);</script>`
+    // A decorative full-screen background canvas that never draws (aria-hidden, behind the content, pointer-events
+    // none) — harmless, and must not block an otherwise working website.
+    : opts.webgl === "decorative" ? `<canvas aria-hidden="true" width="1440" height="900" style="position:fixed;inset:0;width:100vw;height:100vh;z-index:-1;pointer-events:none"></canvas>`
+    // A visible scene that creates its context and issues draw calls that never produce a pixel (a broken shader
+    // pipeline): genuinely broken, on the website itself.
+    : opts.webgl === "broken-draws" ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>(function(){var c=document.getElementById("globe");var g=c.getContext("webgl",{premultipliedAlpha:false});if(!g)return;function f(){g.clearColor(0,0,0,0);g.clear(g.COLOR_BUFFER_BIT);g.drawArrays(g.TRIANGLES,0,3);requestAnimationFrame(f);}requestAnimationFrame(f);})();</script>` : "";
   const body = opts.brokenJs
     ? `<div id="app"></div><script>throw new Error("bundle failed to load")</script>`
     : `<header><nav>${links}</nav></header><main><h1>${title}</h1><p>${title} is a TEST DATA website used to verify Crestmont's native portfolio onboarding. It has real paragraphs of content.</p>${gl}${"<section><h2>Section</h2><p>More TEST DATA content so the page can be scrolled by a visitor.</p></section>".repeat(25)}</main>`;

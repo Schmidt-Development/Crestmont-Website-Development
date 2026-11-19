@@ -7,7 +7,10 @@ import { nowIso } from "../src/lib/db.ts";
 import { publishBlockers, recordPortfolioConsent, withdrawPortfolioConsent, setPublished, type PortfolioProject } from "../src/services/portfolio.ts";
 import type { Actor } from "../src/domain/authz.ts";
 
+// Every requirement but consent met — including the one native-first standard (2026-11-19): the live website verified
+// natively in a real browser, with a fresh embedding check (TEST DATA).
 const ready = (extra: Partial<PortfolioProject> = {}) => ({
+  native_required: 1, native_state: "native_verified", embed_status: "allowed", embed_url: "https://consent-fixture.com/", embed_checked_at: new Date().toISOString(),
   desktop_screenshot_file_id: "f1", mobile_screenshot_file_id: "f2", relationship: "Client website built by Crestmont",
   relationship_documented_at: "2026-10-01T00:00:00.000Z", link_verified_at: "2026-10-02T00:00:00.000Z", ...extra,
 }) as PortfolioProject;
@@ -33,9 +36,9 @@ test("[PORT-005] [PORT-007] FD-13: staff record consent with who/how/when/eviden
   const actor: Actor = { kind: "user", userId: owner.id, roles: [{ role: "owner", organizationId: owner.organizationId }], mfaVerified: true };
   const id = "pf_consent_fixture";
   await t.db.prepare(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, position, published, updated_at, created_at,
-      desktop_screenshot_file_id, mobile_screenshot_file_id, relationship_documented_at, link_verified_at, poster_desktop_asset, poster_mobile_asset, native_required, native_state)
-      VALUES (?, 'consent-fixture', 'Consent Fixture Co', 'Testing', 'https://consent.fixture.example', 'Client website built by Crestmont', 'TEST DATA', '[]', 99, 0, ?, ?, NULL, NULL, ?, ?, '/assets/portfolio/fixture-desktop.webp', '/assets/portfolio/fixture-mobile.webp', 0, 'legacy')`)
-    .bind(id, nowIso(), nowIso(), nowIso(), nowIso()).run();
+      desktop_screenshot_file_id, mobile_screenshot_file_id, relationship_documented_at, link_verified_at, poster_desktop_asset, poster_mobile_asset, native_required, native_state, native_verified_at, embed_status, embed_url, embed_checked_at)
+      VALUES (?, 'consent-fixture', 'Consent Fixture Co', 'Testing', 'https://consent.fixture.example', 'Client website built by Crestmont', 'TEST DATA', '[]', 99, 0, ?, ?, NULL, NULL, ?, ?, '/assets/portfolio/fixture-desktop.webp', '/assets/portfolio/fixture-mobile.webp', 1, 'native_verified', ?, 'allowed', 'https://consent-fixture.com/', ?)`)
+    .bind(id, nowIso(), nowIso(), nowIso(), nowIso(), nowIso(), nowIso()).run();
   await assert.rejects(setPublished(t.db, actor, id, true), /cannot be published yet/);
   await assert.rejects(recordPortfolioConsent(t.db, actor, id, { givenBy: "x", method: "phone", givenOn: "2999-01-01", evidence: "short" }), (e: { issues?: string[] }) => (e.issues ?? []).length === 4);
   await recordPortfolioConsent(t.db, actor, id, { givenBy: "Pat Owner, owner", method: "written", givenOn: "2026-10-30", evidence: "Signed consent form, stored in the project folder" });

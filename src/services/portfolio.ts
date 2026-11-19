@@ -36,6 +36,9 @@ export interface PortfolioProject {
    *  website in a native frame, verified in a real browser; it is never silently shown through the remote browser. */
   native_required?: number; native_state?: NativeState; native_reason?: string | null; native_provider?: string | null; native_target?: string | null;
   native_change?: string | null; native_updated_at?: string | null; native_verified_at?: string | null; native_verification?: string | null;
+  /** Native-first standard (migration 0111): when an older entry was converted, the last diagnosis and the last measured
+   *  direct-vs-embedded performance (JSON, src/services/native/diagnostics.ts and verify.ts). */
+  native_migrated_at?: string | null; native_diagnosis?: string | null; native_perf?: string | null;
 }
 export type NativeState = "checking" | "preparing" | "authorization_required" | "unavailable" | "native_verified" | "legacy";
 /** Staff- and visitor-facing names of the native readiness states. */
@@ -50,20 +53,17 @@ export const NATIVE_LABEL: Record<NativeState, string> = {
 export type DisplayMode = "unchecked" | "embed" | "remote" | "unavailable";
 
 /**
- * Selects how a project is shown, automatically, from the live check (Owner, 2026-11-16):
- *   Mode A embed       — the site's own headers permit framing by this origin: the real site in the explorer's iframe;
- *   Mode B remote      — framing is refused (frame-ancestors / X-Frame-Options) but the site is a reachable public page:
- *                        Crestmont's remote browser renders it — no change to the destination site is ever needed;
- *   Mode C unavailable — neither (unreachable, an error, a bot check Crestmont will not bypass, or the remote browser is
- *                        not configured here): an honest notice and the live link.
+ * Selects how a project is shown from the live check — one native-first standard for every entry (Owner, 2026-11-19):
+ *   embed       — the site's own headers permit framing by this origin: the REAL website in the explorer's iframe,
+ *                 rendered by the visitor's own browser;
+ *   unavailable — anything else: an honest notice and the live link, while Crestmont prepares the site through its
+ *                 authorized connections (src/services/native/) or reports the real blocker.
+ * Remote streaming ("remote", Mode B) is never selected any more: it is not an acceptable substitute for the website.
+ * The legacy `remote` value survives only in the column's CHECK list so old audit rows stay readable.
  */
-export function selectDisplayMode(r: Pick<EmbedCheck, "status" | "detail">, remoteEnabled: boolean, nativeRequired = false): { mode: Exclude<DisplayMode, "unchecked">; reason: string } {
+export function selectDisplayMode(r: Pick<EmbedCheck, "status" | "detail">, _remoteEnabled = false, _nativeRequired = true): { mode: Exclude<DisplayMode, "unchecked" | "remote">; reason: string } {
   if (r.status === "allowed") return { mode: "embed", reason: `Native embed: ${r.detail}.` };
-  // A new entry is never handed to the remote browser automatically: it must become native (or say why it cannot).
-  if (nativeRequired && r.status === "blocked") return { mode: "unavailable", reason: `The site refuses framing (${r.detail}). Native embedding is required for new entries, so Crestmont prepares the site instead of switching to the remote browser.` };
-  if (r.status === "blocked") return remoteEnabled
-    ? { mode: "remote", reason: `The site refuses framing (${r.detail}), so Crestmont's remote browser shows it — the site itself is not changed.` }
-    : { mode: "unavailable", reason: `The site refuses framing (${r.detail}) and the remote browser is not enabled in this environment.` };
+  if (r.status === "blocked") return { mode: "unavailable", reason: `The site refuses framing (${r.detail}). Crestmont prepares owned websites for native display instead of streaming them; until then the live link is shown.` };
   return { mode: "unavailable", reason: `The live site could not be shown interactively: ${r.detail}.` };
 }
 export interface Testimonial { id: string; portfolio_project_id: string | null; author_name: string; body: string; verification_evidence: string; verified_by: string; published: number; created_at: string | null }
@@ -103,14 +103,8 @@ export function publishBlockers(p: PortfolioProject): string[] {
   const out: string[] = [];
   // Screenshots are the fallback for a site that cannot be shown interactively; an entry shown live — natively (Mode A)
   // or through Crestmont's remote browser (Mode B) — does not need them.
-  if (p.native_required) {
-    // New entries: the verified native website replaces screenshots entirely; nothing else may stand in for it.
-    if (p.native_state !== "native_verified" || !liveEmbed(p)) out.push(`The live website is not verified as a native embed yet — ${NATIVE_LABEL[p.native_state ?? "checking"]}${p.native_reason ? `: ${p.native_reason}` : ""}.`);
-  } else if (!liveEmbed(p) && p.display_mode !== "remote") {
-    const why = p.embed_status === "blocked" ? " (the live site does not permit embedding, so a screenshot is shown instead)" : p.embed_status === "allowed" ? "" : " (or a successful live-embedding check)";
-    if (!p.desktop_screenshot_file_id && !p.poster_desktop_asset) out.push(`A genuine desktop screenshot of the live site has not been uploaded${why}.`);
-    if (!p.mobile_screenshot_file_id && !p.poster_mobile_asset) out.push(`A genuine mobile screenshot of the live site has not been uploaded${why}.`);
-  }
+  // One standard for every entry: the verified native website is what a visitor sees; nothing else may stand in for it.
+  if (p.native_state !== "native_verified" || !liveEmbed(p)) out.push(`The live website is not verified as a native embed yet — ${NATIVE_LABEL[p.native_state ?? "checking"]}${p.native_reason ? `: ${p.native_reason}` : ""}.`);
   if (!p.relationship_documented_at || /pending/i.test(p.relationship)) out.push("Crestmont's relationship to this business has not been documented.");
   if (!p.link_verified_at) out.push("The live link has not been verified.");
   // FD-13: never shown without the owner's explicit, recorded opt-in (and never after it is withdrawn).
@@ -164,22 +158,30 @@ export const allowLocalDemos = (environment: string | undefined) => environment 
 const originOf = (u: string | null | undefined): string | null => { try { const x = new URL(u ?? ""); const o = x.origin.toLowerCase(); return x.protocol === "https:" || LOCAL_RE.test(o) ? o : null; } catch { return null; } };
 
 export type DemoState = { kind: "embed"; url: string; origin: string } | { kind: "unavailable"; reason: string } | { kind: "none" };
-/** What the explorer shows: the real live website, an isolated demo copy, or the genuine screenshot. */
-export type PreviewState = { kind: "live"; url: string; origin: string } | { kind: "remote"; url: string } | DemoState;
-/** What a visitor sees, in a fixed order of preference (Owner, 2026-11-18 — "an existing demo must never override a
- *  compatible live production website"):
- *   1. the real production website in a native frame, when its own headers permit this site (a fresh, successful
- *      embedding check);
- *   2. the real production website through Crestmont's remote browser, when it refuses framing (Mode B, where the
- *      remote browser is enabled);
- *   3. only then an Owner-verified isolated demo, honestly labelled, or the genuine screenshot. */
-export function previewState(p: PortfolioProject, approvedDemos: Set<string>, now = Date.now(), remoteEnabled = false): PreviewState {
+/** What the explorer shows: the real live website, or (kind "none") an honest notice with the live link. The demo
+ *  kinds remain for the staff demo editor; a demo never stands in for a portfolio website on the public pages. */
+export type PreviewState = { kind: "live"; url: string; origin: string } | DemoState;
+
+/** Whether the last diagnosis says the frame itself fails (as opposed to the website, the same with or without
+ *  Crestmont). Such an entry is never shown framed until it is verified again. */
+export function embedFailureDiagnosed(p: Pick<PortfolioProject, "native_diagnosis">): boolean {
+  try { const d = JSON.parse(p.native_diagnosis ?? "null") as { embedFailure?: boolean } | null; return !!d?.embedFailure; } catch { return false; }
+}
+
+/** What a visitor sees — one native-first standard for every entry (Owner, 2026-11-19):
+ *   • the REAL production website in a native frame once it is verified in a real browser and its own headers still
+ *     permit this site (a fresh, successful embedding check);
+ *   • a published entry converted from the old standard (native_migrated_at) whose website already permits this site
+ *     keeps showing it natively while its verification runs — a working native display is never replaced — unless the
+ *     last diagnosis found that the frame itself fails;
+ *   • otherwise nothing interactive: an honest notice and the live link. Never a remote stream; never a demo or a
+ *     screenshot presented as the website. */
+export function previewState(p: PortfolioProject, _approvedDemos: Set<string> = new Set(), now = Date.now(), _remoteEnabled = false): PreviewState {
   const live = liveEmbed(p, now);
-  // New entries: only a verified native embed is shown live; never the remote browser or a demo in its place.
-  if (p.native_required) return live && p.native_state === "native_verified" ? { kind: "live", ...live } : { kind: "none" };
-  if (live) return { kind: "live", ...live };
-  if (p.display_mode === "remote" && remoteEnabled) return { kind: "remote", url: p.embed_url || p.live_url };
-  return demoState(p, approvedDemos);
+  if (!live) return { kind: "none" };
+  if (p.native_state === "native_verified") return { kind: "live", ...live };
+  if (p.published && p.native_migrated_at && !embedFailureDiagnosed(p)) return { kind: "live", ...live };
+  return { kind: "none" };
 }
 /** Whether a project's demo may be embedded right now: ready, verified, on an approved origin, not production. */
 export function demoState(p: Pick<PortfolioProject, "demo_url" | "demo_status" | "demo_verified_at" | "live_url">, approved: Set<string>): DemoState {
@@ -237,8 +239,8 @@ export async function setDemo(db: Db, actor: Actor, id: string, input: DemoInput
 // ── Live embedding check (recorded per project; re-run daily and whenever the link changes) ──
 export async function recordEmbedCheck(db: Db, id: string, r: EmbedCheck, actorUserId: string | null = null, remoteEnabled = false) {
   const at = nowIso();
-  const prev = await db.prepare(`SELECT embed_status, embed_url, embed_checked_at, native_required FROM portfolio_projects WHERE id = ?`).bind(id).first<{ embed_status: string; embed_url: string | null; embed_checked_at: string | null; native_required: number }>();
-  const sel = selectDisplayMode(r, remoteEnabled, !!prev?.native_required);
+  const prev = await db.prepare(`SELECT embed_status, embed_url, embed_checked_at FROM portfolio_projects WHERE id = ?`).bind(id).first<{ embed_status: string; embed_url: string | null; embed_checked_at: string | null }>();
+  const sel = selectDisplayMode(r);
   // A check that could not reach the site says nothing new about its permission: a recent "allowed" answer stands
   // (liveEmbed still expires it after EMBED_MAX_AGE_MS). Only a definite answer — allowed or refused — replaces it.
   if (r.status === "error" && prev && liveEmbed({ embed_status: prev.embed_status as EmbedStatus, embed_url: prev.embed_url, embed_checked_at: prev.embed_checked_at })) {
@@ -262,16 +264,23 @@ export async function refreshEmbed(db: Db, p: Pick<PortfolioProject, "id" | "liv
 /**
  * Re-checks every active project (cron and the release pipeline), then publishes the entries that asked to be published
  * once ready (publish_when_ready) and now meet every requirement. A project whose live site stopped permitting framing
- * simply falls back to its screenshot; nothing is unpublished automatically.
+ * shows an honest notice and its live link while Crestmont repairs it; nothing is unpublished automatically.
  */
 export async function refreshAllEmbeds(db: Db, siteOrigin: string, fetcher: typeof fetch = fetch, remoteEnabled = false): Promise<{ slug: string; status: string; mode: string; detail: string; published?: boolean }[]> {
   const out: { slug: string; status: string; mode: string; detail: string; published?: boolean }[] = [];
   for (const p of await listActive(db)) {
     const r = await refreshEmbed(db, p, siteOrigin, fetcher, null, remoteEnabled);
-    const row: { slug: string; status: string; mode: string; detail: string; published?: boolean } = { slug: p.slug, status: r.status, mode: selectDisplayMode(r, remoteEnabled, !!p.native_required).mode, detail: r.detail };
-    // A verified native entry whose site stopped permitting framing is no longer native; Crestmont says so (and the
-    // 15-minute native job prepares and verifies it again) instead of quietly showing something else.
-    if (p.native_required && p.native_state === "native_verified" && r.status === "blocked") await db.prepare(`UPDATE portfolio_projects SET native_state = 'unavailable', native_reason = ?, native_updated_at = ? WHERE id = ?`).bind(`The site stopped permitting framing (${r.detail}); Crestmont will prepare and verify it again.`.slice(0, 500), nowIso(), p.id).run();
+    const row: { slug: string; status: string; mode: string; detail: string; published?: boolean } = { slug: p.slug, status: r.status, mode: selectDisplayMode(r).mode, detail: r.detail };
+    // Regression: a verified native entry whose site stopped permitting framing (a later deployment changed a header)
+    // is no longer native. Crestmont says so and the 15-minute native job repairs and verifies it again — never a
+    // quiet substitute (src/services/native/orchestrator.ts, "regression repair").
+    if (p.native_state === "native_verified" && r.status === "blocked") {
+      const at = nowIso();
+      await db.batch([
+        db.prepare(`UPDATE portfolio_projects SET native_state = 'checking', native_reason = ?, native_updated_at = ? WHERE id = ?`).bind(`Regression: the site stopped permitting framing (${r.detail}); Crestmont is repairing and verifying it again.`.slice(0, 500), at, p.id),
+        db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (NULL,'system','portfolio.native_regression','portfolio_project',?,?,NULL,?)`).bind(p.id, JSON.stringify({ detail: r.detail.slice(0, 300) }), at),
+      ]);
+    }
     if (p.publish_when_ready && !p.published) {
       const fresh = (await getById(db, p.id))!;
       if (!publishBlockers(fresh).length) {
