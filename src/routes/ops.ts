@@ -34,6 +34,11 @@ import { runDatabaseBackup } from "../services/db-backup.ts";
 import { refreshAllEmbeds } from "../services/portfolio.ts";
 import { remoteBrowserConfig } from "../services/remote-browser/admission.ts";
 import { intakeForAcceptance } from "../services/portfolio-intake.ts";
+import * as pf from "../services/portfolio.ts";
+import { issuePreviewToken } from "../services/remote-browser/connect.ts";
+import { nativeDepsFrom } from "../services/native/deps.ts";
+import { verifyConnections } from "../services/native/verify-connections.ts";
+import { advanceForOps, discoverForOps, onboardForOps } from "../services/native/orchestrator.ts";
 
 // ───────────── Signed automation ─────────────
 
@@ -355,6 +360,39 @@ export function register(r: Router): void {
     const results = await intakeForAcceptance(ctx.db, origin, ctx.env.overrides?.portfolioFetch ?? fetch, remote.enabled, urls);
     await audit(ctx.db, { actorKind: "system", action: "portfolio.acceptance_intake", subjectType: "portfolio_project", details: { results: results.map((r) => `${r.slug}:${r.mode}${r.created ? "+created" : ""}`) } });
     return jsonResponse(ctx, 200, { origin, remoteBrowser: { enabled: remote.enabled, maxConcurrent: remote.maxConcurrent, dailyMinutes: remote.dailyMinutes }, results }, { "cache-control": "no-store" });
+  });
+  // Native readiness operations (2026-11-19), one-time challenge only (written with the production Cloudflare token by
+  // .github/workflows/portfolio-native-ops.yml, which needs the Owner's approval of the production environment):
+  //   check   — read-only: the connections' identity and scope, and for each url its framing answer and hosting;
+  //   onboard — the controlled onboarding of one owned website (unpublished; as Staff → Portfolio → Add);
+  //   advance — one more step for an onboarding entry, with its preview link once verified.
+  // Never returns a token or secret.
+  r.post("/api/ops/portfolio-native", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    const auth = await opsAuth(ctx, raw, "portfolio_native");
+    if (auth instanceof Response) return auth;
+    if (!auth.payload) return jsonResponse(ctx, 403, { error: "This operation needs a one-time challenge." });
+    const d = nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin);
+    const action = String(auth.body.action ?? "");
+    const preview = async (slug: string) => { const p = await pf.getBySlug(ctx.db, slug); return p && p.native_state === "native_verified" ? `/portfolio/preview/${await issuePreviewToken(ctx.db, p.id, 60, "native-onboarding", Date.now())}` : null; };
+    if (action === "check") {
+      const urls = Array.isArray(auth.body.urls) ? auth.body.urls.filter((x): x is string => typeof x === "string").slice(0, 12) : [];
+      const connections = await verifyConnections(d.fetchApi, d.conn);
+      const discovery = urls.length ? await discoverForOps(d, urls) : [];
+      await audit(ctx.db, { actorKind: "system", action: "portfolio.native_connections_checked", subjectType: "portfolio_project", details: { cloudflare: connections.cloudflare.authenticated, vercel: connections.vercel.authenticated, github: connections.github.authenticated, urls: urls.length } });
+      return jsonResponse(ctx, 200, { origin: d.siteOrigin, connections, discovery }, { "cache-control": "no-store" });
+    }
+    if (action === "onboard") {
+      const r = await onboardForOps(d, String(auth.body.url ?? ""));
+      if ("error" in r) return jsonResponse(ctx, 422, r);
+      return jsonResponse(ctx, 200, { ...r, preview: await preview(r.slug) }, { "cache-control": "no-store" });
+    }
+    if (action === "advance") {
+      const r = await advanceForOps(d, String(auth.body.slug ?? ""));
+      if ("error" in r) return jsonResponse(ctx, 422, r);
+      return jsonResponse(ctx, 200, { ...r, preview: await preview(r.slug) }, { "cache-control": "no-store" });
+    }
+    return jsonResponse(ctx, 422, { error: "action: check | onboard | advance" });
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.

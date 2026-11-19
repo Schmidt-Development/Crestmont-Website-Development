@@ -239,3 +239,69 @@ export async function discoverHosting(d: NativeDeps, host: string): Promise<{ fo
   if (!d.conn.cloudflare && !d.conn.vercel) notes.push("Only GitHub is connected; a hosting account (Cloudflare or Vercel) is needed to find the site");
   return { found, detail: notes.join("; ") };
 }
+
+// ── Operations (src/routes/ops.ts /api/ops/portfolio-native; .github/workflows/portfolio-native-ops.yml) ──
+const SYSTEM_OWNER = { kind: "system" as const, roles: [{ role: "owner" as const, organizationId: "org_crestmont" }], mfaVerified: true };
+const slugify = (s: string) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 70);
+const siteKey = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
+
+/** Read-only: what each address answers and which connected account serves it. Nothing is created or changed. */
+export async function discoverForOps(d: NativeDeps, urls: string[]): Promise<{ url: string; status: string; detail: string; finalUrl: string | null; hosting: { found: boolean; detail: string } | null }[]> {
+  const out = [];
+  for (const raw of urls.slice(0, 12)) {
+    const u = safePublicUrl(raw);
+    if (!u) { out.push({ url: raw.slice(0, 200), status: "invalid", detail: "not a public https address", finalUrl: null, hosting: null }); continue; }
+    const c = await checkEmbed(u.toString(), d.siteOrigin, d.fetchSite);
+    const host = c.url ? new URL(c.url).hostname : u.hostname;
+    out.push({ url: u.toString(), status: c.status, detail: c.detail, finalUrl: c.url, hosting: await discoverHosting(d, host) });
+  }
+  return out;
+}
+
+export interface OpsProject { slug: string; id: string; state: string; reason: string; provider: string | null; change: unknown; verification: unknown; embed: string | null; published: boolean; created: boolean; converted: boolean }
+async function summary(d: NativeDeps, id: string, created = false, converted = false): Promise<OpsProject> {
+  const p = (await pf.getById(d.db, id))!;
+  return { slug: p.slug, id, state: p.native_state ?? "checking", reason: p.native_reason ?? "", provider: p.native_provider ?? null, change: parse(p.native_change), verification: parse(p.native_verification), embed: p.embed_status ?? null, published: !!p.published, created, converted };
+}
+
+/** The controlled onboarding of one owned website, exactly as Staff → Portfolio → Add (unpublished; nothing is
+ *  published or recorded as consent). An existing unpublished acceptance entry for the same site (never published,
+ *  relationship pending) is converted to a native-required entry instead of being duplicated. */
+export async function onboardForOps(d: NativeDeps, raw: string): Promise<OpsProject | { error: string }> {
+  const u = safePublicUrl(raw);
+  if (!u) return { error: "url: a public https address" };
+  const site = siteKey(u.toString());
+  const existing = (await pf.listActive(d.db)).find((p) => siteKey(p.live_url) === site);
+  if (existing?.published && !existing.native_required) return { error: `${site} is a published existing entry (${existing.slug}); it is not converted by an operations request` };
+  let id: string, created = false, converted = false;
+  if (existing) {
+    id = existing.id;
+    if (!existing.native_required) {
+      if (!/pending/i.test(existing.relationship)) return { error: `${site} has an existing entry (${existing.slug}) with documented details; convert it from Staff → Portfolio instead` };
+      await d.db.batch([
+        d.db.prepare(`UPDATE portfolio_projects SET native_required = 1, native_state = 'checking', native_reason = NULL, native_change = NULL, updated_at = ? WHERE id = ?`).bind(nowIso(), id),
+        d.db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (NULL,'system','portfolio.native_onboarding','portfolio_project',?,?,NULL,?)`).bind(id, JSON.stringify({ converted: true, from: "acceptance entry" }), nowIso()),
+      ]);
+      converted = true;
+    }
+  } else {
+    const c = await checkEmbed(u.toString(), d.siteOrigin, d.fetchSite);
+    const name = ((c.siteName ?? c.title?.split(/\s+[—–|·-]\s+/)[0] ?? "").trim() || site).slice(0, 120);
+    let slug = slugify(name) || slugify(site);
+    for (let n = 2; await pf.getBySlug(d.db, slug); n++) slug = `${slugify(name) || slugify(site)}-${n}`;
+    const description = (c.description ?? "").trim().length >= 20 ? c.description!.trim().slice(0, 4000) : `${name} — the live website at ${site}. Added for native onboarding; details to be confirmed by staff before publishing.`;
+    ({ id } = await pf.createProject(d.db, SYSTEM_OWNER, { name, slug, industry: "To be confirmed by staff", live_url: c.url ?? u.toString(), description, features: "", technology_summary: "", relationship: "Relationship documentation pending" }));
+    created = true;
+  }
+  await advanceNative(d, id, { force: true });
+  return summary(d, id, created, converted);
+}
+
+/** One more step for an entry (the same step the 15-minute job runs). */
+export async function advanceForOps(d: NativeDeps, slug: string): Promise<OpsProject | { error: string }> {
+  const p = await pf.getBySlug(d.db, slug);
+  if (!p || p.archived_at) return { error: "unknown project" };
+  if (!p.native_required) return { error: `${slug} is an existing (legacy) entry` };
+  await advanceNative(d, p.id);
+  return summary(d, p.id);
+}
