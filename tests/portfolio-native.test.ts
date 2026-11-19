@@ -10,7 +10,7 @@ import { getBySlug, getById, publishBlockers } from "../src/services/portfolio.t
 import { runJobs } from "../src/app/scheduled.ts";
 import { publicPaths, sensitiveLinks, crestmontOrigins, isPublicPath, frameAncestorsValue } from "../src/services/native/standard.ts";
 import { editVercelJson, editPagesHeaders, EditError } from "../src/services/native/editors.ts";
-import { desiredRule } from "../src/services/native/cloudflare.ts";
+import { desiredRule, rewriteFrameAncestors } from "../src/services/native/cloudflare.ts";
 import { connectionsFrom } from "../src/services/native/connections.ts";
 
 const TOKENS = { PORTFOLIO_CLOUDFLARE_TOKEN: "cf-test-token", PORTFOLIO_VERCEL_TOKEN: "vc-test-token", PORTFOLIO_GITHUB_TOKEN: "gh-test-token" };
@@ -161,7 +161,7 @@ test("[PORT-NATIVE] negatives: no connection, unknown domain, unverified Vercel 
     .site(site("unknown.fixture-native.com"))
     .site(site("unverified.fixture-native.com")).vercel({ id: "prj_u", name: "u", domain: "unverified.fixture-native.com", verified: false, repo: "owner/u", branch: "main", root: "" })
     .site(site("readonly.fixture-native.com")).vercel({ id: "prj_r", name: "r", domain: "readonly.fixture-native.com", verified: true, repo: "someone-else/r", branch: "main", root: "" }).repo("someone-else/r", { push: false })
-    .site(site("conflict.fixture-native.com", { baseCsp: "default-src 'self'; frame-ancestors 'none'" })).cloudflareZone("conflict.fixture-native.com", ACCT, { proxied: ["conflict.fixture-native.com"] });
+    .site(site("conflict.fixture-native.com", { baseCsp: "default-src 'self'; frame-ancestors 'none'", cspNonce: true })).cloudflareZone("conflict.fixture-native.com", ACCT, { proxied: ["conflict.fixture-native.com"] });
   const none = await setup(w, {});
   const a = await none.add("no-conn", "https://unknown.fixture-native.com/");
   assert.equal(a.native_state, "authorization_required");
@@ -178,7 +178,7 @@ test("[PORT-NATIVE] negatives: no connection, unknown domain, unverified Vercel 
   assert.match(r.native_reason!, /can read someone-else\/r but cannot push to it/);
   const c = await add("conflict", "https://conflict.fixture-native.com/");
   assert.equal(c.native_state, "unavailable");
-  assert.match(c.native_reason!, /own Content-Security-Policy sets "frame-ancestors 'none'"/);
+  assert.match(c.native_reason!, /own Content-Security-Policy sets "frame-ancestors 'none'".*cannot replace just that directive: the site's Content-Security-Policy changes between requests/);
   assert.equal(w.zones[0].rulesets, null, "no rule added when it could not work");
   assert.deepEqual(w.writes, [], "nothing was changed at any provider in any of these cases");
   // An invalid link is refused at step 1.
@@ -252,5 +252,53 @@ test("[PORT-NATIVE] real-browser verifications are capped per day; existing entr
   await runJobs(t.env, ["portfolio_native"]);
   assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE native_required = 0 AND native_state = 'legacy'`).first<{ n: number }>())!.n, before);
   assert.ok(before >= 1);
+  t.close();
+});
+
+test("[PORT-NATIVE] Cloudflare site whose own policy says frame-ancestors 'none': the rule replaces only that directive, only on public paths, only while the policy is exactly the one read — every other directive kept; sensitive pages still refuse", async () => {
+  const FA = frameAncestorsValue("http://crestmont.test");
+  // Pure rewrite: one directive changes, the rest is byte-for-byte the site's own policy.
+  const own = "default-src 'self'; script-src 'self' https://cdn.example.com; frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
+  assert.deepEqual(rewriteFrameAncestors(own, FA), { ok: true, observed: own, value: `default-src 'self'; script-src 'self' https://cdn.example.com; ${FA}; base-uri 'self'; object-src 'none'` });
+  assert.match((rewriteFrameAncestors("default-src 'self', frame-ancestors 'none'", FA) as { why: string }).why, /more than one Content-Security-Policy/);
+  assert.match((rewriteFrameAncestors("frame-ancestors 'none'; frame-ancestors 'self'", FA) as { why: string }).why, /2 frame-ancestors directives/);
+  assert.match((rewriteFrameAncestors(`default-src 'self'; frame-ancestors 'none'; x ${"a".repeat(1600)}`, FA) as { why: string }).why, /longer than 1500/);
+  assert.match((rewriteFrameAncestors("default-src 'self'\u00e9; frame-ancestors 'none'", FA) as { why: string }).why, /cannot match exactly/);
+  const rule = await desiredRule("h.example.com", ["/", "/about"], FA, own);
+  assert.equal(rule.expression, `(http.host eq "h.example.com" and http.request.uri.path in {"/" "/about"} and http.response.headers["content-security-policy"][0] eq ${JSON.stringify(own)})`);
+  assert.deepEqual(rule.action_parameters, { headers: { "Content-Security-Policy": { operation: "set", value: `default-src 'self'; script-src 'self' https://cdn.example.com; ${FA}; base-uri 'self'; object-src 'none'` }, "X-Frame-Options": { operation: "remove" } } });
+
+  const w = new NativeWorld().site(site("strict.fixture-native.com", { baseCsp: own })).cloudflareZone("strict.fixture-native.com", ACCT, { workerDomain: { hostname: "strict.fixture-native.com", service: "strict-production" } });
+  const { t, add, tick } = await setup(w);
+  let p = await add("strict", "https://strict.fixture-native.com/");
+  assert.equal(p.native_state, "preparing", p.native_reason!);
+  assert.match(p.native_reason!, /only the frame-ancestors directive of the site's own policy is replaced, every other directive is kept/);
+  const rules = w.zones[0].rulesets!.rules;
+  assert.equal(rules.length, 1);
+  assert.doesNotMatch(rules[0].expression, /login|book/, "sensitive pages are never in the rule");
+  // The live site now answers with its own policy, only frame-ancestors changed; sensitive pages unchanged.
+  const home = w.respond("https://strict.fixture-native.com/")!;
+  assert.equal(home.headers["content-security-policy"], `default-src 'self'; script-src 'self' https://cdn.example.com; ${FA}; base-uri 'self'; object-src 'none'`);
+  assert.equal(home.headers["x-frame-options"], undefined);
+  const login = w.respond("https://strict.fixture-native.com/login")!;
+  assert.equal(login.headers["x-frame-options"], "DENY");
+  assert.equal(login.headers["content-security-policy"], "frame-ancestors 'none'");
+  p = await tick(p.id);
+  assert.equal(p.native_state, "native_verified", p.native_reason!);
+  // If the site later sends a different policy, the rule no longer matches: the page refuses framing again (fail closed).
+  w.sites.get("strict.fixture-native.com")!.baseCsp = own.replace("object-src 'none'", "object-src 'self'");
+  const changed = w.respond("https://strict.fixture-native.com/")!;
+  assert.equal(changed.headers["content-security-policy"], own.replace("object-src 'none'", "object-src 'self'"));
+  assert.equal(changed.headers["x-frame-options"], "DENY");
+  t.close();
+});
+
+test("[PORT-NATIVE] Cloudflare Pages discovery never sends a per_page the Pages API refuses (production HTTP 400)", async () => {
+  const w = new NativeWorld().site(site("pg2.fixture-native.com")).cloudflareZone("other-zone2.com", ACCT)
+    .pages({ name: "pg2", account: ACCT, domain: "pg2.fixture-native.com", repo: "owner/pg2", branch: "main", destination: "", buildCommand: "" }).repo("owner/pg2");
+  const { t, add } = await setup(w);
+  const p = await add("pg2", "https://pg2.fixture-native.com/");
+  assert.match(p.native_provider ?? "", /cloudflare-pages/, p.native_reason!);
+  assert.ok(!w.calls.some((c) => /pages\/projects\?.*per_page/.test(c)), "no per_page on the Pages list");
   t.close();
 });

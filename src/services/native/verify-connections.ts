@@ -38,7 +38,7 @@ export async function verifyCloudflare(f: typeof fetch, conn: NativeConnections[
   const perAccount: Record<string, unknown>[] = [];
   for (const a of acctList.slice(0, 5)) {
     const domains = await tryRead(rep, `list Workers custom domains of ${a.name}`, "Workers Scripts: Read", () => call<Env<{ hostname: string; service: string }[]>>(f, "cloudflare", t, `/accounts/${a.id}/workers/domains`));
-    const pages = await tryRead(rep, `list Pages projects of ${a.name}`, "Cloudflare Pages: Read", () => call<Env<{ name: string; domains?: string[]; source?: { type?: string; config?: { owner?: string; repo_name?: string } } }[]>>(f, "cloudflare", t, `/accounts/${a.id}/pages/projects`, { query: { per_page: "50" } }));
+    const pages = await tryRead(rep, `list Pages projects of ${a.name}`, "Cloudflare Pages: Read", () => call<Env<{ name: string; domains?: string[]; source?: { type?: string; config?: { owner?: string; repo_name?: string } } }[]>>(f, "cloudflare", t, `/accounts/${a.id}/pages/projects`));
     perAccount.push({
       account: a.name, id: a.id,
       workersCustomDomains: (domains?.result ?? []).map((d) => `${d.hostname} → ${d.service}`),
@@ -89,13 +89,18 @@ export async function verifyGithub(f: typeof fetch, conn: NativeConnections["git
   const probe = list.find((r) => r.permissions?.push);
   const perms: Record<string, string> = {};
   if (probe) {
-    const t = async (label: string, path: string, permission: string) => { perms[label] = await call(f, "github", conn.token, path).then(() => "readable", (e: unknown) => { if (e instanceof ProviderError && (e.status === 403 || e.status === 401)) { rep.missing.push(`${permission} on ${probe.full_name} (needed for safe automatic merging)`); return "DENIED"; } return `error ${msg(e)}`; }); };
+    const t = async (label: string, path: string, permission: string) => { perms[label] = await call(f, "github", conn.token, path).then(() => "readable", (e: unknown) => { if (e instanceof ProviderError && (e.status === 403 || e.status === 401)) { (label === "checks" ? [] : rep.missing).push(`${permission} on ${probe.full_name} (needed for safe automatic merging)`); return "DENIED"; } return `error ${msg(e)}`; }); };
     const head = await call<{ object: { sha: string } }>(f, "github", conn.token, `/repos/${probe.full_name}/git/ref/heads/${encodeURIComponent(probe.default_branch)}`).catch(() => null);
     if (head) { await t("checks", `/repos/${probe.full_name}/commits/${head.object.sha}/check-runs`, "Checks: Read"); await t("statuses", `/repos/${probe.full_name}/commits/${head.object.sha}/status`, "Commit statuses: Read"); }
     await t("branchProtection", `/repos/${probe.full_name}/branches/${encodeURIComponent(probe.default_branch)}`, "Metadata: Read");
     perms.probedOn = probe.full_name;
   }
-  rep.scope = { repositories: list.map((r) => `${r.full_name}${r.permissions?.push ? " (write)" : " (read only)"}`), mergeGateReads: perms };
+  // Without the Checks API Crestmont cannot verify a PR's checks, so it never merges on its own: it opens the PR and the
+  // Owner merges it (manual approval). That is a supported mode, not a missing permission.
+  const automaticMerging = !probe ? "not tested (no writable repository)" : Object.entries(perms).some(([k, v]) => k !== "probedOn" && v !== "readable")
+    ? `off — this connection cannot read ${Object.entries(perms).filter(([k, v]) => k !== "probedOn" && v !== "readable").map(([k]) => k).join(", ")}, so Crestmont opens each header pull request and waits for you to review and merge it (manual approval)`
+    : "on — Crestmont merges its own header pull request only after every check passed and the branch requires no review (fail closed)";
+  rep.scope = { repositories: list.map((r) => `${r.full_name}${r.permissions?.push ? " (write)" : " (read only)"}`), mergeGateReads: perms, automaticMerging };
   if (!list.some((r) => r.permissions?.push)) rep.missing.push("Contents and Pull requests: Read and write on the website repositories (the token can push to none)");
   return rep;
 }

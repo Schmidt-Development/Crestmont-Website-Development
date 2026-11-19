@@ -96,7 +96,7 @@ export function mergeGate(g: GateInput): GateResult {
   if (g.pr.draft) return wait("the pull request is a draft");
   if (!g.protection.readable) return stop("the base branch's protection rules could not be read (grant the token Administration: read on the repository), so Crestmont will not merge on its own");
   if (g.protection.requiresReviews) return stop("the base branch requires a reviewed pull request — it waits for your approval");
-  if (!g.checkRuns.readable || !g.checkRuns.complete) return stop("the pull request's check runs could not be read completely (grant the token Checks: read), so Crestmont will not merge on its own");
+  if (!g.checkRuns.readable || !g.checkRuns.complete) return stop("this connection cannot read the pull request's check runs (GitHub's Checks API), so Crestmont cannot verify that every check passed — it hands the pull request to you: review its checks and merge it, and Crestmont continues after your merge");
   if (!g.statuses.readable) return stop("the pull request's commit statuses could not be read (grant the token Commit statuses: read), so Crestmont will not merge on its own");
   if (!g.reviews.readable) return stop("the pull request's reviews could not be read, so Crestmont will not merge on its own");
   if (g.reviews.changesRequested) return stop("a reviewer requested changes");

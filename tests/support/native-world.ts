@@ -11,6 +11,7 @@ export interface Site {
   pages: Record<string, string>;          // path → HTML
   baseXfo?: string | null;                 // default DENY
   baseCsp?: string | null;                 // the site's own CSP (e.g. "frame-ancestors 'none'" = a conflict)
+  cspNonce?: boolean;                      // the site's CSP carries a new nonce on every response (not rule-matchable)
   ruleTakesEffect?: boolean;               // a Cloudflare zone rule rewrites this site's responses (default true)
   redirectTo?: string;                     // "/" redirects to this absolute URL
 }
@@ -59,19 +60,23 @@ export class NativeWorld {
   private effective(host: string, path: string): { allow: boolean; xfo: string | null; csp: string[] } {
     const s = this.sites.get(host)!;
     let xfo: string | null = s.baseXfo === undefined ? "DENY" : s.baseXfo;
-    const csp = s.baseCsp ? [s.baseCsp] : [];
+    const csp = s.baseCsp ? [s.cspNonce ? `${s.baseCsp}; script-src 'nonce-${++seq}'` : s.baseCsp] : [];
     const sensitive = /\/(login|admin|book|account|checkout)/.test(path);
     if (sensitive) return { allow: false, xfo: "DENY", csp: ["frame-ancestors 'none'"] };
     // Cloudflare zone rule (Crestmont's): applied to responses when the site is proxied by the zone.
     const zone = this.zones.find((z) => host === z.name || host.endsWith("." + z.name));
     for (const r of zone?.rulesets?.rules ?? []) {
-      const m = /http\.host eq "([^"]+)" and http\.request\.uri\.path in \{([^}]*)\}/.exec(r.expression);
-      if (!m || m[1] !== host || r.enabled === false || s.ruleTakesEffect === false) continue;
-      const paths = [...m[2].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+      // Cloudflare's rule language as Crestmont writes it: host, exact paths and, optionally, the response's exact
+      // Content-Security-Policy (string literals with \" and \\ escapes, as Cloudflare reads them).
+      const m = /^\(http\.host eq ("(?:[^"\\]|\\.)*") and http\.request\.uri\.path in \{([^}]*)\}(?: and http\.response\.headers\["content-security-policy"\]\[0\] eq ("(?:[^"\\]|\\.)*"))?\)$/.exec(r.expression);
+      if (!m || JSON.parse(m[1]) !== host || r.enabled === false || s.ruleTakesEffect === false) continue;
+      const paths = [...m[2].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((x) => JSON.parse(`"${x[1]}"`) as string);
       if (!paths.includes(path)) continue;
+      if (m[3] !== undefined && (csp.length !== 1 || csp[0] !== JSON.parse(m[3]))) continue;
       const h = r.action_parameters.headers;
       if (h["X-Frame-Options"]?.operation === "remove") xfo = null;
       if (h["Content-Security-Policy"]?.operation === "add") csp.push(h["Content-Security-Policy"].value!);
+      if (h["Content-Security-Policy"]?.operation === "set") csp.splice(0, csp.length, h["Content-Security-Policy"].value!);
     }
     // Deployed repository configuration (Vercel vercel.json / Pages _headers) of the READY production deployment.
     const vp = this.vprojects.find((p) => p.domain === host);
@@ -145,6 +150,8 @@ export class NativeWorld {
     if ((m = /^\/zones\/([^/]+)\/dns_records$/.exec(p))) { const z = this.zones.find((x) => x.id === m![1]); return json({ result: (z?.dns ?? []).filter((r) => r.name === u.searchParams.get("name")) }); }
     if ((m = /^\/accounts\/([^/]+)\/workers\/domains$/.exec(p))) return json({ result: this.zones.filter((z) => z.account === m![1]).flatMap((z) => z.workerDomains).filter((d) => !u.searchParams.get("hostname") || d.hostname === u.searchParams.get("hostname")) });
     if ((m = /^\/zones\/([^/]+)\/workers\/routes$/.exec(p))) return json({ result: [] });
+    // Like Cloudflare in production: the Pages list refuses a per_page it does not accept (HTTP 400).
+    if (/^\/accounts\/[^/]+\/pages\/projects$/.test(p) && u.searchParams.has("per_page")) return json({ success: false, errors: [{ code: 8000024, message: "Invalid list options provided. Review the `page` or `per_page` parameter." }] }, 400);
     if ((m = /^\/accounts\/([^/]+)\/pages\/projects$/.exec(p))) return json({ result: this.pprojects.filter((x) => x.account === m![1]).map((x) => ({ name: x.name, domains: [x.domain], source: x.repo ? { type: "github", config: { owner: x.repo.split("/")[0], repo_name: x.repo.split("/")[1], production_branch: x.branch } } : undefined, build_config: { destination_dir: x.destination, root_dir: "", build_command: x.buildCommand } })), result_info: { total_pages: 1 } });
     if ((m = /^\/accounts\/([^/]+)\/pages\/projects\/([^/]+)\/deployments$/.exec(p))) {
       const pp = this.pprojects.find((x) => x.name === decodeURIComponent(m![2]))!;

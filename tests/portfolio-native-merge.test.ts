@@ -41,7 +41,7 @@ test("[PORT-NATIVE-MERGE] gate: successful checks merge; pending waits; failed, 
   assert.equal(mergeGate(base({ protection: { readable: true, protected: true, requiredContexts: ["build"], requiresReviews: false } })).merge, true);
   // Unverifiable: protection, check runs (or a truncated list), statuses or reviews unreadable → fail closed.
   for (const over of [{ protection: { readable: false, protected: true, requiredContexts: [], requiresReviews: false } }, { checkRuns: { readable: false, complete: false, runs: [] } }, { checkRuns: { readable: true, complete: false, runs: [] } }, { statuses: { readable: false, items: [] } }, { reviews: { readable: false, changesRequested: false } }] as Partial<GateInput>[]) {
-    const r = mergeGate(base(over)); assert.equal(r.merge, false); assert.equal((r as { wait: boolean }).wait, false); assert.match(r.detail, /could not be read/);
+    const r = mergeGate(base(over)); assert.equal(r.merge, false); assert.equal((r as { wait: boolean }).wait, false); assert.match(r.detail, /could not be read|cannot read/);
   }
   // Reviews: required reviews or a change request → never merged by Crestmont.
   assert.match(mergeGate(base({ protection: { readable: true, protected: true, requiredContexts: [], requiresReviews: true } })).detail, /requires a reviewed pull request/);
@@ -73,7 +73,7 @@ test("[PORT-NATIVE-MERGE] through GitHub: pending → not merged and re-checked;
   x = await run({ requiredChecks: ["build", "security/scan"] });
   assert.equal(x.out.merged, false); assert.match(x.out.detail, /required checks have not reported yet: security\/scan/); assert.deepEqual(x.w.mergeCalls, []);
   x = await run({}, (w) => { w.repos.get("owner/x")!.checksUnreadable = true; });
-  assert.equal(x.out.needsApproval, true); assert.match(x.out.detail, /Checks: read/); assert.deepEqual(x.w.mergeCalls, []);
+  assert.equal(x.out.needsApproval, true); assert.match(x.out.detail, /cannot read the pull request.s check runs .*hands the pull request to you: review its checks and merge it/); assert.deepEqual(x.w.mergeCalls, []);
   x = await run({ requiredChecks: ["build"] }, (w) => { w.repos.get("owner/x")!.protectionUnreadable = true; });
   assert.equal(x.out.needsApproval, true); assert.match(x.out.detail, /Administration: read/); assert.deepEqual(x.w.mergeCalls, []);
   x = await run({}, (w) => { w.repos.get("owner/x")!.changesRequested = true; });
