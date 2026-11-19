@@ -39,10 +39,24 @@ test("[PORT-NATIVE-OPS] check: read-only connection report (identity, accounts, 
   assert.equal(j.connections.github.authenticated, true);
   assert.deepEqual(j.connections.github.scope.repositories, ["owner/v-site (write)"]);
   assert.deepEqual(j.connections.github.missing, []);
+  assert.match(String(j.connections.github.scope.automaticMerging), /^on — /);
   assert.deepEqual(j.discovery.map((x) => [x.status, x.hosting?.found ?? null]), [["blocked", true], ["blocked", true], ["error", false], ["invalid", null]]);
   assert.match(j.discovery[0].hosting!.detail, /Workers custom domain \(owned\)/);
   assert.deepEqual(w.writes, [], "discovery and verification changed nothing at any provider");
   assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM portfolio_projects WHERE live_url LIKE '%fixture-native%'`).first<{ n: number }>())!.n, 0, "nothing created");
+  t.close();
+});
+
+test("[PORT-NATIVE-OPS] check: a GitHub token without the Checks API is reported as manual approval (not a missing permission); the Pages list is read without per_page", async () => {
+  const w = new NativeWorld().site(site("owned.fixture-native.com")).cloudflareZone("fixture-native.com", ACCT, { workerDomain: { hostname: "owned.fixture-native.com", service: "owned" } }).repo("owner/v-site");
+  w.repos.get("owner/v-site")!.checksUnreadable = true;
+  const t = await createTestApp({ ...TOKENS, overrides: { portfolioFetch: w.fetchSite, providerFetch: w.fetchApi } } as never);
+  const res = await t.client().request("POST", "/api/ops/portfolio-native", { body: JSON.stringify({ action: "check", challenge: await challenge(t), urls: ["https://owned.fixture-native.com/"] }), headers: { "content-type": "application/json" } });
+  const j = await res.json() as { connections: Record<string, { scope: Record<string, unknown>; missing: string[]; errors: string[] }> };
+  assert.deepEqual(j.connections.github.missing, []);
+  assert.match(String(j.connections.github.scope.automaticMerging), /^off — this connection cannot read checks, so Crestmont opens each header pull request and waits for you to review and merge it/);
+  assert.deepEqual(j.connections.cloudflare.errors, [], "the Pages list answered");
+  assert.deepEqual(w.writes, []);
   t.close();
 });
 

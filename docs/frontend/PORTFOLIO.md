@@ -108,6 +108,20 @@ requested changes. Anything it cannot read (a token without Checks / Commit stat
 error, a truncated list) hands the PR to the Owner instead. A repository without any CI is merged only after the PR has
 waited 10 minutes with no check reported and only when none is required. The merge names the verified head commit.
 
+**Production connection report, release 14922b0 (deploy run 44439591926).** All three connections authenticate. The
+production GitHub token cannot read the Checks API (fine-grained tokens are refused there); rather than ask for a new
+token, that is now a supported mode: automatic merging is **off** and reported as such, Crestmont opens each header PR
+and the Owner reviews and merges it (manual approval), after which Crestmont follows the deployment as usual. The
+Cloudflare Pages list refused `per_page=50` (HTTP 400); Pages discovery now uses the API's own page size.
+
+**A site whose own policy says `frame-ancestors 'none'` (Cloudflare-proxied).** A second policy cannot loosen the site's
+own, so Crestmont's zone rule then *replaces only that directive*: it matches only the site's exact public paths and only
+when the response's `Content-Security-Policy` is byte-for-byte the single policy Crestmont read twice (a per-request
+nonce, several policies, non-ASCII or > 1,500 characters are refused and reported), and it sets the same policy with only
+`frame-ancestors` changed to Crestmont's origins; every other directive is kept and X-Frame-Options is removed there. If
+the site later changes its policy, the rule stops matching and the page refuses framing again (fail closed); a rule
+without effect is removed after 10 minutes, as before. Sensitive pages are never in the rule.
+
 **Operations (`.github/workflows/portfolio-native-ops.yml`, production, Owner-approved, main only).** `check` asks the
 production Worker to verify its connections read-only — identity, accounts, zones, Workers domains, Pages and Vercel
 projects, repositories, the permissions each lacks — and which connected account serves each address (nothing changes;

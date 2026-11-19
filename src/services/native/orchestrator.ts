@@ -12,7 +12,9 @@
 //                    ├─ Vercel / Pages linked to GitHub ─► PR in that repository ─► preparing
 //                    │        ├─ branch needs review ─► authorization_required (merge the PR) ─► merged ─► deploy
 //                    │        └─ unprotected ─► merged by Crestmont ─► provider deploys ─► (headers allow) ─► verify
-//                    └─ the site's own CSP sets frame-ancestors, or an unsupported setup ───► unavailable (why)
+//                    │        (the site's own CSP sets frame-ancestors: the rule replaces only that directive,
+//                    │         and only while the site sends exactly the policy Crestmont read)
+//                    └─ the site's own CSP sets frame-ancestors elsewhere, or an unsupported setup ─► unavailable (why)
 //
 // Nothing here publishes: publishing keeps every existing requirement (relationship, link, the owner's consent) and only
 // additionally needs native_verified. Sensitive pages are never opened: only public paths are ever changed, and the
@@ -24,7 +26,7 @@ import { allowEgressHost, untrustedHostAllowed } from "../../lib/egress.ts";
 import * as pf from "../portfolio.ts";
 import { issuePreviewToken } from "../remote-browser/connect.ts";
 import { anyConnection, connectionSummary, ProviderError, type NativeConnections } from "./connections.ts";
-import { applyCloudflareRule, discoverCloudflare, pagesDeployment, removeCloudflareRule, type CloudflareTarget } from "./cloudflare.ts";
+import { applyCloudflareRule, discoverCloudflare, pagesDeployment, removeCloudflareRule, rewriteFrameAncestors, type CloudflareTarget } from "./cloudflare.ts";
 import { discoverVercel, vercelDeployment, type VercelTarget } from "./vercel.ts";
 import { advancePr, proposeChange, readFile, repoAccess, type ProposedChange } from "./github.ts";
 import { editPagesHeaders, editVercelJson, EditError } from "./editors.ts";
@@ -38,7 +40,7 @@ export interface NativeDeps {
 }
 type Target = CloudflareTarget | VercelTarget;
 type Change =
-  | { kind: "cloudflare-rule"; zoneId: string; rulesetId: string; ruleId: string; ref: string; host: string; paths: number; appliedAt: string; action: string }
+  | { kind: "cloudflare-rule"; zoneId: string; rulesetId: string; ruleId: string; ref: string; host: string; paths: number; appliedAt: string; action: string; rewrite?: boolean }
   | { kind: "github-pr"; provider: "vercel" | "cloudflare-pages"; pr: ProposedChange; deployDetail?: string }
   /** A change that did not work (a rule without effect, a PR closed unmerged). Never retried on its own: only an
    *  explicit staff re-check starts over, so Crestmont does not reapply rules or reopen PRs in a loop. */
@@ -145,15 +147,26 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
     if (d.conn.vercel) { const r = await discoverVercel(d.fetchApi, d.conn.vercel, host); vc = r.target; notes.push(`Vercel: ${r.detail}`); }
     if (!cf && !vc) return done({ state: "authorization_required", reason: `${check.detail}. ${host} is not served by any connected account (${notes.join("; ")}). If you own it, connect the account that hosts it; Crestmont does not change websites it cannot prove you control.`, provider: null, target: null });
 
-    // 1. A proxied Cloudflare zone: Cloudflare's own header rule, no code change, instant, reversible.
-    if (cf?.ruleCapable && !conflict) {
-      const r = await applyCloudflareRule(d.fetchApi, d.conn.cloudflare!, cf, host, paths, frameAncestorsValue(d.siteOrigin));
-      const ch: Change = { kind: "cloudflare-rule", zoneId: cf.zoneId, rulesetId: r.rulesetId, ruleId: r.ruleId, ref: r.ref, host, paths: r.paths, appliedAt: nowIso(), action: r.action };
+    // 1. A proxied Cloudflare zone: Cloudflare's own header rule, no code change, instant, reversible. When the site's
+    //    own policy sets frame-ancestors, the rule replaces only that directive — if the policy is one stable header.
+    let rewrite: string | null = null, rewriteWhy: string | null = null;
+    if (cf?.ruleCapable && conflict) {
+      const rw = rewriteFrameAncestors(check.csp ?? "", frameAncestorsValue(d.siteOrigin));
+      if (!rw.ok) rewriteWhy = rw.why;
+      else {
+        const again = await siteCsp(d, check.url!);
+        if (again !== rw.observed) rewriteWhy = "the site's Content-Security-Policy changes between requests (for example a per-request nonce), so a rule cannot match it exactly";
+        else rewrite = rw.observed;
+      }
+    }
+    if (cf?.ruleCapable && (!conflict || rewrite)) {
+      const r = await applyCloudflareRule(d.fetchApi, d.conn.cloudflare!, cf, host, paths, frameAncestorsValue(d.siteOrigin), rewrite);
+      const ch: Change = { kind: "cloudflare-rule", zoneId: cf.zoneId, rulesetId: r.rulesetId, ruleId: r.ruleId, ref: r.ref, host, paths: r.paths, appliedAt: nowIso(), action: r.action, ...(rewrite ? { rewrite: true } : {}) };
       return done({ state: "preparing", reason: `${describeChange(ch)} Waiting for the site's public pages to answer with the new header.`, provider: `cloudflare-zone (${cf.serving})`, target: cf, change: ch });
     }
     // 2. A Git-linked Vercel or Pages project: the change goes through that repository.
     const repoTarget = vc?.repo ? { provider: "vercel" as const, repo: vc.repo, branch: vc.branch } : cf?.pages?.repo ? { provider: "cloudflare-pages" as const, repo: cf.pages.repo, branch: cf.pages.branch ?? "main" } : null;
-    if (conflict) return done({ state: "unavailable", reason: `${conflict}. That header comes from the site's own code, so it has to be changed there (only public pages may allow ${new URL(d.siteOrigin).host}); automatic preparation is not attempted. ${notes.join("; ")}.`, provider: vc ? "vercel" : "cloudflare", target: vc ?? cf });
+    if (conflict) return done({ state: "unavailable", reason: `${conflict}${rewriteWhy ? `, and Crestmont's Cloudflare rule cannot replace just that directive: ${rewriteWhy}` : ""}. That header comes from the site's own code, so it has to be changed there (only public pages may allow ${new URL(d.siteOrigin).host}); automatic preparation is not attempted. ${notes.join("; ")}.`, provider: vc ? "vercel" : "cloudflare", target: vc ?? cf });
     if (!repoTarget) return done({ state: "unavailable", reason: `${notes.join("; ")}. The project is not linked to a GitHub repository (and is not proxied by a connected Cloudflare zone), so Crestmont has no supported way to change its headers.`, provider: vc ? "vercel" : "cloudflare", target: vc ?? cf });
     if (!d.conn.github) return done({ state: "authorization_required", reason: `${notes.join("; ")}. Connect GitHub (PORTFOLIO_GITHUB_TOKEN) with access to ${repoTarget.repo} so Crestmont can propose the header change there.`, provider: repoTarget.provider, target: vc ?? cf });
     const access = await repoAccess(d.fetchApi, d.conn.github, repoTarget.repo, repoTarget.branch);
@@ -173,6 +186,18 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
   }
 }
 
+/** The homepage's Content-Security-Policy read once more (to tell a fixed policy from a per-request one). */
+async function siteCsp(d: NativeDeps, url: string): Promise<string | null> {
+  const u = new URL(url);
+  if (!untrustedHostAllowed(u.hostname)) return null;
+  const release = allowEgressHost(u.hostname);
+  try {
+    const r = await d.fetchSite(u.toString(), { method: "GET", redirect: "manual", signal: AbortSignal.timeout(10_000), headers: { accept: "text/html" } });
+    await r.body?.cancel().catch(() => undefined);
+    return r.headers.get("content-security-policy");
+  } catch { return null; } finally { release(); }
+}
+
 async function headerFile(d: NativeDeps, provider: "vercel" | "cloudflare-pages", vc: VercelTarget | null, cf: CloudflareTarget | null, repo: string, branch: string): Promise<{ path: string; text: string | null } | string> {
   const join = (...xs: string[]) => xs.map((x) => x.replace(/^\/+|\/+$/g, "")).filter(Boolean).join("/");
   if (provider === "vercel") { const path = join(vc?.rootDirectory ?? "", "vercel.json"); return { path, text: (await readFile(d.fetchApi, d.conn.github!, repo, path, branch))?.text ?? null }; }
@@ -188,7 +213,7 @@ async function headerFile(d: NativeDeps, provider: "vercel" | "cloudflare-pages"
 
 function describeChange(c: Change): string {
   if (c.kind === "failed") return c.detail;
-  if (c.kind === "cloudflare-rule") return `Crestmont ${c.action === "unchanged" ? "confirmed" : c.action} its Cloudflare response-header rule for ${c.host} (${c.paths} public paths; sensitive pages untouched).`;
+  if (c.kind === "cloudflare-rule") return `Crestmont ${c.action === "unchanged" ? "confirmed" : c.action} its Cloudflare response-header rule for ${c.host} (${c.paths} public paths${c.rewrite ? "; only the frame-ancestors directive of the site's own policy is replaced, every other directive is kept" : ""}; sensitive pages untouched).`;
   return `Header change proposed in ${c.pr.repo} (${c.pr.path}): ${c.pr.url}.`;
 }
 

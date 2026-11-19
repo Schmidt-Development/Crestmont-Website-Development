@@ -4,7 +4,12 @@
 // Configuration is Cloudflare's own supported mechanism for response headers: ONE Response Header Transform Rule in
 // the zone's http_response_headers_transform phase, owned by Crestmont (stable `ref`), that on exactly the host's
 // public paths ADDS `Content-Security-Policy: frame-ancestors <Crestmont origins>` (a second policy — the site's own
-// CSP is left untouched) and removes X-Frame-Options. Other rules in the phase are never sent or changed: Crestmont's
+// CSP is left untouched) and removes X-Frame-Options.
+// When the site's OWN policy already sets frame-ancestors (a second policy cannot loosen it), the rule instead replaces
+// that one directive and nothing else: it matches only when the response's Content-Security-Policy is byte-for-byte the
+// policy Crestmont read (stable across requests), and sets the same policy with only frame-ancestors changed. Every other
+// directive (script-src, connect-src, …) is kept exactly; if the site ever sends a different policy, the rule simply
+// stops matching and the page refuses framing again (fail closed). Other rules in the phase are never sent or changed: Crestmont's
 // rule is added, updated or deleted through the per-rule endpoints. Re-running it changes nothing when the rule is
 // already exactly right.
 import { call, type NativeConnections } from "./connections.ts";
@@ -21,8 +26,10 @@ const zoneCandidates = (host: string) => { const l = host.split("."); const out:
 
 type PagesInfo = NonNullable<CloudflareTarget["pages"]>;
 async function findPages(f: typeof fetch, token: string, account: string, host: string): Promise<PagesInfo | null> {
-  for (let page = 1; page <= 5; page++) {
-    const r = await call<Env<{ name: string; domains?: string[]; source?: { type?: string; config?: { owner?: string; repo_name?: string; production_branch?: string } }; build_config?: { destination_dir?: string; root_dir?: string; build_command?: string } }[]>>(f, "cloudflare", token, `/accounts/${account}/pages/projects`, { query: { page: String(page), per_page: "50" } }).catch(() => null);
+  for (let page = 1; page <= 10; page++) {
+    // The Pages list endpoint rejects per_page values other than its own (HTTP 400 "Invalid list options"): use its
+    // default page size and follow result_info.total_pages.
+    const r = await call<Env<{ name: string; domains?: string[]; source?: { type?: string; config?: { owner?: string; repo_name?: string; production_branch?: string } }; build_config?: { destination_dir?: string; root_dir?: string; build_command?: string } }[]>>(f, "cloudflare", token, `/accounts/${account}/pages/projects`, page > 1 ? { query: { page: String(page) } } : {}).catch(() => null);
     const hit = r?.result?.find((p) => (p.domains ?? []).includes(host));
     if (hit) {
       const gh = hit.source?.type === "github" && hit.source.config?.owner && hit.source.config.repo_name ? `${hit.source.config.owner}/${hit.source.config.repo_name}` : null;
@@ -69,23 +76,48 @@ const hex = async (s: string) => [...new Uint8Array(await crypto.subtle.digest("
 export const ruleRef = async (host: string) => `crestmont_native_${(await hex(host)).slice(0, 16)}`;
 const PHASE = "http_response_headers_transform";
 
-/** The exact rule Crestmont wants for this host (deterministic for the same input, so re-running is a no-op). */
-export async function desiredRule(host: string, paths: string[], frameAncestors: string): Promise<Rule> {
+/** A site policy whose frame-ancestors directive Crestmont may replace: one policy, printable ASCII, bounded, exactly
+ *  one frame-ancestors directive. Returns the same policy with only that directive changed, or why it cannot. */
+export const MAX_REWRITE_CSP = 1500;
+export function rewriteFrameAncestors(csp: string, frameAncestors: string): { ok: true; observed: string; value: string } | { ok: false; why: string } {
+  const observed = csp;
+  if (!observed.trim()) return { ok: false, why: "the site sends an empty Content-Security-Policy" };
+  if (observed.includes(",")) return { ok: false, why: "the site sends more than one Content-Security-Policy, which a single rule cannot rewrite safely" };
+  if (!/^[\x20-\x7e]+$/.test(observed)) return { ok: false, why: "the site's Content-Security-Policy contains characters a rule cannot match exactly" };
+  if (observed.length > MAX_REWRITE_CSP) return { ok: false, why: `the site's Content-Security-Policy is longer than ${MAX_REWRITE_CSP} characters` };
+  const parts = observed.split(";").map((d) => d.trim()).filter(Boolean);
+  const fa = parts.filter((d) => /^frame-ancestors(\s|$)/i.test(d));
+  if (fa.length !== 1) return { ok: false, why: `the site's Content-Security-Policy has ${fa.length} frame-ancestors directives` };
+  return { ok: true, observed, value: parts.map((d) => (/^frame-ancestors(\s|$)/i.test(d) ? frameAncestors : d)).join("; ") };
+}
+
+/** The exact rule Crestmont wants for this host (deterministic for the same input, so re-running is a no-op). With
+ *  `siteCsp` (the site's own policy sets frame-ancestors), the rule replaces only that directive — see the header. */
+export async function desiredRule(host: string, paths: string[], frameAncestors: string, siteCsp?: string | null): Promise<Rule> {
   const set = [...new Set(paths)].sort().map((p) => JSON.stringify(p)).join(" ");
+  let expression = `(http.host eq ${JSON.stringify(host)} and http.request.uri.path in {${set}})`;
+  let csp: { operation: string; value: string } = { operation: "add", value: frameAncestors };
+  if (siteCsp) {
+    const rw = rewriteFrameAncestors(siteCsp, frameAncestors);
+    if (!rw.ok) throw new Error(`Crestmont cannot rewrite this site's policy: ${rw.why}`);
+    expression = `(http.host eq ${JSON.stringify(host)} and http.request.uri.path in {${set}} and http.response.headers["content-security-policy"][0] eq ${JSON.stringify(rw.observed)})`;
+    csp = { operation: "set", value: rw.value };
+  }
+  if (expression.length > 4000) throw new Error("Crestmont cannot express this site's rule within Cloudflare's 4,000-character limit (too many public paths or too long a policy)");
   return {
     ref: await ruleRef(host),
     description: `Crestmont portfolio: allow native embedding of ${host} public pages (managed by Crestmont; sensitive pages unchanged)`.slice(0, 500),
-    expression: `(http.host eq ${JSON.stringify(host)} and http.request.uri.path in {${set}})`,
+    expression,
     action: "rewrite",
-    action_parameters: { headers: { "Content-Security-Policy": { operation: "add", value: frameAncestors }, "X-Frame-Options": { operation: "remove" } } },
+    action_parameters: { headers: { "Content-Security-Policy": csp, "X-Frame-Options": { operation: "remove" } } },
     enabled: true,
   };
 }
 const same = (a: Rule, b: Rule) => a.expression === b.expression && a.action === b.action && JSON.stringify(a.action_parameters) === JSON.stringify(b.action_parameters) && (a.enabled ?? true) === (b.enabled ?? true);
 
 /** Adds or updates Crestmont's rule. Returns what happened and the rule's identifiers (for audit and rollback). */
-export async function applyCloudflareRule(f: typeof fetch, conn: NonNullable<NativeConnections["cloudflare"]>, t: CloudflareTarget, host: string, paths: string[], frameAncestors: string): Promise<{ action: "created" | "updated" | "unchanged"; rulesetId: string; ruleId: string; ref: string; paths: number }> {
-  const want = await desiredRule(host, paths, frameAncestors);
+export async function applyCloudflareRule(f: typeof fetch, conn: NonNullable<NativeConnections["cloudflare"]>, t: CloudflareTarget, host: string, paths: string[], frameAncestors: string, siteCsp?: string | null): Promise<{ action: "created" | "updated" | "unchanged"; rulesetId: string; ruleId: string; ref: string; paths: number }> {
+  const want = await desiredRule(host, paths, frameAncestors, siteCsp);
   const entry = await call<Env<Ruleset>>(f, "cloudflare", conn.token, `/zones/${t.zoneId}/rulesets/phases/${PHASE}/entrypoint`);
   if (!entry?.result) {
     const made = await call<Env<Ruleset>>(f, "cloudflare", conn.token, `/zones/${t.zoneId}/rulesets/phases/${PHASE}/entrypoint`, { method: "PUT", body: { rules: [want] } });
