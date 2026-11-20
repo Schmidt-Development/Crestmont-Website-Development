@@ -35,7 +35,7 @@ export interface PortfolioProject {
   /** Native readiness (migration 0110, src/services/native/): every entry created from 2026-11-18 must reach the real
    *  website in a native frame, verified in a real browser; it is never silently shown through the remote browser. */
   native_required?: number; native_state?: NativeState; native_reason?: string | null; native_provider?: string | null; native_target?: string | null;
-  native_change?: string | null; native_updated_at?: string | null; native_verified_at?: string | null; native_verification?: string | null;
+  native_change?: string | null; native_updated_at?: string | null; native_verified_at?: string | null; native_verification?: string | null; native_lease_until?: string | null;
   /** Native-first standard (migration 0111): when an older entry was converted, the last diagnosis and the last measured
    *  direct-vs-embedded performance (JSON, src/services/native/diagnostics.ts and verify.ts). */
   native_migrated_at?: string | null; native_diagnosis?: string | null; native_perf?: string | null;

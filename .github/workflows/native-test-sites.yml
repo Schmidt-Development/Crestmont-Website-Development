@@ -1,0 +1,128 @@
+name: Native onboarding trial — real test websites (production)
+
+# Phase 6 Test B (Owner, 2026-11-20): genuinely deployed HTTPS websites, onboarded through the real production engine.
+# Six tiny TEST DATA Workers (test-sites/native/worker.js, one variant each: static, WebGL scene, client-rendered,
+# app shell with an internal scroll container and web components, CSS/canvas motion with lazy images, and a negative
+# control that refuses every frame) are deployed on the account's workers.dev subdomain. They hold no forms, accounts,
+# data or tracking, are noindex, and every /login refuses framing. Then the production Worker onboards them through
+# its normal bulk intake (unpublished — nothing is published, no consent recorded), bounded prepare rounds verify them
+# in Browser Run, and this job opens each verified preview in Chromium (desktop and phone). Each site must reach its
+# EXPECTED verdict: the five permitted sites native_verified, the refusing control NOT verified (authorization required).
+#   remove: deletes the six test Workers (the unpublished entries stay for the record; archive them in Staff).
+# Runs only from main, in the `production` environment (the Owner approves each run). No token value is printed.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "deploy-and-onboard (deploy the six test Workers, onboard them, check them) or remove (delete the test Workers)"
+        required: true
+        type: choice
+        options: [deploy-and-onboard, remove]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portfolio-native-ops
+  cancel-in-progress: false
+
+jobs:
+  trial:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment: production
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      ACTION: ${{ inputs.action }}
+      VARIANTS: "static webgl csr appshell motion refuses"
+    steps:
+      - name: Validate inputs (F-23)
+        run: |
+          [[ "$ACTION" =~ ^(deploy-and-onboard|remove)$ ]] || { echo "::error::action must be deploy-and-onboard or remove"; exit 1; }
+          [ -n "$PRODUCTION_URL" ] || { echo "::error::PRODUCTION_URL (var) is not set"; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Test Workers (deploy, or remove)
+        id: sites
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -o pipefail
+          urls=""
+          for v in $VARIANTS; do
+            name="crestmont-native-test-$v"
+            if [ "$ACTION" = "remove" ]; then $WRANGLER delete --name "$name" --force 2>&1 | tail -2; continue; fi
+            out=$($WRANGLER deploy test-sites/native/worker.js --name "$name" --compatibility-date 2026-11-01 --var "VARIANT:$v" 2>&1) || { echo "$out" | tail -5; echo "::error::deploying $name failed"; exit 1; }
+            u=$(echo "$out" | grep -oE "https://$name\.[a-z0-9-]+\.workers\.dev" | head -1)
+            [ -n "$u" ] || { echo "$out" | tail -5; echo "::error::no workers.dev address for $name"; exit 1; }
+            echo "- $v: $u" | tee -a "$GITHUB_STEP_SUMMARY"
+            urls="$urls${urls:+,}$u/"
+          done
+          echo "urls=$urls" >> "$GITHUB_OUTPUT"
+      - name: Wait until every test site answers with its own headers
+        if: inputs.action == 'deploy-and-onboard'
+        env:
+          URLS: ${{ steps.sites.outputs.urls }}
+        run: |
+          for u in ${URLS//,/ }; do
+            for i in $(seq 1 30); do code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$u" || true); [ "$code" = "200" ] && break; sleep 5; done
+            fa=$(curl -s -D - -o /dev/null --max-time 10 "$u" | tr -d '\r' | grep -io 'frame-ancestors[^;]*' || true)
+            login=$(curl -s -D - -o /dev/null --max-time 10 "${u}login" | tr -d '\r' | grep -io "frame-ancestors[^;]*" || true)
+            echo "- $u → HTTP $code; $fa; /login: $login" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Onboard through the production engine (bulk intake, bounded prepare rounds — unpublished)
+        id: ops
+        if: inputs.action == 'deploy-and-onboard'
+        env:
+          URLS: ${{ steps.sites.outputs.urls }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -o pipefail
+          work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+          ask() { WRANGLER="$WRANGLER" bash scripts/native-ops-ask.sh "$1" "$work/r.json"; http=$(cat "$work/r.json.status"); }
+          ask "$(node -e 'console.log(JSON.stringify({ action: "enqueue", urls: process.argv[1].split(",").filter(Boolean) }))' "$URLS")"
+          [ "$http" = "200" ] || { echo "::error::enqueue HTTP $http"; exit 1; }
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            console.log("## Intake\n\n| Address | Result | Entry | Detail |\n|---|---|---|---|");
+            for (const x of r.results) console.log(`| ${x.url} | ${x.result} | ${x.slug ?? "—"} | ${x.detail.replace(/\|/g, "/")} |`);' "$work/r.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          slugs=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).slugs.join(","))' "$work/r.json")
+          WRANGLER="$WRANGLER" bash scripts/native-prepare-loop.sh "$RUNNER_TEMP/readiness.json" 45 "$slugs" | tee -a "$GITHUB_STEP_SUMMARY"
+          node scripts/native-readiness-gate.mjs "$RUNNER_TEMP/readiness.json" "$slugs" | tee -a "$GITHUB_STEP_SUMMARY" || true
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")), named = process.argv[2].split(",");
+            for (const x of r.readiness.filter((x) => named.includes(x.slug))) console.log([x.slug, x.state, r.previews[x.slug] || "", x.live].join("\t"));' "$RUNNER_TEMP/readiness.json" "$slugs" > "$RUNNER_TEMP/targets.tsv"
+          cat "$RUNNER_TEMP/targets.tsv"
+      - name: Install Chromium (pinned Playwright)
+        if: inputs.action == 'deploy-and-onboard'
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      - name: Expected verdicts, and each verified preview in Chromium (desktop and phone)
+        if: inputs.action == 'deploy-and-onboard'
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: |
+          set -o pipefail
+          rc=0
+          echo "## Expected verdicts" >> "$GITHUB_STEP_SUMMARY"
+          while IFS=$'\t' read -r slug state preview live; do
+            case "$live" in *crestmont-native-test-refuses*) want="not verified" ;; *) want="native_verified" ;; esac
+            got="$state"; ok=1
+            if [ "$want" = "native_verified" ]; then [ "$state" = "native_verified" ] || ok=0; else [ "$state" != "native_verified" ] || ok=0; fi
+            echo "- $([ $ok = 1 ] && echo PASS || echo FAIL) $live: expected $want, got $got" | tee -a "$GITHUB_STEP_SUMMARY"
+            [ $ok = 1 ] || rc=1
+            if [ "$state" = "native_verified" ] && [ -n "$preview" ]; then
+              node scripts/native-onboard-check.mjs "$PRODUCTION_URL$preview" "$live" | tee -a "$GITHUB_STEP_SUMMARY" || rc=1
+            fi
+          done < "$RUNNER_TEMP/targets.tsv"
+          [ "$(wc -l < "$RUNNER_TEMP/targets.tsv")" -ge 6 ] || { echo "::error::fewer than six test sites were onboarded"; rc=1; }
+          exit "$rc"

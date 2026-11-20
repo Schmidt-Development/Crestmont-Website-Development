@@ -121,7 +121,7 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         case "portfolio_embeds": { const r = await refreshAllEmbeds(ctx.db, new URL(ctx.baseUrl).origin, env.overrides?.portfolioFetch ?? fetch, remoteBrowserConfig(env).enabled); detail = r.map((x) => `${x.slug}:${x.status}${x.published ? "+published" : ""}`).join(", ") || "no active projects"; break; }
         // Native readiness (2026-11-18): advance every new entry that is not verified yet — prepare, follow its deployment,
         // re-check and verify it in a real browser. Bounded (10 entries per run); settled entries at most every 6 hours.
-        case "portfolio_native": { const r = await advanceAllNative(nativeDepsFrom(env, ctx.db, new URL(ctx.baseUrl).origin)); detail = r.map((x) => `${x.slug}:${x.state}`).join(", ") || "nothing in progress"; break; }
+        case "portfolio_native": { const r = await advanceAllNative(nativeDepsFrom(env, ctx.db, new URL(ctx.baseUrl).origin), 20, { maxVerifications: 6 }); detail = r.map((x) => `${x.slug}:${x.state}`).join(", ") || "nothing in progress"; break; }
         case "retention": detail = (await runRetention({ db: ctx.db, storage: ctx.storage })).map((r) => `${r.category}:${r.mode === "skipped" ? "off" : r.affected}`).join(", "); break;
       }
       results[job] = { ok: true, detail };

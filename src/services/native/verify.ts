@@ -36,7 +36,10 @@ export type FindingKind = "embed" | "site" | "environment";
 export interface Finding { code: string; kind: FindingKind; blocking: boolean; detail: string }
 export interface ModePerf { ttfb: number | null; fcp: number | null; lcp: number | null; cls: number; tbt: number; longestTask: number; idleFps: number; scrollFps: number | null; interaction: number | null; errors: number; failedRequests: number }
 export interface PerfReport { direct: ModePerf | null; embedded: ModePerf | null; mobile: Pick<ModePerf, "lcp" | "cls" | "tbt" | "idleFps"> | null; environment: string; budgets: string; verdict: string }
-export interface VerifyResult { ok: boolean; checks: Check[]; summary: string; at: string; findings?: Finding[]; perf?: PerfReport }
+/** Visual evidence: a screenshot of what the visitor saw, stored by the caller (the verifier itself stores nothing). */
+export interface Shot { label: "direct" | "embedded" | "direct-mobile" | "embedded-mobile"; key: string }
+export type ShotSink = (label: Shot["label"], jpeg: Uint8Array) => Promise<string | null>;
+export interface VerifyResult { ok: boolean; checks: Check[]; summary: string; at: string; findings?: Finding[]; perf?: PerfReport; shots?: Shot[] }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -80,24 +83,43 @@ const SAMPLE = `(() => new Promise((res) => requestAnimationFrame(() => requestA
 const PAGE = `(async () => { const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let i = 0; i < 60 && document.readyState !== "complete"; i++) await sleep(250);
   await sleep(1500);
-  const text = (document.body ? document.body.innerText : "").replace(/\\s+/g, " ").trim().length;
+  // Visible text, including open shadow roots (custom elements / web components render their text there).
+  const deep = (root) => { let t = root === document ? (document.body ? document.body.innerText : "") : [...root.children].map((c) => c.innerText || c.textContent || "").join(" "); for (const e of root.querySelectorAll("*")) if (e.shadowRoot) t += " " + deep(e.shadowRoot); return t; };
+  const text = deep(document).replace(/\\s+/g, " ").trim().length;
   const media = [...document.querySelectorAll("img, video, canvas, svg, picture")].filter((e) => { const r = e.getBoundingClientRect(); return r.width > 16 && r.height > 16 && r.bottom > 0 && r.top < innerHeight; }).length;
   const fps = await new Promise((res) => { let n = 0; const t = performance.now(); const g = () => { n++; if (performance.now() - t < 1000) requestAnimationFrame(g); else res(n); }; requestAnimationFrame(g); });
+  // Liveness, separate from smoothness: a slow page (heavy scripts, a software renderer) still renders frames; a frozen
+  // one does not. Below 5 fps, watch 3 more seconds.
+  const frames3 = fps >= 5 ? fps * 3 : await new Promise((res) => { let n = 0; const t = performance.now(); const g = () => { n++; if (performance.now() - t < 3000) requestAnimationFrame(g); else res(n); }; requestAnimationFrame(g); });
   const anims = document.getAnimations ? document.getAnimations().filter((a) => a.playState === "running").length : 0;
   let webgl = false, renderer = ""; try { const t = document.createElement("canvas"); const g = t.getContext("webgl2") || t.getContext("webgl"); webgl = !!g; if (g) { const x = g.getExtension("WEBGL_debug_renderer_info"); renderer = String(x ? g.getParameter(x.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER)).slice(0, 120); } } catch {}
   const ov = (e) => getComputedStyle(e).overflowY, hv = ov(document.documentElement);
   const hidden = /hidden|clip/.test(hv) || (hv === "visible" && document.body && /hidden|clip/.test(ov(document.body)));
   let room = hidden ? 0 : document.documentElement.scrollHeight - innerHeight;
   for (const e of document.querySelectorAll("body *")) if (/(auto|scroll|overlay)/.test(getComputedStyle(e).overflowY)) room = Math.max(room, e.scrollHeight - e.clientHeight);
+  // A safe click target, independent of tag choice (div-only pages, custom elements): first any visible text, else any
+  // visible non-interactive element — never a control, a link, a form field or something that looks clickable.
+  const INTERACTIVE = "a, button, input, select, textarea, label, summary, option, video, audio, iframe, [role=button], [role=link], [role=tab], [role=menuitem], [role=checkbox], [role=switch], [onclick], [contenteditable=''], [contenteditable=true], [tabindex]:not([tabindex='-1'])";
+  const safe = (hit) => !!hit && hit !== document.documentElement && hit !== document.body && !hit.closest(INTERACTIVE) && getComputedStyle(hit).cursor !== "pointer";
   let spot = null;
-  for (const e of document.querySelectorAll("h1, h2, h3, p, li")) { const r = e.getBoundingClientRect(); if (r.width < 40 || r.height < 10 || r.top < 0 || r.bottom > innerHeight) continue;
-    const x = r.left + Math.min(16, r.width / 2), y = r.top + r.height / 2, hit = document.elementFromPoint(x, y);
-    if (hit && !hit.closest("a, button, input, select, textarea, label, summary, [role=button], [onclick], [tabindex]")) { spot = { x: Math.round(x), y: Math.round(y) }; break; } }
+  const tw = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.nodeValue && n.nodeValue.trim().length >= 3 ? 1 : 3) });
+  for (let n, k = 0; !spot && (n = tw.nextNode()) && k < 5000; k++) {
+    const rg = document.createRange(); rg.selectNodeContents(n);
+    for (const r of rg.getClientRects()) {
+      if (r.width < 8 || r.height < 6 || r.top < 0 || r.bottom > innerHeight || r.left < 0 || r.right > innerWidth) continue;
+      const x = r.left + Math.min(6, r.width / 2), y = r.top + r.height / 2, hit = document.elementFromPoint(x, y);
+      if (safe(hit)) { spot = { x: Math.round(x), y: Math.round(y), how: "text" }; break; }
+    }
+  }
+  for (let gy = 0.25; !spot && gy <= 0.85; gy += 0.15) for (let gx = 0.1; !spot && gx <= 0.9; gx += 0.2) {
+    const x = innerWidth * gx, y = innerHeight * gy, hit = document.elementFromPoint(x, y);
+    if (safe(hit)) spot = { x: Math.round(x), y: Math.round(y), how: "element" };
+  }
   window.__crestmontClicks = 0; addEventListener("click", () => { window.__crestmontClicks++; }, { capture: true });
   const S = window.__cmv || { errors: [], resErr: 0, ctxFail: 0, lost: 0, fcp: null, lcp: null, cls: 0, tasks: [], events: 0 };
   const nav = performance.getEntriesByType("navigation")[0];
   const failed = performance.getEntriesByType("resource").filter((r) => r.responseStatus >= 400).length + S.resErr;
-  return JSON.stringify({ title: document.title.slice(0, 120), text, media, fps, anims, webgl, renderer, room: Math.round(room), spot, width: innerWidth, overflowX: document.documentElement.scrollWidth - innerWidth,
+  return JSON.stringify({ title: document.title.slice(0, 120), text, media, fps, frames3, anims, webgl, renderer, room: Math.round(room), spot, width: innerWidth, overflowX: document.documentElement.scrollWidth - innerWidth,
     perf: { ttfb: nav ? Math.round(nav.responseStart) : null, fcp: S.fcp === null ? null : Math.round(S.fcp), lcp: S.lcp === null ? null : Math.round(S.lcp), cls: Math.round(S.cls * 1000) / 1000,
       tbt: S.tasks.reduce((a, d) => a + Math.max(0, d - 50), 0), longestTask: S.tasks.reduce((a, d) => Math.max(a, d), 0), errors: S.errors.length, errorSample: S.errors.slice(0, 3), failedRequests: failed, ctxFail: S.ctxFail, lost: S.lost } });
 })()`;
@@ -106,12 +128,14 @@ const SCROLL_FPS_START = `(() => { window.__cmvScroll = new Promise((res) => { l
 const MOBILE = `(async () => { const sleep = (ms) => new Promise((r) => setTimeout(r, ms)); for (let i = 0; i < 60 && document.readyState !== "complete"; i++) await sleep(250); await sleep(1200);
   const S = window.__cmv || { lcp: null, cls: 0, tasks: [] };
   const fps = await new Promise((res) => { let n = 0; const t = performance.now(); const g = () => { n++; if (performance.now() - t < 1000) requestAnimationFrame(g); else res(n); }; requestAnimationFrame(g); });
-  return JSON.stringify({ text: (document.body ? document.body.innerText : "").replace(/\\s+/g, " ").trim().length, width: innerWidth, overflowX: document.documentElement.scrollWidth - innerWidth,
+  const big = [...document.querySelectorAll("canvas")].filter((c) => { const r = c.getBoundingClientRect(), st = getComputedStyle(c); return r.width * r.height >= innerWidth * innerHeight * 0.04 && st.display !== "none" && st.visibility !== "hidden" && Number(st.opacity) > 0.05; }).length;
+  const deep = (root) => { let t = root === document ? (document.body ? document.body.innerText : "") : [...root.children].map((c) => c.innerText || c.textContent || "").join(" "); for (const e of root.querySelectorAll("*")) if (e.shadowRoot) t += " " + deep(e.shadowRoot); return t; };
+  return JSON.stringify({ text: deep(document).replace(/\\s+/g, " ").trim().length, width: innerWidth, overflowX: document.documentElement.scrollWidth - innerWidth, canvases: big,
     perf: { lcp: S.lcp === null ? null : Math.round(S.lcp), cls: Math.round(S.cls * 1000) / 1000, tbt: S.tasks.reduce((a, d) => a + Math.max(0, d - 50), 0), idleFps: fps } }); })()`;
 
 interface CanvasInfo { i: number; w: number; h: number; area: number; inView: number; hidden: boolean; decorative: boolean; behind: boolean; type: string | null; draws: number }
 interface Sample { drawn?: number; opaque?: number; transparent?: boolean; sig?: number; error?: string; offscreen?: boolean }
-interface Probe { title: string; text: number; media: number; fps: number; anims: number; webgl: boolean; renderer: string; room: number; spot: { x: number; y: number } | null; width: number; overflowX: number;
+interface Probe { title: string; text: number; media: number; fps: number; frames3: number; anims: number; webgl: boolean; renderer: string; room: number; spot: { x: number; y: number; how?: string } | null; width: number; overflowX: number;
   perf: { ttfb: number | null; fcp: number | null; lcp: number | null; cls: number; tbt: number; longestTask: number; errors: number; errorSample: string[]; failedRequests: number; ctxFail: number; lost: number } }
 type CanvasClass = "hidden" | "offscreen" | "decorative" | "rendered" | "deferred" | "empty" | "unreadable" | "offscreen-rendered";
 interface Judged { info: CanvasInfo; cls: CanvasClass; essential: boolean; drawn: number; animated: boolean; detail: string }
@@ -174,7 +198,7 @@ class Page {
 }
 
 /** One live page (either mode): canvases classified, pixels sampled three times, a deferred re-check, perf, gestures. */
-async function measure(page: Page, sid: string, x: number, y: number): Promise<{ probe: Probe; canvases: Judged[]; perf: ModePerf; scrolled: { before: number; after: number } | null; clicked: boolean | null }> {
+async function measure(page: Page, sid: string, x: number, y: number, gestures = true): Promise<{ probe: Probe; canvases: Judged[]; perf: ModePerf; scrolled: { before: number; after: number } | null; clicked: boolean | null }> {
   const probe = JSON.parse(String(await page.evalIn(sid, PAGE))) as Probe;
   let info = JSON.parse(JSON.stringify(await page.evalIn(sid, CANVASES))) as CanvasInfo[];
   const samples = async () => (await page.evalIn(sid, SAMPLE)) as Sample[];
@@ -206,7 +230,7 @@ async function measure(page: Page, sid: string, x: number, y: number): Promise<{
   });
   // Scrolling: smoothness while a real wheel gesture scrolls the page (frames per second during the gesture).
   let scrolled: { before: number; after: number } | null = null, scrollFps: number | null = null;
-  if (probe.room > 4) {
+  if (gestures && probe.room > 4) {
     const before = Number(await page.evalIn(sid, SCROLLED));
     await page.evalIn(sid, SCROLL_FPS_START);
     await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
@@ -218,7 +242,7 @@ async function measure(page: Page, sid: string, x: number, y: number): Promise<{
     await sleep(300);
   }
   let clicked: boolean | null = null;
-  if (probe.spot) {
+  if (gestures && probe.spot) {
     for (const type of ["mousePressed", "mouseReleased"]) await page.send("Input.dispatchMouseEvent", { type, x: probe.spot.x, y: probe.spot.y, button: "left", clickCount: 1 });
     await sleep(400);
     clicked = Number(await page.evalIn(sid, "window.__crestmontClicks || 0")) > 0;
@@ -233,8 +257,8 @@ const ms = (v: number | null) => (v === null ? "—" : `${v} ms`);
 const BUDGETS = "lab budgets (desktop, unthrottled): LCP ≤ 2,500 ms, CLS ≤ 0.1, TBT ≤ 200 ms, click latency ≤ 200 ms (lab stand-in for INP; INP ≤ 200 ms at the 75th percentile needs real-user data), ≥ 30 fps while scrolling";
 
 /** Verifies the live website at `liveOrigin` inside Crestmont's verification page `pageUrl`, against a direct visit. */
-export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigin: string, opts: { fixture?: FixtureResponder; timeoutMs?: number; liveUrl?: string } = {}): Promise<VerifyResult> {
-  const checks: Check[] = [], findings: Finding[] = [];
+export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigin: string, opts: { fixture?: FixtureResponder; timeoutMs?: number; liveUrl?: string; shot?: ShotSink } = {}): Promise<VerifyResult> {
+  const checks: Check[] = [], findings: Finding[] = [], shots: Shot[] = [];
   const add = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
   const find = (code: string, kind: FindingKind, blocking: boolean, detail: string) => findings.push({ code, kind, blocking, detail });
   const at = new Date().toISOString();
@@ -252,10 +276,27 @@ export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigi
     await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 
     // ── 1. The direct visit: the website as its own visitors see it, in this same browser (the baseline) ──
-    let direct: Awaited<ReturnType<typeof measure>> | null = null;
+    let direct: Awaited<ReturnType<typeof measure>> | null = null, warm: Awaited<ReturnType<typeof measure>> | null = null;
+    const snap = async (label: Shot["label"]) => {
+      if (!opts.shot) return;
+      try {
+        const r = await page.send("Page.captureScreenshot", { format: "jpeg", quality: 60 }) as { data?: string };
+        if (!r.data) return;
+        const key = await opts.shot(label, Uint8Array.from(atob(r.data), (ch) => ch.charCodeAt(0)));
+        if (key) shots.push({ label, key });
+      } catch { /* evidence is best-effort; the checks decide */ }
+    };
+    const liveUrl = opts.liveUrl ?? `${liveOrigin}/`;
     const hook = await page.send("Page.addScriptToEvaluateOnNewDocument", { source: HOOK }) as { identifier: string };
-    await page.send("Page.navigate", { url: opts.liveUrl ?? `${liveOrigin}/` });
-    if (await page.waitTop(Math.min(25_000, deadline - Date.now()))) direct = await measure(page, page.session, 700, 450).catch(() => null);
+    await page.send("Page.navigate", { url: liveUrl });
+    if (await page.waitTop(Math.min(25_000, deadline - Date.now()))) { direct = await measure(page, page.session, 700, 450).catch(() => null); await snap("direct"); }
+    // A second direct load with the browser cache warm — the state the frame's load (and every returning visitor) is
+    // in. Loading-order defects that only appear with cached files (e.g. a module preloaded before the import map
+    // that resolves it) show up here, so a visual lost in the frame is attributed to the site, not the frame.
+    if (direct && direct.canvases.some((c) => c.essential && c.cls === "rendered") && Date.now() < deadline - 40_000) {
+      await page.send("Page.navigate", { url: liveUrl });
+      if (await page.waitTop(Math.min(20_000, deadline - Date.now()))) warm = await measure(page, page.session, 700, 450, false).catch(() => null);
+    }
     await page.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: hook.identifier }).catch(() => undefined);
 
     // ── 2. Inside Crestmont's frame ──
@@ -263,9 +304,10 @@ export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigi
     await page.send("Page.navigate", { url: pageUrl });
     const framed = await page.waitFrame(Math.min(25_000, deadline - Date.now()));
     add("frame", framed, framed ? `The browser loaded ${liveOrigin} inside Crestmont's frame` : `The browser did not load ${liveOrigin} inside Crestmont's frame (${page.frameUrl ? `frame shows ${page.frameUrl.slice(0, 80)}` : "no frame document"}) — the site still refuses framing, or it did not answer`);
-    if (!framed) { find("frame_not_loaded", "embed", true, checks[0].detail); return finish(checks, at, findings); }
+    if (!framed) { find("frame_not_loaded", "embed", true, checks[0].detail); return finish(checks, at, findings, undefined, shots); }
     const sid = page.frameSession!;
     const emb = await measure(page, sid, 700, 450);
+    await snap("embedded");
     const r = emb.probe;
     const environment = `${r.renderer ? `WebGL renderer ${r.renderer}${SOFTWARE.test(r.renderer) ? " (software — no GPU)" : ""}` : r.webgl ? "WebGL available" : "no WebGL in this browser"}; viewport 1440×900, DPR 1, unthrottled CPU and network`;
 
@@ -273,7 +315,17 @@ export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigi
     const visible = r.text >= 40 || r.media >= 2, directVisible = !!direct && (direct.probe.text >= 40 || direct.probe.media >= 2);
     add("content", visible, visible ? `Real content is visible: ${r.text} characters of text, ${r.media} images/media in view${r.title ? `, title "${r.title}"` : ""}` : `The framed page is blank or stuck loading (${r.text} characters, ${r.media} media)${page.errors ? `; ${page.errors} JavaScript error(s)` : ""}${direct ? (directVisible ? " — only inside Crestmont's frame: the direct visit shows content" : " — also when visited directly") : ""}`);
     if (!visible) find(directVisible ? "blank_in_frame" : "hydration_failure", directVisible ? "embed" : "site", true, checks.at(-1)!.detail);
-    add("javascript", r.fps >= 5, `${r.fps} animation frames in 1 s, ${r.anims} running CSS/Web animation(s)${page.errors ? `, ${page.errors} uncaught JavaScript error(s)` : ", no uncaught errors"}`);
+    // Liveness: the page keeps producing frames (a frozen or crashed page produces none). Smoothness is performance:
+    // a low frame rate is reported and attributed (the site on its own, the frame, or a GPU-less browser), never a reject.
+    const live = r.fps >= 5 || r.frames3 >= 3;
+    add("javascript", live, live ? `${r.fps} animation frames in 1 s${r.fps < 5 ? ` (${r.frames3} in a 3 s window — slow but running)` : ""}, ${r.anims} running CSS/Web animation(s)${page.errors ? `, ${page.errors} uncaught JavaScript error(s)` : ", no uncaught errors"}` : `The page stopped producing frames (${r.frames3} in 3 s) — its main thread is frozen`);
+    if (!live) find(direct && direct.probe.fps < 5 && direct.probe.frames3 < 3 ? "hydration_failure" : "iframe_render_failure", direct && direct.probe.fps < 5 && direct.probe.frames3 < 3 ? "site" : "embed", true, checks.at(-1)!.detail);
+    else if (r.fps < 5) {
+      const soft = SOFTWARE.test(r.renderer) || !r.webgl;
+      if (direct && direct.probe.fps < 10) find("site_slow", "site", false, `${r.fps} fps inside Crestmont, ${direct.probe.fps} fps on the direct visit — the website's own pace${soft ? " (software rendering, no GPU: lab numbers are pessimistic)" : ""}`);
+      else if (direct) find("iframe_overhead", "embed", false, `${r.fps} fps inside Crestmont vs ${direct.probe.fps} fps on the direct visit`);
+      if (soft) find("gpu_limited", "environment", false, `frame rate measured with ${r.renderer || "no WebGL"} (no GPU)`);
+    }
     if (r.perf.errors && direct?.probe.perf.errors) find(r.perf.errorSample.some((e) => /module specifier|import/i.test(e)) ? "js_module_error" : "site_script_error", "site", false, `${r.perf.errors} script error(s) in the framed page and ${direct.probe.perf.errors} on the direct visit — the website's own: ${r.perf.errorSample.join(" | ").slice(0, 300)}`);
     else if (r.perf.errors && direct && !direct.probe.perf.errors) find("iframe_script_error", "embed", false, `${r.perf.errors} script error(s) only inside Crestmont's frame: ${r.perf.errorSample.join(" | ").slice(0, 300)}`);
 
@@ -285,7 +337,7 @@ export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigi
       let ok = true;
       for (const c of broken) {
         const d = direct?.canvases.find((x) => x.info.i === c.info.i) ?? null;
-        const dRendered = !!d && d.cls === "rendered";
+        const dRendered = !!d && d.cls === "rendered" && !(warm && warm.canvases.find((x) => x.info.i === c.info.i)?.cls !== "rendered");
         if (gpuLimited && (c.info.type?.includes("webgl") || r.perf.ctxFail > 0)) { lines.push(`${c.detail} — not verifiable here: this verification browser could not run WebGL${r.renderer ? ` (${r.renderer})` : ""}; check it in a GPU-capable browser`); find("gpu_limited", "environment", false, `${c.detail}; ${environment}`); continue; }
         ok = false;
         if (dRendered) { lines.push(`essential ${c.detail} — only inside Crestmont's frame (the direct visit drew ${Math.round(d!.drawn * 100)}%)`); find("iframe_render_failure", "embed", true, `essential ${c.detail} only inside the frame; direct: ${d!.detail}`); }
@@ -294,12 +346,32 @@ export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigi
       for (const c of emb.canvases) if (!broken.includes(c)) lines.push(c.detail);
       add("canvas", ok, lines.join("; "));
     }
+    // Essential-visual parity: an essential canvas that rendered on the direct visit must render inside the frame. A
+    // missing scene is never verified, whatever the frame rate — attributed to the site when the warm direct visit
+    // loses it too, to the frame when only the frame does.
+    if (direct && !checks.some((c) => c.name === "canvas" && !c.ok)) {
+      const big = (c: Judged) => c.info.w * c.info.h;
+      const want = direct.canvases.filter((c) => c.essential && c.cls === "rendered");
+      const gpuLimited = !r.webgl || r.perf.ctxFail > 0 || r.perf.lost > 0;
+      const shown = (m: Awaited<ReturnType<typeof measure>>) => (c: Judged) => m.canvases.some((x) => !x.info.hidden && (x.cls === "rendered" || x.cls === "offscreen-rendered") && big(x) >= big(c) * 0.25);
+      const missing = want.filter((c) => !shown(emb)(c));
+      if (missing.length && !(gpuLimited && missing.every((c) => c.info.type?.includes("webgl")))) {
+        const what = missing.map((c) => `${c.info.w}×${c.info.h}${c.info.type ? ` ${c.info.type}` : ""} canvas (direct visit drew ${Math.round(c.drawn * 100)}%)`).join(", ");
+        const warmLost = !!warm && missing.some((c) => !shown(warm!)(c));
+        const errs = r.perf.errorSample.length ? `; errors: ${r.perf.errorSample.join(" | ").slice(0, 240)}` : "";
+        const detail = warmLost
+          ? `essential visual missing: ${what} — it renders on a first visit but not when the website loads with cached files (a second direct visit loses it too), so returning visitors and Crestmont's frame miss it; the website's own loading defect${errs}`
+          : `essential visual missing inside Crestmont's frame: ${what}${warm ? " — a second direct visit with cached files still shows it" : ""}${errs}`;
+        add("visuals", false, detail);
+        find(warmLost ? "site_render_defect" : "iframe_render_failure", warmLost ? "site" : "embed", true, detail);
+      } else if (want.length) add("visuals", true, `${want.length} essential visual(s) from the direct visit also render inside Crestmont's frame`);
+    }
     if (emb.scrolled) {
       const moved = emb.scrolled.after > emb.scrolled.before;
       add("scroll", moved, moved ? `A wheel gesture scrolled the site (${emb.scrolled.before} → ${emb.scrolled.after} px of ${r.room})` : `A wheel gesture did not scroll the site (${emb.scrolled.before} → ${emb.scrolled.after} px, ${r.room} px to scroll)`);
       if (!moved) find(direct?.scrolled && direct.scrolled.after > direct.scrolled.before ? "scroll_blocked" : "site_scroll", direct?.scrolled && direct.scrolled.after > direct.scrolled.before ? "embed" : "site", true, checks.at(-1)!.detail);
     } else add("scroll", true, "The page fits its frame at 1440×900 — nothing to scroll");
-    if (emb.clicked === null) add("click", false, "No visible text to click on — the page shows nothing a visitor could interact with");
+    if (emb.clicked === null) add("click", false, "No safe spot to click — every visible point is a control, a link or a form field, or the page shows nothing");
     else { add("click", emb.clicked, emb.clicked ? "A real click reached the site" : "A real click on the page's text did not reach the site"); if (!emb.clicked) find("interaction_blocked", "embed", true, checks.at(-1)!.detail); }
 
     // Performance: direct vs embedded, attributed honestly.
@@ -324,24 +396,33 @@ export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigi
       page.frameSession = null; page.frameUrl = "";
       await page.send("Page.navigate", { url: pageUrl });
       if (await page.waitFrame(Math.min(20_000, deadline - Date.now()))) {
-        const m = JSON.parse(String(await page.evalIn(page.frameSession!, MOBILE))) as { text: number; width: number; overflowX: number; perf: { lcp: number | null; cls: number; tbt: number; idleFps: number } };
+        const m = JSON.parse(String(await page.evalIn(page.frameSession!, MOBILE))) as { text: number; width: number; overflowX: number; canvases: number; perf: { lcp: number | null; cls: number; tbt: number; idleFps: number } };
+        await snap("embedded-mobile");
         add("mobile", m.text >= 40 && m.overflowX <= 24, `At ${m.width} px: ${m.text} characters of content${m.overflowX > 0 ? `, ${m.overflowX} px wider than the screen` : ", no sideways overflow"}; LCP ${ms(m.perf.lcp)}, CLS ${m.perf.cls}, TBT ${m.perf.tbt} ms, ${m.perf.idleFps} fps`);
         if (m.overflowX > 24) find("mobile_overflow", "site", true, checks.at(-1)!.detail);
+        // A desktop scene that vanishes on the phone: compare with the site on its own at the same width before judging.
+        if (!m.canvases && emb.canvases.some((c) => c.essential && c.cls === "rendered") && Date.now() < deadline - 10_000) {
+          await page.send("Page.navigate", { url: liveUrl });
+          const dm = await page.waitTop(Math.min(15_000, deadline - Date.now())) ? JSON.parse(String(await page.evalIn(page.session, MOBILE))) as { canvases: number } : null;
+          if (dm) await snap("direct-mobile");
+          if (dm?.canvases) { add("mobile-visuals", false, `At 390 px the essential canvas shown on desktop is missing inside Crestmont's frame (the site on its own shows ${dm.canvases})`); find("iframe_render_failure", "embed", true, checks.at(-1)!.detail); }
+          else if (dm) add("mobile-visuals", true, "At 390 px the website on its own shows no canvas either — not attributable to Crestmont's frame (its mobile layout, or a defect the desktop checks report)");
+        }
         perf.mobile = m.perf;
       } else { add("mobile", false, "At 390 px the frame did not load"); find("frame_not_loaded", "embed", true, "At 390 px the frame did not load"); }
     }
-    return finish(checks, at, findings, perf);
+    return finish(checks, at, findings, perf, shots);
   } catch (e) {
     add("browser", false, `The verification browser failed: ${(e as Error).message}`.slice(0, 200));
-    return finish(checks, at, findings, perf);
+    return finish(checks, at, findings, perf, shots);
   } finally {
     try { await handle?.close(); } catch { /* closed */ }
   }
 }
 
-function finish(checks: Check[], at: string, findings: Finding[] = [], perf?: PerfReport): VerifyResult {
+function finish(checks: Check[], at: string, findings: Finding[] = [], perf?: PerfReport, shots: Shot[] = []): VerifyResult {
   const failed = checks.filter((c) => !c.ok);
-  return { ok: checks.length > 0 && !failed.length, checks, at, findings, perf, summary: failed.length ? failed.map((c) => `${c.name}: ${c.detail}`).join(" · ") : `Verified in a real browser: ${checks.map((c) => c.name).join(", ")}` };
+  return { ok: checks.length > 0 && !failed.length, checks, at, findings, perf, ...(shots.length ? { shots } : {}), summary: failed.length ? failed.map((c) => `${c.name}: ${c.detail}`).join(" · ") : `Verified in a real browser: ${checks.map((c) => c.name).join(", ")}` };
 }
 
 /** Opens Browser Run through the Worker's BROWSER binding. */

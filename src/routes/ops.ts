@@ -38,7 +38,7 @@ import * as pf from "../services/portfolio.ts";
 import { issuePreviewToken } from "../services/remote-browser/connect.ts";
 import { nativeDepsFrom } from "../services/native/deps.ts";
 import { verifyConnections } from "../services/native/verify-connections.ts";
-import { advanceAllNative, advanceForOps, discoverForOps, nativeReadiness, onboardForOps } from "../services/native/orchestrator.ts";
+import { advanceAllNative, advanceForOps, discoverForOps, enqueueOnboarding, nativeReadiness, onboardForOps, queueProgress } from "../services/native/orchestrator.ts";
 
 // ───────────── Signed automation ─────────────
 
@@ -385,6 +385,16 @@ export function register(r: Router): void {
       await audit(ctx.db, { actorKind: "system", action: "portfolio.native_connections_checked", subjectType: "portfolio_project", details: { cloudflare: connections.cloudflare.authenticated, vercel: connections.vercel.authenticated, github: connections.github.authenticated, urls: urls.length } });
       return jsonResponse(ctx, 200, { origin: d.siteOrigin, connections, discovery }, { "cache-control": "no-store" });
     }
+    if (action === "enqueue") {
+      // Bulk onboarding: normalise, de-duplicate and queue up to 100 addresses (unpublished). The work itself runs in
+      // bounded "prepare" rounds (the caller's loop, or the 15-minute job) — never in this request.
+      const urls = Array.isArray(auth.body.urls) ? auth.body.urls.filter((x): x is string => typeof x === "string").slice(0, 100) : [];
+      if (!urls.length) return jsonResponse(ctx, 422, { error: "urls: one to 100 public https addresses" });
+      const results = await enqueueOnboarding(d, urls);
+      const slugs = results.filter((x) => x.slug && (x.result === "queued" || x.result === "existing")).map((x) => x.slug!);
+      await audit(ctx.db, { actorKind: "system", action: "portfolio.native_bulk_add", subjectType: "portfolio_project", details: { submitted: urls.length, queued: results.filter((x) => x.result === "queued").length } });
+      return jsonResponse(ctx, 200, { results, slugs, progress: await queueProgress(ctx.db, slugs) }, { "cache-control": "no-store" });
+    }
     if (action === "onboard") {
       const r = await onboardForOps(d, String(auth.body.url ?? ""));
       if ("error" in r) return jsonResponse(ctx, 422, r);
@@ -396,15 +406,15 @@ export function register(r: Router): void {
       return jsonResponse(ctx, 200, { ...r, preview: await preview(r.slug) }, { "cache-control": "no-store" });
     }
     if (action === "prepare") {
-      const slugs = Array.isArray(auth.body.slugs) ? auth.body.slugs.filter((x): x is string => typeof x === "string" && /^[a-z0-9][a-z0-9-]{0,79}$/.test(x)).slice(0, 12) : [];
-      const round = await advanceAllNative(d, 12, { budgetMs: 4 * 60_000, maxVerifications: 4, slugs });
+      const slugs = Array.isArray(auth.body.slugs) ? auth.body.slugs.filter((x): x is string => typeof x === "string" && /^[a-z0-9][a-z0-9-]{0,79}$/.test(x)).slice(0, 100) : [];
+      const round = await advanceAllNative(d, 30, { budgetMs: 4 * 60_000, maxVerifications: 8, slugs, concurrency: 4 });
       const readiness = await nativeReadiness(ctx.db);
       const previews: Record<string, string | null> = {};
       for (const x of readiness) if ((slugs.length ? slugs.includes(x.slug) : x.published) && x.state === "native_verified") previews[x.slug] = await preview(x.slug);
-      await audit(ctx.db, { actorKind: "system", action: "portfolio.native_prepare_round", subjectType: "portfolio_project", details: { round: round.map((x) => `${x.slug}:${x.state}`).slice(0, 12) } });
+      await audit(ctx.db, { actorKind: "system", action: "portfolio.native_prepare_round", subjectType: "portfolio_project", details: { round: round.map((x) => `${x.slug}:${x.state}`).slice(0, 30) } });
       return jsonResponse(ctx, 200, { round, readiness, previews }, { "cache-control": "no-store" });
     }
-    return jsonResponse(ctx, 422, { error: "action: check | onboard | advance | prepare" });
+    return jsonResponse(ctx, 422, { error: "action: check | enqueue | onboard | advance | prepare" });
   });
   // Delivery status of one email (signed GET): template, status, whether Resend accepted it, webhook event types. No
   // address, subject or body.

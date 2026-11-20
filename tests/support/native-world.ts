@@ -15,6 +15,7 @@ export interface Site {
   cspNonce?: boolean;                      // the site's CSP carries a new nonce on every response (not rule-matchable)
   ruleTakesEffect?: boolean;               // a Cloudflare zone rule rewrites this site's responses (default true)
   redirectTo?: string;                     // "/" redirects to this absolute URL
+  sensitiveOpen?: boolean;                 // its sign-in/booking pages do NOT refuse framing (a security defect)
 }
 interface Rule { id: string; ref?: string; expression: string; action: string; action_parameters: { headers: Record<string, { operation: string; value?: string }> }; enabled?: boolean; description?: string }
 interface Zone { id: string; name: string; account: string; /** The API token whose account holds this zone (multi-account). */ token: string; rulesets: { id: string; rules: Rule[] } | null; dns: { name: string; type: string; proxied: boolean }[]; workerDomains: { hostname: string; service: string }[] }
@@ -63,7 +64,7 @@ export class NativeWorld {
     let xfo: string | null = s.baseXfo === undefined ? "DENY" : s.baseXfo;
     const csp = s.baseCsp ? [s.cspNonce ? `${s.baseCsp}; script-src 'nonce-${++seq}'` : s.baseCsp] : [];
     const sensitive = /\/(login|admin|book|account|checkout)/.test(path);
-    if (sensitive) return { allow: false, xfo: "DENY", csp: ["frame-ancestors 'none'"] };
+    if (sensitive && !s.sensitiveOpen) return { allow: false, xfo: "DENY", csp: ["frame-ancestors 'none'"] };
     // Cloudflare zone rule (Crestmont's): applied to responses when the site is proxied by the zone.
     const zone = this.zones.find((z) => host === z.name || host.endsWith("." + z.name));
     for (const r of zone?.rulesets?.rules ?? []) {
@@ -270,7 +271,7 @@ export class NativeWorld {
 }
 
 /** A website's homepage: content, links (public and sensitive), and optionally a WebGL scene or broken script. */
-export function homepage(title: string, opts: { links?: string[]; webgl?: "ok" | "fail" | "deferred" | "decorative" | "broken-draws"; brokenJs?: boolean } = {}): string {
+export function homepage(title: string, opts: { links?: string[]; webgl?: "ok" | "fail" | "deferred" | "decorative" | "broken-draws" | "module-error" | "top-only"; brokenJs?: boolean; divOnly?: boolean; heavy?: boolean } = {}): string {
   const links = (opts.links ?? ["/services", "/about", "/login", "/book"]).map((h) => `<a href="${h}">${h.slice(1)}</a>`).join(" ");
   const gl = opts.webgl === "ok"
     ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>(function(){var c=document.getElementById("globe");var g=c.getContext("webgl");if(!g)return;var t=0;function f(){t+=0.03;g.clearColor(0.05,0.1+0.4*Math.abs(Math.sin(t)),0.6,1);g.clear(g.COLOR_BUFFER_BIT);g.enable(g.SCISSOR_TEST);g.scissor(120+60*Math.sin(t),120,240,240);g.clearColor(0.2,0.8,0.3,1);g.clear(g.COLOR_BUFFER_BIT);g.disable(g.SCISSOR_TEST);requestAnimationFrame(f);}requestAnimationFrame(f);})();</script>`
@@ -282,10 +283,19 @@ export function homepage(title: string, opts: { links?: string[]; webgl?: "ok" |
     : opts.webgl === "decorative" ? `<canvas aria-hidden="true" width="1440" height="900" style="position:fixed;inset:0;width:100vw;height:100vh;z-index:-1;pointer-events:none"></canvas>`
     // A visible scene that creates its context and issues draw calls that never produce a pixel (a broken shader
     // pipeline): genuinely broken, on the website itself.
+    // The scene's module fails to resolve and the renderer never starts (the canvas is never created) — what a page
+    // whose import map arrives after the module preloads does with cached files.
+    : opts.webgl === "module-error" ? `<script>setTimeout(function(){throw new TypeError('Failed to resolve module specifier "three". Relative references must start with either "/", "./", or "../".')},0)</script>`
+    // A scene that only starts when the page is the top-level document (refuses to run inside any frame).
+    : opts.webgl === "top-only" ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>(function(){if(window.top!==window)return;var c=document.getElementById("globe");var g=c.getContext("webgl");if(!g)return;var t=0;function f(){t+=0.03;g.clearColor(0.1,0.3+0.4*Math.abs(Math.sin(t)),0.5,1);g.clear(g.COLOR_BUFFER_BIT);requestAnimationFrame(f);}requestAnimationFrame(f);})();</script>`
     : opts.webgl === "broken-draws" ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>(function(){var c=document.getElementById("globe");var g=c.getContext("webgl",{premultipliedAlpha:false});if(!g)return;function f(){g.clearColor(0,0,0,0);g.clear(g.COLOR_BUFFER_BIT);g.drawArrays(g.TRIANGLES,0,3);requestAnimationFrame(f);}requestAnimationFrame(f);})();</script>` : "";
+  // A main thread kept busy ~280 ms per frame (a heavy site, or a slow machine): slow, but alive.
+  const heavy = opts.heavy ? `<script>(function(){function f(){var t=performance.now();while(performance.now()-t<280){}requestAnimationFrame(f);}requestAnimationFrame(f);})();</script>` : "";
   const body = opts.brokenJs
     ? `<div id="app"></div><script>throw new Error("bundle failed to load")</script>`
-    : `<header><nav>${links}</nav></header><main><h1>${title}</h1><p>${title} is a TEST DATA website used to verify Crestmont's native portfolio onboarding. It has real paragraphs of content.</p>${gl}${"<section><h2>Section</h2><p>More TEST DATA content so the page can be scrolled by a visitor.</p></section>".repeat(25)}</main>`;
+    // Only <div>/<span> text, inside a focus-target container (tabindex="-1", as many app shells and skip-link targets do).
+    : opts.divOnly ? `<div id="root" tabindex="-1" style="outline:none"><div class="nav"><a href="/services">services</a></div><div class="hero"><span class="title">${title}</span><div class="lead">${title} is a TEST DATA website built only from div and span elements, as many component frameworks render.</div></div>${gl}${'<div class="row"><div class="cell">More TEST DATA content so the page can be scrolled by a visitor.</div></div>'.repeat(30)}</div>${heavy}`
+    : `<header><nav>${links}</nav></header><main><h1>${title}</h1><p>${title} is a TEST DATA website used to verify Crestmont's native portfolio onboarding. It has real paragraphs of content.</p>${gl}${"<section><h2>Section</h2><p>More TEST DATA content so the page can be scrolled by a visitor.</p></section>".repeat(25)}</main>${heavy}`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><meta name="description" content="${title} is a TEST DATA website."></head><body style="margin:0;font:16px sans-serif">${body}</body></html>`;
 }
 export const page = (title: string) => `<!doctype html><title>${title}</title><h1>${title}</h1><p>TEST DATA.</p>`;
