@@ -43,7 +43,7 @@ const page = (name, path, opts) => `<!doctype html><html lang="en"><head><meta c
   ${opts.late ? "html,body{background:#0b1220} body>*{opacity:0} body.in>*{opacity:1;transition:opacity .4s}" : ""}
   ${opts.anim ? "#spin{position:absolute;left:230px;top:220px;width:60px;height:60px;background:#2a9d8f;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}} #anim{position:absolute;left:0;top:300px;width:100%;height:200px}" : ""}
 </style></head><body>
-<header><a id="about" href="/about">About</a><a id="login" href="/login">Sign in</a><a id="external" href="https://elsewhere.fixture-portfolio.net/">Partner</a><a id="download" href="/files/brochure.pdf" download>Brochure</a></header>
+<header><a id="about" href="/about">About</a><a id="login" href="/login" target="_blank" rel="noopener">Sign in</a><a id="external" href="https://elsewhere.fixture-portfolio.net/">Partner</a><a id="download" href="/files/brochure.pdf" download>Brochure</a></header>
 <button id="clicker" class="ctl" type="button">Clicked 0</button>
 <input id="q" class="ctl" type="search" placeholder="Search" aria-label="Search">
 <input id="pw" type="password" aria-label="Password">
