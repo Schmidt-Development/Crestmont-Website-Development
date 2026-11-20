@@ -22,6 +22,9 @@ import { newId, nowIso } from "../src/lib/db.ts";
 
 const n = async (db: SqliteDb, sql: string, ...b: unknown[]) => Number((await db.prepare(sql).bind(...b).first<{ n: number }>())!.n);
 const research = (id: string): IntakeOptions => ({ channel: "research_agent", idempotencyKey: `research_agent:test:${id}`, sourceRef: id, lead: { source: "manual", interest: "other", message: "Research prospect" } });
+/** SQL: column holds the test phone 313-555-0161 in any stored form. (Matching only "0161" was flaky: random hex ids and
+ *  HMACs that legitimately remain after erasure contain "0161" now and then — CI run 44660086960 saw a contact id do so.) */
+const phone0161 = (col: string) => `(${col} LIKE '%5550161%' OR ${col} LIKE '%555-0161%' OR ${col} LIKE '%555.0161%' OR ${col} LIKE '%555 0161%')`;
 const mentions = (db: SqliteDb, digits: string, email: string) => n(db, `SELECT
   (SELECT COUNT(*) FROM contacts WHERE replace(replace(replace(replace(COALESCE(phone,''),'-',''),' ',''),'(',''),')','') LIKE '%' || ? || '%' OR lower(COALESCE(email,'')) = ?) +
   (SELECT COUNT(*) FROM contact_identities WHERE value_norm LIKE '%' || ? || '%' OR value_norm = ?) +
@@ -51,8 +54,8 @@ test("[CRM-002] erasure of a contact linked to review items and field history re
   assert.equal(await mentions(db, "3135550161", "pat@solo.example"), 0, "no contact, identity, link, review or history value left");
   assert.equal((await db.prepare(`SELECT name FROM contacts WHERE id = ?`).bind(p.contactId).first<{ name: string }>())!.name, "Deleted contact");
   assert.equal(await n(db, `SELECT COUNT(*) AS n FROM leads WHERE contact_id = ? AND message <> 'Details erased at the person''s request'`, p.contactId), 0);
-  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM crm_intake_decisions WHERE evidence_json LIKE '%0161%' OR evidence_json LIKE '%solo.example%' OR idempotency_key LIKE '%0161%'`), 0);
-  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'crm.identity_erased' AND (details_json LIKE '%0161%' OR details_json LIKE '%solo%')`), 0, "audit holds counts only");
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM crm_intake_decisions WHERE ${phone0161("evidence_json")} OR evidence_json LIKE '%solo.example%' OR ${phone0161("idempotency_key")}`), 0);
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'crm.identity_erased' AND (${phone0161("details_json")} OR details_json LIKE '%solo%')`), 0, "audit holds counts only");
 });
 
 test("[CRM-002] an unlinked research candidate is found by normalized phone/email (any formatting or case) and deleted; several items for one identity all go; items on another business are scrubbed, not deleted", async () => {
@@ -150,7 +153,7 @@ test("[CRM-007] research re-import after an authorized erasure is refused (batch
   assert.ok(res.results.every((r) => r.suppressed?.erased));
   assert.equal(await n(db, `SELECT COUNT(*) AS n FROM contacts WHERE name <> 'Deleted contact'`), 0);
   // The tombstone holds no raw identifier.
-  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM crm_erasure_tombstones WHERE key_hash LIKE '%0161%' OR key_hash LIKE '%solo%'`), 0);
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM crm_erasure_tombstones WHERE ${phone0161("key_hash")} OR key_hash LIKE '%solo%'`), 0);
   // The person writing in themselves is not blocked (they chose to contact us).
   const inbound = await intake(db, { contactName: "Pat Solo", emails: [{ value: "pat@solo.example" }] }, { channel: "web_form", lead: { source: "web_form", interest: "other", message: "Hi again, I'd like a quote." } });
   assert.equal(inbound.outcome, "CREATED");
