@@ -38,7 +38,7 @@ jobs:
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::tag must look like v1.2.3 or v1.2.3-rc.1"; exit 1; }
           [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be the full 40-character lowercase SHA"; exit 1; }
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_COMMIT }}
           fetch-depth: 0
