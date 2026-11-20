@@ -86,7 +86,7 @@ jobs:
           fi
           echo "$TARGET_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || { echo "::error::inputs.commit must be the full 40-character lowercase SHA."; exit 1; }
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit || github.sha }}
           fetch-depth: 0
@@ -577,7 +577,7 @@ jobs:
       # The default branch's own check scripts (trusted code; no ref from the triggering event is checked out here — this
       # job has no environment protection, so it never runs code chosen by the event). It only drives a browser
       # against the public production site.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

@@ -109,7 +109,7 @@ jobs:
             [ "$HAS_S3" = "true" ] || echo "::warning title=Same-account backup only::BACKUP_R2_BUCKET is an R2 bucket in the same Cloudflare account. It protects against a lost or corrupted database, not against losing the Cloudflare account; configure BACKUP_S3_* for the off-Cloudflare copy (docs/BACKUP-RECOVERY.md §3.2)."
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.pre.outputs.ok == 'true'
         with:
           persist-credentials: false
@@ -209,7 +209,7 @@ jobs:
       MANIFEST: ${{ needs.backup.outputs.manifest }}
       STORE: ${{ needs.backup.outputs.store }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
