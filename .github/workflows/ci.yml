@@ -66,7 +66,7 @@ jobs:
   portfolio-scroll-isolation:
     name: Portfolio scroll isolation (real browser, fixture sites)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
       FIXTURES: plain-long,smooth-anchors,inner-scroller,touch-handlers,short-page,lenis-smooth,busy-main-thread
@@ -107,6 +107,21 @@ jobs:
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: node --no-warnings --test tests/portfolio-native-browser.test.ts
+      # The universal onboarding matrix (2026-11-20): 100 website configurations submitted in one bulk Add and advanced
+      # only by the real 15-minute job, each with an expected verdict; zero false approvals and zero false rejections
+      # are required. The metrics are kept as an artifact.
+      - name: Native onboarding matrix — 100 configurations, real Chromium
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          MATRIX_REPORT: ${{ runner.temp }}/native-matrix.json
+        run: node --no-warnings --test tests/portfolio-native-matrix.test.ts
+      - name: Keep the matrix metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-onboarding-matrix
+          path: ${{ runner.temp }}/native-matrix.json
+          if-no-files-found: ignore
 
   # One native-first portfolio standard (Owner, 2026-11-19, docs/frontend/PORTFOLIO.md): through the normal staff Add
   # flow a site that permits Crestmont is verified by the REAL verifier in a real Chromium (direct vs embedded) and

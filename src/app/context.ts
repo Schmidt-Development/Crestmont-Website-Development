@@ -67,6 +67,8 @@ export interface Env {
   PORTFOLIO_CLOUDFLARE_TOKEN?: string; PORTFOLIO_CLOUDFLARE_ACCOUNTS?: string; PORTFOLIO_VERCEL_TOKEN?: string; PORTFOLIO_VERCEL_TEAM?: string; PORTFOLIO_GITHUB_TOKEN?: string;
   /** Real-browser native verifications per day (default 10; each lasts well under a minute). */
   PORTFOLIO_NATIVE_VERIFY_DAILY?: string;
+  PORTFOLIO_NATIVE_ONBOARD_DAILY?: string;
+  PORTFOLIO_NATIVE_CONCURRENCY?: string;
   REMOTE_BROWSER?: string;
   REMOTE_BROWSER_MAX_CONCURRENT?: string;
   REMOTE_BROWSER_DAILY_MINUTES?: string;

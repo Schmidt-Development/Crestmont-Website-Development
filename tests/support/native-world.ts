@@ -15,6 +15,7 @@ export interface Site {
   cspNonce?: boolean;                      // the site's CSP carries a new nonce on every response (not rule-matchable)
   ruleTakesEffect?: boolean;               // a Cloudflare zone rule rewrites this site's responses (default true)
   redirectTo?: string;                     // "/" redirects to this absolute URL
+  sensitiveOpen?: boolean;                 // its sign-in/booking pages do NOT refuse framing (a security defect)
 }
 interface Rule { id: string; ref?: string; expression: string; action: string; action_parameters: { headers: Record<string, { operation: string; value?: string }> }; enabled?: boolean; description?: string }
 interface Zone { id: string; name: string; account: string; /** The API token whose account holds this zone (multi-account). */ token: string; rulesets: { id: string; rules: Rule[] } | null; dns: { name: string; type: string; proxied: boolean }[]; workerDomains: { hostname: string; service: string }[] }
@@ -63,7 +64,7 @@ export class NativeWorld {
     let xfo: string | null = s.baseXfo === undefined ? "DENY" : s.baseXfo;
     const csp = s.baseCsp ? [s.cspNonce ? `${s.baseCsp}; script-src 'nonce-${++seq}'` : s.baseCsp] : [];
     const sensitive = /\/(login|admin|book|account|checkout)/.test(path);
-    if (sensitive) return { allow: false, xfo: "DENY", csp: ["frame-ancestors 'none'"] };
+    if (sensitive && !s.sensitiveOpen) return { allow: false, xfo: "DENY", csp: ["frame-ancestors 'none'"] };
     // Cloudflare zone rule (Crestmont's): applied to responses when the site is proxied by the zone.
     const zone = this.zones.find((z) => host === z.name || host.endsWith("." + z.name));
     for (const r of zone?.rulesets?.rules ?? []) {

@@ -67,9 +67,23 @@ export async function call<T>(fetcher: typeof fetch, provider: Provider, token: 
   if (provider === "github") headers["x-github-api-version"] = "2022-11-28";
   if (init.body !== undefined) headers["content-type"] = "application/json";
   const release = allowEgressHost(u.hostname);
-  let res: Response;
-  try { res = await fetcher(u.toString(), { method: init.method ?? "GET", headers, body: init.body === undefined ? undefined : JSON.stringify(init.body), signal: AbortSignal.timeout(20_000) }); }
-  catch (e) { throw new ProviderError(provider, 0, `${provider} did not answer (${(e as Error).message})`.slice(0, 200)); }
+  let res!: Response;
+  // Brief, bounded retries for transient answers: a 429 (the request was refused, never applied — safe for any method)
+  // and, for reads only, a 502/503/504 or no answer (a write that may have been applied is never repeated). Retry-After
+  // is honoured up to 4 s; longer outages are left to the next scheduled round.
+  const read = (init.method ?? "GET") === "GET";
+  try { for (let attempt = 0; ; attempt++) {
+    try { res = await fetcher(u.toString(), { method: init.method ?? "GET", headers, body: init.body === undefined ? undefined : JSON.stringify(init.body), signal: AbortSignal.timeout(20_000) }); }
+    catch (e) {
+      if (read && attempt < 2) { await new Promise((r) => setTimeout(r, 400 * 2 ** attempt)); continue; }
+      throw new ProviderError(provider, 0, `${provider} did not answer (${(e as Error).message})`.slice(0, 200));
+    }
+    const again = attempt < 2 && (res.status === 429 || (read && [502, 503, 504].includes(res.status)));
+    if (!again) break;
+    const ra = Number(res.headers.get("retry-after"));
+    await res.body?.cancel().catch(() => undefined);
+    await new Promise((r) => setTimeout(r, Math.min(4000, Number.isFinite(ra) && ra > 0 ? ra * 1000 : 400 * 2 ** attempt)));
+  } }
   finally { release(); }
   if (res.status === 404) { await res.body?.cancel().catch(() => undefined); return null; }
   const text = await res.text().catch(() => "");

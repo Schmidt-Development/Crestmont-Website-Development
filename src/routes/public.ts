@@ -16,7 +16,7 @@ import { PACKAGES, PACKAGE_FEATURES, packageAdditions, MAINTENANCE_PLANS, AI_REC
 import { effectivePrices } from "../services/pricing-approvals.ts";
 import { can } from "../domain/authz.ts";
 import { captureLead, requestAttribution, submittedAttribution, notifyNewLead } from "../services/leads.ts";
-import { rateLimit, securityEvent } from "../services/security.ts";
+import { audit, rateLimit, securityEvent } from "../services/security.ts";
 import { sendMail } from "../services/mailer.ts";
 import { ValidationError } from "../lib/validate.ts";
 import { newId, nowIso } from "../lib/db.ts";
@@ -30,7 +30,7 @@ import { serviceVisual } from "../ui/service-visuals.ts";
 import { receptionistConsole, voiceLibrary } from "../ui/receptionist.ts";
 import { constellation, journey, qualityLab } from "../ui/about.ts";
 import { portfolioExplorer } from "../ui/portfolio-explorer.ts";
-import { advanceNative, discoverHosting, type Outcome as NativeOutcome } from "../services/native/orchestrator.ts";
+import { advanceNative, discoverHosting, enqueueOnboarding, type Outcome as NativeOutcome } from "../services/native/orchestrator.ts";
 import { nativeDepsFrom } from "../services/native/deps.ts";
 import { SERVICES, SERVICE_GROUPS, serviceBySlug, servicePath, PRICING_NOTE, type ServiceDef } from "../content/services.ts";
 import { CMS_KEYS, cmsKeyDef, parseItems, paragraphs, type CmsKeyDef } from "../content/registry.ts";
@@ -1113,6 +1113,22 @@ function registerPortfolioAdmin(r: Router) {
     }
   });
 
+  // Bulk Add: every address is normalised, de-duplicated and queued (unpublished); the background job works through it.
+  r.post("/staff/portfolio/bulk", async (ctx) => {
+    requireStaff(ctx, "portfolio.manage");
+    const raws = str(await ctx.form(), "urls").split(/[\s,]+/).filter(Boolean);
+    if (!raws.length) return portfolioList(ctx, ["Enter at least one website address"], 422);
+    if (raws.length > 100) return portfolioList(ctx, ["Up to 100 addresses at a time"], 422);
+    const res = await enqueueOnboarding(nativeDepsFrom(ctx.env, ctx.db, new URL(ctx.baseUrl).origin), raws, ctx.actor!);
+    await audit(ctx.db, { actorUserId: ctx.actor?.userId ?? null, actorKind: "user", action: "portfolio.native_bulk_add", subjectType: "portfolio_project", details: { submitted: raws.length, queued: res.filter((x) => x.result === "queued").length, existing: res.filter((x) => x.result === "existing").length, duplicate: res.filter((x) => x.result === "duplicate").length, invalid: res.filter((x) => x.result === "invalid" || x.result === "unreachable").length } });
+    return onboardingStatus(ctx, res);
+  });
+
+  r.get("/staff/portfolio/onboarding", async (ctx) => {
+    requireStaff(ctx, "portfolio.manage");
+    return onboardingStatus(ctx);
+  });
+
   // Step 1 → 2 of the simplified flow: a staff member enters only the live website address. Crestmont loads it once,
   // checks whether it may be shown live (its own headers) and pre-fills the name and description from the page's own
   // title and description, for the staff member to confirm or correct. Nothing is saved until they confirm.
@@ -1258,6 +1274,11 @@ ${archived.length ? html`<details class="card"><summary><strong>Archived (${arch
 <p class="muted">Enter the live website's address. Crestmont opens it, checks whether it can be shown live and interactive in the portfolio, and fills in its name and description for you to confirm.</p>
 ${input({ name: "live_url", label: "Live website address", type: "url", required: true, maxlength: 300, placeholder: "https://example.com/" })}
 <div class="form-actions">${button("Continue")}</div></form>
+<form method="post" action="/staff/portfolio/bulk" class="card" data-testid="pf-bulk">${csrf(ctx)}
+<h3 class="card__title">Add several websites</h3>
+<p class="muted">One address per line (up to 100). Each is checked, de-duplicated and added unpublished; Crestmont then prepares and verifies them in the background — follow them on <a href="/staff/portfolio/onboarding">Onboarding status</a>.</p>
+${textarea({ name: "urls", label: "Live website addresses", rows: 6, required: true, maxlength: 20000 })}
+<div class="form-actions">${button("Add all", { variant: "secondary" })} ${linkButton("Onboarding status", "/staff/portfolio/onboarding", "ghost", "sm")}</div></form>
 <script src="/assets/portfolio-order.js" defer></script>`, status);
 }
 
@@ -1293,6 +1314,32 @@ ${input({ name: "poster_desktop_asset", label: "Bundled desktop poster", value: 
 ${input({ name: "poster_tablet_asset", label: "Bundled tablet poster", value: p.poster_tablet_asset })}
 ${input({ name: "poster_mobile_asset", label: "Bundled mobile poster", value: p.poster_mobile_asset })}
 <div class="form-actions">${button("Save demo settings", { variant: "secondary", size: "sm" })}</div></form></div>`;
+}
+
+/** Every native entry at a glance (Owner, 2026-11-20): where it is, what the real-browser test saw on desktop and phone,
+ *  whether its animations were tested, when it was last verified, and the one thing to do — with a retry. */
+async function onboardingStatus(ctx: AppContext, added: Awaited<ReturnType<typeof enqueueOnboarding>> = []): Promise<Response> {
+  const rows = (await pf.listActive(ctx.db)).filter((p) => p.native_required);
+  const ck = (p: pf.PortfolioProject, ...names: string[]) => {
+    let v: { checks?: { name: string; ok: boolean }[] } | null = null;
+    try { v = p.native_verification ? JSON.parse(p.native_verification) : null; } catch { v = null; }
+    const cs = (v?.checks ?? []).filter((c) => names.includes(c.name));
+    return !cs.length ? "—" : cs.every((c) => c.ok) ? "✓ passed" : "✗ failed";
+  };
+  const count = (st: string) => rows.filter((p) => (p.native_state ?? "checking") === st).length;
+  return staffShell(ctx, "Onboarding status", html`${pageHead("Onboarding status", linkButton("Portfolio", "/staff/portfolio", "ghost", "sm"), "Portfolio")}
+${added.length ? html`<div class="card" data-testid="pf-bulk-results"><h3 class="card__title">Just added</h3><ul class="checklist">${added.map((a) => html`<li data-result="${a.result}">${a.result === "queued" ? "✓" : a.result === "existing" || a.result === "duplicate" ? "=" : "✗"} <strong>${a.url}</strong> — ${a.result}${a.slug ? html` (${a.slug})` : ""}: ${a.detail}</li>`)}</ul></div>` : ""}
+<p class="muted" data-testid="pf-queue">${rows.length} websites · ${count("native_verified")} verified · ${count("checking") + count("preparing")} in progress · ${count("authorization_required") + count("unavailable")} need attention. Progress continues automatically every 15 minutes.</p>
+${rows.length ? table(rows, [
+  { header: "Website", cell: (p) => html`<a href="/staff/portfolio/${p.id}">${p.name}</a><br><span class="faint">${p.live_url}</span>` },
+  { header: "Stage", cell: (p) => { const g = ownerProgress(p); return badge(g.done ? "ok" : g.attention ? "blocked" : "muted", g.done ? "Verified" : g.label); } },
+  { header: "Desktop", cell: (p) => ck(p, "frame", "content", "javascript", "scroll", "click") },
+  { header: "Mobile", cell: (p) => ck(p, "mobile", "mobile-visuals") },
+  { header: "Animations", cell: (p) => ck(p, "canvas", "visuals") },
+  { header: "Last verification", cell: (p) => p.native_verified_at ? formatDateTime(p.native_verified_at) : "—" },
+  { header: "Action needed", cell: (p) => ownerProgress(p).action ?? "—" },
+  { header: "", cell: (p) => actionForm(ctx, `/staff/portfolio/${p.id}/embed-check`, "Retry", { variant: "secondary", size: "sm" }) },
+], { caption: "Native onboarding status" }) : emptyState("No websites yet", "Add websites from the Portfolio page.")}`);
 }
 
 /** Native readiness (src/services/native/), for every entry — in the owner's words first: the five stages, where this

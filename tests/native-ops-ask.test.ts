@@ -83,10 +83,10 @@ test("[PORT-NATIVE-OPS] workflow: check, onboard and advance all go through nati
   assert.ok(!/add-mask/.test(WORKFLOW), "masking happens only inside native-ops-ask.sh");
   assert.ok(!/curl[^\n]*api\/ops\/portfolio-native/.test(WORKFLOW), "no direct request bypasses the script");
   assert.match(WORKFLOW, /ask\(\) \{ bash scripts\/native-ops-ask\.sh "\$1" "\$work\/r\.json"; http=\$\(cat "\$work\/r\.json\.status"\); \}/);
-  for (const action of ["check", "onboard", "advance"]) assert.match(WORKFLOW, new RegExp(`ask "\\$\\(node -e 'console\\.log\\(JSON\\.stringify\\(\\{ action: "${action}"`), `${action} uses ask`);
-  assert.equal((WORKFLOW.match(/\bask "\$\(node/g) ?? []).length, 4, "check, onboard, resume and each follow-up advance");
+  for (const action of ["check", "onboard", "advance", "enqueue"]) assert.match(WORKFLOW, new RegExp(`ask "\\$\\(node -e 'console\\.log\\(JSON\\.stringify\\(\\{ action: "${action}"`), `${action} uses ask`);
+  assert.equal((WORKFLOW.match(/\bask "\$\(node/g) ?? []).length, 5, "check, batch enqueue, onboard, resume and each follow-up advance");
   // The exact comparison the defect broke: the status is compared right after the request, from the file.
-  assert.equal((WORKFLOW.match(/\[ "\$http" = "200" \]/g) ?? []).length, 4);
+  assert.equal((WORKFLOW.match(/\[ "\$http" = "200" \]/g) ?? []).length, 5);
   // Read-only status never calls the Worker; resume never forces (only "advance").
   assert.match(WORKFLOW, /name: Ask the production Worker \(one-time challenges\)\n\s+id: ops\n\s+if: inputs\.action != 'status'/);
   assert.ok(!/force["']?\s*:/.test(WORKFLOW), "no request sets force");

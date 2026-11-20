@@ -42,6 +42,11 @@ export interface NativeDeps {
    *  so a release that converts many entries finishes them instead of leaving some for tomorrow. */
   ownerApproved?: boolean;
   verify?: (pageUrl: string, liveOrigin: string) => Promise<VerifyResult>;
+  /** First-time verifications (entries never verified: new onboarding) have their own daily allowance, so a batch of
+   *  new websites is not starved by — and does not starve — the daily re-checks of verified ones. */
+  onboardDailyCap?: number;
+  /** Real-browser verifications run side by side within one round (each its own browser session). */
+  concurrency?: number;
   /** Private storage for visual evidence (screenshots of the direct and embedded views); none → no screenshots. */
   storage?: StorageAdapter | null;
 }
@@ -95,13 +100,13 @@ async function save(db: Db, id: string, prev: pf.PortfolioProject, o: { state: p
   if (o.verification) { sets.push("native_verification = ?"); vals.push(JSON.stringify(o.verification).slice(0, 8000)); if (o.verification.ok) { sets.push("native_verified_at = ?"); vals.push(o.verification.at); } }
   const stmts = [db.prepare(`UPDATE portfolio_projects SET ${sets.join(", ")} WHERE id = ?`).bind(...vals, id)];
   if (prev.native_state !== o.state || o.verification) stmts.push(db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .bind(actorUserId, actorUserId ? "user" : "system", o.verification ? "portfolio.native_verification" : "portfolio.native_state", "portfolio_project", id, JSON.stringify({ from: prev.native_state, to: o.state, reason: o.reason.slice(0, 300), ...(o.verification ? { ok: o.verification.ok, checks: o.verification.checks.map((c) => `${c.name}:${c.ok ? "ok" : "fail"}`) } : {}) }), null, at));
+    .bind(actorUserId, actorUserId ? "user" : "system", o.verification ? "portfolio.native_verification" : "portfolio.native_state", "portfolio_project", id, JSON.stringify({ from: prev.native_state, to: o.state, reason: o.reason.slice(0, 300), ...(o.verification ? { onboarding: !prev.native_verified_at, ok: o.verification.ok, checks: o.verification.checks.map((c) => `${c.name}:${c.ok ? "ok" : "fail"}`) } : {}) }), null, at));
   await db.batch(stmts);
 }
 
-async function verificationsToday(db: Db, now: number): Promise<number> {
+async function verificationsToday(db: Db, now: number, onboarding: boolean): Promise<number> {
   const since = new Date(now - 86_400_000).toISOString();
-  const r = await db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_verification' AND created_at >= ?`).bind(since).first<{ n: number }>();
+  const r = await db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_verification' AND created_at >= ? AND ${onboarding ? "" : "NOT "}COALESCE(details_json, '') LIKE '%"onboarding":true%'`).bind(since).first<{ n: number }>();
   return r?.n ?? 0;
 }
 
@@ -127,8 +132,10 @@ async function sensitiveStillProtected(d: NativeDeps, check: EmbedCheck): Promis
 
 async function runVerification(d: NativeDeps, p: pf.PortfolioProject, check: EmbedCheck, now: number): Promise<VerifyResult | string> {
   if (!d.openBrowser && !d.verify) return "No verification browser is available in this environment (Browser Run binding missing)";
-  const cap = d.ownerApproved ? d.verifyDailyCap * 3 : d.verifyDailyCap;
-  if ((await verificationsToday(d.db, now)) >= cap) return `Today's real-browser verifications (${cap}) are used up; it runs again automatically within a day`;
+  const onboarding = !p.native_verified_at;
+  const base = onboarding ? (d.onboardDailyCap ?? 120) : d.verifyDailyCap;
+  const cap = d.ownerApproved ? base * 3 : base;
+  if ((await verificationsToday(d.db, now, onboarding)) >= cap) return `Today's real-browser verifications (${cap}${onboarding ? " for new websites" : ""}) are used up; it runs again automatically within a day`;
   const token = await issuePreviewToken(d.db, p.id, 10, "native-verify", now);
   const pageUrl = `${d.siteOrigin}/portfolio/native-verify/${token}`;
   // Visual evidence: each screenshot is kept privately (staff-only), and only the latest verification's set.
@@ -147,8 +154,30 @@ async function runVerification(d: NativeDeps, p: pf.PortfolioProject, check: Emb
 }
 
 /** Advances one project's native readiness by one step. */
+const LEASE_MS = 10 * 60_000;
+/** Transient failures (a provider outage or rate limit, the verification browser itself failing) are retried
+ *  automatically on later ticks — bounded: after this many consecutive attempts the entry is reported as blocked. */
+const TRANSIENT_ATTEMPTS = 8;
+function transient(p: pf.PortfolioProject, what: string): Outcome {
+  const prev = /\(attempt (\d+) of \d+\)/.exec(p.native_reason ?? "");
+  const attempt = (prev && /^Temporarily/.test(p.native_reason ?? "") ? Number(prev[1]) : 0) + 1;
+  if (attempt > TRANSIENT_ATTEMPTS) return { state: "unavailable", reason: `${what} — still failing after ${TRANSIENT_ATTEMPTS} automatic attempts; it is retried after a day, or use Check again` };
+  return { state: p.native_state === "preparing" ? "preparing" : "checking", reason: `Temporarily unable to continue: ${what}. Retrying automatically (attempt ${attempt} of ${TRANSIENT_ATTEMPTS}).` };
+}
+const isTransient = (e: unknown) => e instanceof ProviderError && (e.status === 0 || e.status === 429 || e.status >= 500);
 export async function advanceNative(d: NativeDeps, id: string, opts: { force?: boolean; actorUserId?: string | null } = {}): Promise<Outcome> {
   const now = d.now?.() ?? Date.now();
+  // Claim the entry (atomic); another worker already on it → leave it alone and report where it is.
+  const claim = await d.db.prepare(`UPDATE portfolio_projects SET native_lease_until = ? WHERE id = ? AND COALESCE(native_lease_until, '') < ?`).bind(new Date(now + LEASE_MS).toISOString(), id, new Date(now).toISOString()).run();
+  if (claim.meta.changes !== 1) {
+    const cur = await pf.getById(d.db, id);
+    return { state: (cur?.native_state ?? "checking") as pf.NativeState, reason: "Another step for this website is already running; it continues there" };
+  }
+  try { return await advanceNativeStep(d, id, now, opts); }
+  finally { await d.db.prepare(`UPDATE portfolio_projects SET native_lease_until = NULL WHERE id = ?`).bind(id).run().catch(() => undefined); }
+}
+
+async function advanceNativeStep(d: NativeDeps, id: string, now: number, opts: { force?: boolean; actorUserId?: string | null }): Promise<Outcome> {
   const p = await pf.getById(d.db, id);
   if (!p) return { state: "unavailable", reason: "Project not found" };
   if (!p.native_required) return { state: "legacy", reason: "Existing entry (shown as before)" };
@@ -171,6 +200,8 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
       return { state: "native_verified", reason: p.native_reason ?? "Verified" };
     }
     const v = await runVerification(d, p, check, now);
+    // The verification browser itself failed (not the website): retried automatically, never a verdict on the site.
+    if (typeof v !== "string" && !v.ok && v.checks.every((c) => c.ok || c.name === "browser")) return done(transient(p, v.summary.slice(0, 300)));
     if (typeof v === "string") return done({ state: p.native_state === "native_verified" ? "native_verified" : "checking", reason: `The site permits Crestmont's frame (${check.detail}); ${v}.` });
     return done(v.ok
       ? { state: "native_verified", reason: `${v.summary}. ${change ? describeChange(change) : "The site already permitted Crestmont's frame."}`, verification: v }
@@ -243,6 +274,7 @@ export async function advanceNative(d: NativeDeps, id: string, opts: { force?: b
     return followChange(d, { ...p, native_state: "preparing", native_target: JSON.stringify(vc ?? cf) }, check, ch, now, (o) => done({ ...o, provider: repoTarget.provider, target: vc ?? cf, change: ch }));
   } catch (e) {
     const msg = e instanceof ProviderError || e instanceof EditError ? e.message : `Unexpected error: ${(e as Error).message}`;
+    if (isTransient(e)) return done(transient(p, msg));
     const auth = e instanceof ProviderError && (e.status === 401 || e.status === 403);
     return done({ state: auth ? "authorization_required" : "unavailable", reason: `${auth ? "A connected account refused this action — its token lacks a permission: " : ""}${msg}`.slice(0, 900) });
   }
@@ -310,10 +342,13 @@ async function followChange(d: NativeDeps, p: pf.PortfolioProject, check: EmbedC
 /** The 15-minute job: entries in progress every time; settled ones (waiting for authorization, unavailable) at most
  *  every 6 hours, so a missing permission or a fixed deployment is noticed without re-verifying in a loop; verified
  *  ones once a day (regression monitoring). Bounded. */
-export async function advanceAllNative(d: NativeDeps, limit = 10, opts: { budgetMs?: number; maxVerifications?: number; slugs?: string[] } = {}): Promise<{ slug: string; state: string; published: boolean }[]> {
+export async function advanceAllNative(d: NativeDeps, limit = 10, opts: { budgetMs?: number; maxVerifications?: number; slugs?: string[]; concurrency?: number } = {}): Promise<{ slug: string; state: string; published: boolean }[]> {
   const now = () => d.now?.() ?? Date.now();
   const start = now();
+  // Settled entries are retried with backoff: an authorization blocker after 6 hours (a cheap header check), a site
+  // whose own defect or verification failed after a day (each retry costs a real-browser verification).
   const settledBefore = new Date(start - 6 * 3_600_000).toISOString();
+  const failedBefore = new Date(start - 86_400_000).toISOString();
   // Verified entries are re-checked daily (cheap: their headers; a real-browser verification only once it is a week
   // old), so a later website update that breaks native embedding is noticed and repaired without anyone asking.
   const verifiedBefore = new Date(start - 86_400_000).toISOString();
@@ -322,24 +357,36 @@ export async function advanceAllNative(d: NativeDeps, limit = 10, opts: { budget
   // Named entries (an Owner-approved round) are taken whatever their last state — a settled entry is retried now, not
   // after six hours (a failed change still stays failed: only "Check again" starts it over).
   const named = opts.slugs?.length ? `slug IN (${opts.slugs.map(() => "?").join(", ")})` : "";
-  const rows = (await d.db.prepare(`SELECT id, slug, published FROM portfolio_projects WHERE native_required = 1 AND archived_at IS NULL AND (${named ? `(${named} AND native_state != 'native_verified') OR ` : ""}native_state IN ('checking', 'preparing') OR (native_state IN ('authorization_required', 'unavailable') AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'native_verified' AND COALESCE(native_updated_at, '') < ?))
-    ORDER BY CASE native_state WHEN 'native_verified' THEN 2 ELSE 0 END, published DESC, CASE WHEN embed_status = 'allowed' THEN 1 ELSE 0 END, COALESCE(native_updated_at, ''), position LIMIT ?`).bind(...(opts.slugs ?? []), settledBefore, verifiedBefore, limit).all<{ id: string; slug: string; published: number }>()).results;
+  const rows = (await d.db.prepare(`SELECT id, slug, published FROM portfolio_projects WHERE native_required = 1 AND archived_at IS NULL AND (${named ? `(${named} AND native_state != 'native_verified') OR ` : ""}native_state IN ('checking', 'preparing') OR (native_state = 'authorization_required' AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'unavailable' AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'native_verified' AND COALESCE(native_updated_at, '') < ?))
+    ORDER BY CASE native_state WHEN 'native_verified' THEN 2 ELSE 0 END, published DESC, CASE WHEN embed_status = 'allowed' THEN 1 ELSE 0 END, COALESCE(native_updated_at, ''), position LIMIT ?`).bind(...(opts.slugs ?? []), settledBefore, failedBefore, verifiedBefore, limit).all<{ id: string; slug: string; published: number }>()).results;
   const out: { slug: string; state: string; published: boolean }[] = [];
   // Bounded per run: a time budget and a number of real-browser verifications, so one tick never runs into the
   // platform's limits and the rest simply continues on the next tick (progress is stored per entry).
   const budget = opts.budgetMs ?? 6 * 60_000, maxV = opts.maxVerifications ?? 3;
-  let verifications = 0;
-  for (const r of rows) {
-    if (now() - start > budget) { out.push({ slug: r.slug, state: "deferred: time budget", published: !!r.published }); continue; }
-    if (verifications >= maxV) { out.push({ slug: r.slug, state: "deferred: verification budget", published: !!r.published }); continue; }
-    try {
-      const before = await d.db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_verification' AND subject_id = ?`).bind(r.id).first<{ n: number }>();
-      const st = (await advanceNative(d, r.id)).state;
-      const after = await d.db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_verification' AND subject_id = ?`).bind(r.id).first<{ n: number }>();
-      if ((after?.n ?? 0) > (before?.n ?? 0)) verifications++;
-      out.push({ slug: r.slug, state: st, published: !!r.published });
-    } catch (e) { out.push({ slug: r.slug, state: `error: ${(e as Error).message}`.slice(0, 120), published: !!r.published }); }
-  }
+  // Entries run side by side (each entry by one worker only, so no entry is ever advanced twice at once). The
+  // verification budget is never exceeded: a worker only starts an entry while finished + in-flight verifications are
+  // under it (an in-flight entry may turn out not to need a verification — the rest then waits for the next round).
+  let verifications = 0, inflight = 0, next = 0;
+  const results: ({ slug: string; state: string; published: boolean } | undefined)[] = new Array(rows.length);
+  const worker = async () => {
+    for (let k; (k = next++) < rows.length;) {
+      const r = rows[k];
+      if (now() - start > budget) { results[k] = { slug: r.slug, state: "deferred: time budget", published: !!r.published }; continue; }
+      if (verifications + inflight >= maxV) { results[k] = { slug: r.slug, state: "deferred: verification budget", published: !!r.published }; continue; }
+      inflight++;
+      try {
+        const before = await d.db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_verification' AND subject_id = ?`).bind(r.id).first<{ n: number }>();
+        const st = (await advanceNative(d, r.id)).state;
+        const after = await d.db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'portfolio.native_verification' AND subject_id = ?`).bind(r.id).first<{ n: number }>();
+        if ((after?.n ?? 0) > (before?.n ?? 0)) verifications++;
+        results[k] = { slug: r.slug, state: st, published: !!r.published };
+      } catch (e) { results[k] = { slug: r.slug, state: `error: ${(e as Error).message}`.slice(0, 120), published: !!r.published }; }
+      finally { inflight--; }
+    }
+  };
+  const n = Math.max(1, Math.min(8, opts.concurrency ?? d.concurrency ?? 1));
+  await Promise.all(Array.from({ length: Math.min(n, rows.length || 1) }, worker));
+  out.push(...results.filter((x): x is { slug: string; state: string; published: boolean } => !!x));
   return out;
 }
 
@@ -418,6 +465,65 @@ export async function onboardForOps(d: NativeDeps, raw: string): Promise<OpsProj
   }
   await advanceNative(d, id, { force: true });
   return summary(d, id, created, converted);
+}
+
+export interface QueuedSite { url: string; result: "queued" | "duplicate" | "existing" | "invalid" | "unreachable"; slug: string | null; detail: string }
+/** Bulk Add (Staff → Portfolio → Add several, and the operations workflow): each address is normalised (https, public
+ *  host, redirects followed to its canonical address), de-duplicated (within the list and against every existing entry,
+ *  www or not, before and after redirects) and queued as an unpublished, native-required entry. Nothing is verified
+ *  here: the 15-minute job (or an Owner-approved prepare round) works through the queue, bounded and resumable, so
+ *  100 addresses never run as one long request. Nothing is published; no consent or relationship is recorded. */
+export async function enqueueOnboarding(d: NativeDeps, raws: string[], actor: Parameters<typeof pf.createProject>[1] = SYSTEM_OWNER): Promise<QueuedSite[]> {
+  const list = raws.map((x) => x.trim()).filter(Boolean).slice(0, 100);
+  const out: QueuedSite[] = new Array(list.length);
+  const seen = new Map<string, string>();
+  for (const p of await pf.listActive(d.db)) seen.set(siteKey(p.live_url), p.slug);
+  const claimed = new Set<string>();
+  // Inputs first (cheap): invalid and in-list duplicates are answered without any request.
+  const todo: { k: number; u: URL }[] = [];
+  list.forEach((raw, k) => {
+    const u = safePublicUrl(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    if (!u) { out[k] = { url: raw.slice(0, 200), result: "invalid", slug: null, detail: "not a public https address" }; return; }
+    const key = siteKey(u.toString());
+    if (seen.has(key)) { out[k] = { url: u.toString(), result: "existing", slug: seen.get(key)!, detail: `already in the portfolio as ${seen.get(key)}` }; return; }
+    if (claimed.has(key)) { out[k] = { url: u.toString(), result: "duplicate", slug: null, detail: "listed more than once" }; return; }
+    claimed.add(key); todo.push({ k, u });
+  });
+  let next = 0;
+  const worker = async () => {
+    for (let i; (i = next++) < todo.length;) {
+      const { k, u } = todo[i];
+      const c = await checkEmbed(u.toString(), d.siteOrigin, d.fetchSite).catch(() => null);
+      if (!c || c.status === "error") { out[k] = { url: u.toString(), result: "unreachable", slug: null, detail: c?.detail ?? "did not answer" }; continue; }
+      const canonical = c.url ?? u.toString(), ck = siteKey(canonical);
+      if (ck !== siteKey(u.toString()) && (seen.has(ck) || claimed.has(ck) || claimed.has(`canon:${ck}`))) { out[k] = { url: u.toString(), result: seen.has(ck) ? "existing" : "duplicate", slug: seen.get(ck) ?? null, detail: `redirects to ${canonical}, ${seen.has(ck) ? `already in the portfolio as ${seen.get(ck)}` : "listed more than once"}` }; continue; }
+      claimed.add(`canon:${ck}`);
+      const site = siteKey(canonical);
+      const name = ((c.siteName ?? c.title?.split(/\s+[—–|·-]\s+/)[0] ?? "").trim() || site).slice(0, 120);
+      const description = (c.description ?? "").trim().length >= 20 ? c.description!.trim().slice(0, 4000) : `${name} — the live website at ${site}. Added for native onboarding; details to be confirmed by staff before publishing.`;
+      try {
+        let slug = slugify(name) || slugify(site);
+        for (let n = 2; await pf.getBySlug(d.db, slug); n++) slug = `${slugify(name) || slugify(site)}-${n}`;
+        await pf.createProject(d.db, actor, { name, slug, industry: "To be confirmed by staff", live_url: canonical, description, features: "", technology_summary: "", relationship: "Relationship documentation pending" });
+        seen.set(ck, slug);
+        out[k] = { url: u.toString(), result: "queued", slug, detail: `${c.status === "allowed" ? "already permits Crestmont's frame" : "refuses framing today"}; queued for preparation and real-browser verification` };
+      } catch (e) {
+        // A concurrent Add of the same slug (UNIQUE): the other request created it — never a duplicate entry.
+        out[k] = { url: u.toString(), result: "duplicate", slug: null, detail: (e as Error).message.slice(0, 160) };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, todo.length || 1) }, worker));
+  return out;
+}
+
+/** Queue progress for a set of entries (bulk Add results, the operations workflow). */
+export async function queueProgress(db: Db, slugs: string[]): Promise<{ total: number; byState: Record<string, number> }> {
+  if (!slugs.length) return { total: 0, byState: {} };
+  const rows = (await db.prepare(`SELECT native_state FROM portfolio_projects WHERE slug IN (${slugs.map(() => "?").join(",")})`).bind(...slugs).all<{ native_state: string }>()).results;
+  const byState: Record<string, number> = {};
+  for (const r of rows) byState[r.native_state] = (byState[r.native_state] ?? 0) + 1;
+  return { total: rows.length, byState };
 }
 
 /** One more step for an entry (the same step the 15-minute job runs). */

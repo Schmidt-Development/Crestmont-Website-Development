@@ -193,3 +193,23 @@ test("[PORT-NATIVE-E2E] essential-visual parity: a 3D scene lost on cached reloa
     assert.ok(JSON.parse(top.native_diagnosis ?? "{}").codes.includes("iframe_render_failure"), top.native_reason!);
   } finally { laterLoads.clear(); loads.clear(); close(); }
 });
+
+test("[PORT-NATIVE-E2E] the deployed trial websites (test-sites/native/worker.js): each variant reaches its expected verdict with the real verifier", { skip, timeout: 600_000 }, async () => {
+  const worker = (await import("../test-sites/native/worker.js")).default as { fetch(r: Request, env: { VARIANT: string }): Promise<Response> };
+  const w = new NativeWorld();
+  const variants = ["static", "webgl", "csr", "appshell", "motion", "refuses"];
+  for (const v of variants) {
+    const html = async (path: string) => (await worker.fetch(new Request(`https://${v}.trial-native.com${path}`), { VARIANT: v })).text();
+    // The same pages; the production frame-ancestors list names crestmontwebsitedevelopment.com, so here it names
+    // this test app's origin instead (the refusing control keeps refusing).
+    w.site({ host: `${v}.trial-native.com`, pages: { "/": await html("/"), "/about": await html("/about"), "/login": await html("/login") }, baseXfo: v === "refuses" ? "DENY" : null, baseCsp: v === "refuses" ? "frame-ancestors 'none'" : "default-src 'self' 'unsafe-inline' data:; frame-ancestors http://crestmont.test; base-uri 'none'; form-action 'none'" });
+  }
+  const { add, close } = await world(w, { PORTFOLIO_CLOUDFLARE_TOKEN: "" });
+  try {
+    for (const v of variants) {
+      const p = await add(`trial-${v}`, `https://${v}.trial-native.com/`);
+      if (v === "refuses") assert.notEqual(p.native_state, "native_verified", "the refusing control is never verified");
+      else assert.equal(p.native_state, "native_verified", `${v}: ${p.native_reason}`);
+    }
+  } finally { close(); }
+});

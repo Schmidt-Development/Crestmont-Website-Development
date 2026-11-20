@@ -602,7 +602,9 @@ jobs:
           printf '%s' "$READINESS" | base64 -d > readiness.json
           set -o pipefail
           { echo "## Native readiness (strict)"; node scripts/native-readiness-gate.mjs readiness.json "keep-your-website-working,wincustomersback,lending-for-beginners"; } | tee -a "$GITHUB_STEP_SUMMARY"
+      # Runs even when the strict readiness gate above failed (release #40 skipped it), and fails on its own.
       - name: Live portfolio acceptance (desktop and phone, real browser) — mandatory
+        if: always()
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: |

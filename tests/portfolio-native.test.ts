@@ -241,12 +241,15 @@ test("[PORT-NATIVE] negatives: failed deployment, a rule without effect (removed
 
 test("[PORT-NATIVE] real-browser verifications are capped per day; existing entries are converted to the native-first standard without losing anything", async () => {
   const w = new NativeWorld().site(site("cap1.fixture-native.com", { baseXfo: null })).site(site("cap2.fixture-native.com", { baseXfo: null }));
-  const { t, add } = await setup(w, { ...TOKENS, PORTFOLIO_NATIVE_VERIFY_DAILY: "1" });
+  // New websites (never verified) have their own allowance, separate from the daily re-checks of verified ones.
+  const { t, add } = await setup(w, { ...TOKENS, PORTFOLIO_NATIVE_VERIFY_DAILY: "0", PORTFOLIO_NATIVE_ONBOARD_DAILY: "1" });
   const a = await add("cap1", "https://cap1.fixture-native.com/");
   const b = await add("cap2", "https://cap2.fixture-native.com/");
-  assert.equal(a.native_state, "native_verified");
+  assert.equal(a.native_state, "native_verified", "the onboarding allowance is not used up by re-checks (whose allowance is 0)");
   assert.equal(b.native_state, "checking");
-  assert.match(b.native_reason!, /real-browser verifications \(1\) are used up/);
+  assert.match(b.native_reason!, /real-browser verifications \(1 for new websites\) are used up/);
+  const audit = await t.db.prepare(`SELECT details_json FROM audit_logs WHERE action = 'portfolio.native_verification'`).all<{ details_json: string }>();
+  assert.deepEqual(audit.results.map((r) => JSON.parse(r.details_json).onboarding), [true], "each verification records which allowance it used");
   // Migration 0111: every existing entry follows the same native-first standard — none is legacy, none is streamed;
   // published entries stay published with their content, order and images; each conversion is audited.
   const q = async (sql: string) => (await t.db.prepare(sql).first<{ n: number }>())!.n;

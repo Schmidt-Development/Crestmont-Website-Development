@@ -83,7 +83,9 @@ const SAMPLE = `(() => new Promise((res) => requestAnimationFrame(() => requestA
 const PAGE = `(async () => { const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let i = 0; i < 60 && document.readyState !== "complete"; i++) await sleep(250);
   await sleep(1500);
-  const text = (document.body ? document.body.innerText : "").replace(/\\s+/g, " ").trim().length;
+  // Visible text, including open shadow roots (custom elements / web components render their text there).
+  const deep = (root) => { let t = root === document ? (document.body ? document.body.innerText : "") : [...root.children].map((c) => c.innerText || c.textContent || "").join(" "); for (const e of root.querySelectorAll("*")) if (e.shadowRoot) t += " " + deep(e.shadowRoot); return t; };
+  const text = deep(document).replace(/\\s+/g, " ").trim().length;
   const media = [...document.querySelectorAll("img, video, canvas, svg, picture")].filter((e) => { const r = e.getBoundingClientRect(); return r.width > 16 && r.height > 16 && r.bottom > 0 && r.top < innerHeight; }).length;
   const fps = await new Promise((res) => { let n = 0; const t = performance.now(); const g = () => { n++; if (performance.now() - t < 1000) requestAnimationFrame(g); else res(n); }; requestAnimationFrame(g); });
   // Liveness, separate from smoothness: a slow page (heavy scripts, a software renderer) still renders frames; a frozen
@@ -127,7 +129,8 @@ const MOBILE = `(async () => { const sleep = (ms) => new Promise((r) => setTimeo
   const S = window.__cmv || { lcp: null, cls: 0, tasks: [] };
   const fps = await new Promise((res) => { let n = 0; const t = performance.now(); const g = () => { n++; if (performance.now() - t < 1000) requestAnimationFrame(g); else res(n); }; requestAnimationFrame(g); });
   const big = [...document.querySelectorAll("canvas")].filter((c) => { const r = c.getBoundingClientRect(), st = getComputedStyle(c); return r.width * r.height >= innerWidth * innerHeight * 0.04 && st.display !== "none" && st.visibility !== "hidden" && Number(st.opacity) > 0.05; }).length;
-  return JSON.stringify({ text: (document.body ? document.body.innerText : "").replace(/\\s+/g, " ").trim().length, width: innerWidth, overflowX: document.documentElement.scrollWidth - innerWidth, canvases: big,
+  const deep = (root) => { let t = root === document ? (document.body ? document.body.innerText : "") : [...root.children].map((c) => c.innerText || c.textContent || "").join(" "); for (const e of root.querySelectorAll("*")) if (e.shadowRoot) t += " " + deep(e.shadowRoot); return t; };
+  return JSON.stringify({ text: deep(document).replace(/\\s+/g, " ").trim().length, width: innerWidth, overflowX: document.documentElement.scrollWidth - innerWidth, canvases: big,
     perf: { lcp: S.lcp === null ? null : Math.round(S.lcp), cls: Math.round(S.cls * 1000) / 1000, tbt: S.tasks.reduce((a, d) => a + Math.max(0, d - 50), 0), idleFps: fps } }); })()`;
 
 interface CanvasInfo { i: number; w: number; h: number; area: number; inView: number; hidden: boolean; decorative: boolean; behind: boolean; type: string | null; draws: number }
