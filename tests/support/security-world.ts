@@ -239,6 +239,9 @@ async function buildStaffRecords(w: World) {
   // The matrix exercises publishing and the staff screens; native onboarding has its own tests, so this TEST DATA entry is
   // recorded as already verified natively (one native-first standard for every entry since 2026-11-19).
   await db.prepare(`UPDATE portfolio_projects SET native_state = 'native_verified', native_verified_at = ?, embed_status = 'allowed', embed_url = 'https://portfolio-matrix-fixture.com/', embed_checked_at = ? WHERE id = ?`).bind(nowIso(), nowIso(), ids.portfolio).run();
+  // Visual evidence of that verification (staff-only screenshots).
+  await w.env.overrides!.storage!.put(`portfolio-native-evidence/${ids.portfolio}/1-embedded.jpg`, PNG, "image/jpeg");
+  await db.prepare(`UPDATE portfolio_projects SET native_verification = ? WHERE id = ?`).bind(JSON.stringify({ ok: true, at: nowIso(), checks: [], summary: "Verified", shots: [{ label: "embedded", key: `portfolio-native-evidence/${ids.portfolio}/1-embedded.jpg` }] }), ids.portfolio).run();
   ids.portfolioSlug = "matrix-portfolio";
   await ok(o.post(`/staff/portfolio/${ids.portfolio}/screenshot`, { kind: "desktop", captured_on: "2026-10-26", screenshot: png("matrix.png") }), "portfolio screenshot");
   ids.portfolioFile = (await one<{ id: string }>(db, `SELECT desktop_screenshot_file_id AS id FROM portfolio_projects WHERE id = ?`, ids.portfolio)).id;
@@ -398,6 +401,7 @@ async function buildStaffRecords(w: World) {
   ids.plan = "professional";   // the Business package's committed minimum (FD-26)
   ids.reportFile = "transactions.csv";
   ids.testimonialAction = "publish";
+  ids.evidenceLabel = "embedded";
 }
 
 /** Resolves the id to use for a resource kind: the tenant's own record first, then staff-side records. */

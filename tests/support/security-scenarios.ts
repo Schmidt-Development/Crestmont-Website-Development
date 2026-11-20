@@ -167,6 +167,8 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/portfolio/:id/consent-withdraw", fields: () => ({ note: "Owner asked by email to stop showing the site" }) },
     { key: "POST /staff/portfolio/:id/archive" },
     { key: "POST /staff/portfolio/:id/restore" },
+    // An address already in the portfolio: de-duplicated without any network request; the submission is audited.
+    { key: "POST /staff/portfolio/bulk", fields: () => ({ urls: "https://portfolio.matrix.example/" }) },
 
     // ── Customer portal (tenant A administrator) ──
     cust("POST /portal/projects/:id/onboarding", { setup: async () => { await w.db.prepare(`UPDATE projects SET status = 'awaiting_onboarding' WHERE id = ?`).bind(a.ids.project).run(); } }),

@@ -101,6 +101,33 @@ Every portfolio entry — existing and future — follows one standard. There is
   Portfolio → Add flow with the real verifier, publishing, desktop/phone visitors, no stream, frame budget, visibility
   protocol). On production, `scripts/live-native-acceptance.mjs` replaces the old Mode B acceptance.
 
+## Universal onboarding at scale (Owner, 2026-11-20)
+
+**What the verifier judges.** It judges what a visitor experiences, independent of tag choice or rendering technology:
+- **Interaction:** the click target is any visible, safe text or element. Controls, links, form fields, `cursor:pointer` and real focus targets are excluded; `tabindex="-1"` containers are not controls.
+- **Liveness vs. smoothness:** the page must keep producing frames, which is its liveness. A low frame rate is a performance finding, attributed to the site, the frame or a GPU-less browser — never a rejection.
+- **Essential-visual parity:** an essential canvas that renders on a direct visit must also render in the frame. A second, cached direct load attributes a loss to the website, for example a module preloaded before its import map. Otherwise the loss is the frame's. A missing essential visual is never verified, whatever the frame rate.
+- **Content:** text inside open shadow roots counts.
+- **Evidence:** screenshots of the direct, embedded and phone views are kept privately for staff (Staff → Portfolio → entry → Developer report).
+
+**One action for many websites.**
+- **Staff → Portfolio → Add several** (up to 100 addresses), or the operations workflow's `batch` action. Each address is normalised (https, public host, redirects followed), de-duplicated (in the list and against existing entries; www, paths and redirects included) and queued unpublished.
+- The 15-minute job and Owner-approved prepare rounds work through the queue: bounded, concurrent (`PORTFOLIO_NATIVE_CONCURRENCY`, default 2; ops rounds use 4) and resumable.
+- **Staff → Portfolio → Onboarding status** shows each website's stage, desktop and mobile results, whether animations were tested, its last verification, the action needed and a Retry button.
+
+**Allowances.** First-time verifications have their own daily allowance (`PORTFOLIO_NATIVE_ONBOARD_DAILY`, default 120; ×3 for Owner-approved runs). Re-checks of verified sites keep `PORTFOLIO_NATIVE_VERIFY_DAILY` (default 10). Each verification uses about 1–1.5 Browser Run minutes, so 100 new websites need about 2–2.5 browser-hours once.
+
+**Self-healing, bounded.**
+- An atomic per-entry lease (migration 0112, expires after 10 minutes) means overlapping job, ops and staff steps never advance an entry twice.
+- Provider 429 and 5xx answers, unanswered requests and a failing verification browser are transient. They stay in progress and are retried automatically, up to 8 attempts, then reported.
+- Calls get a short in-request retry that honours Retry-After. A write that may have been applied is never repeated.
+- A site's own defect is retried after a day; an authorization blocker after 6 hours.
+
+**Proof (tests).**
+- `tests/portfolio-native-matrix.test.ts`: 100 configurations submitted in one bulk Add and advanced only by the real job with the real verifier in Chromium. Each has a verdict decided in advance; zero false approvals or rejections are required. CI job, with a metrics artifact.
+- `tests/portfolio-native-stress.test.ts`: batches of 1, 10, 50 and 100, overlapping operations, a worker stop, a timeout, rate limiting, and an outage with recovery.
+- `.github/workflows/native-test-sites.yml`: six real TEST DATA Workers (test-sites/native/) deployed and onboarded through production, unpublished, each checked against its expected verdict.
+
 ## Automatic native readiness for new websites (Owner, 2026-11-18)
 
 > "When I add a website I own, I should not have to modify its security headers manually … Crestmont should

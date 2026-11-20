@@ -27,7 +27,7 @@ export type ResourceKind =
   | "session" | "revision" | "milestone" | "task" | "task2" | "assignment" | "refund" | "message" | "approvalRequest" | "customerInvitation"
   | "lead" | "leadTask" | "aiJob" | "ticketDraft" | "conversationDraft" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
   | "designReference" | "designBaseline" | "frontendArtifact" | "buildRevision" | "buildRevisionFile" | "buildPreviewToken"
-  | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
+  | "testimonial" | "testimonialAction" | "evidenceLabel" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
   | "member" | "notification" | "staffNotification" | "buildJob" | "websiteDelivery" | "siteDeployment" | "buildWorker" | "buildApproval" | "buildIntegration"
@@ -242,6 +242,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/portfolio": staff(rolesWith("portfolio.manage")),
   "POST /staff/portfolio": staff(rolesWith("portfolio.manage"), undefined, act("portfolio.created")),
   "POST /staff/portfolio/new": staff(rolesWith("portfolio.manage"), undefined, exempt("reads the entered live website once and pre-fills the confirmation form; nothing is saved until the staff member confirms (POST /staff/portfolio, audited)")),
+  "POST /staff/portfolio/bulk": staff(rolesWith("portfolio.manage"), undefined, act("portfolio.native_bulk_add")),
+  "GET /staff/portfolio/onboarding": staff(rolesWith("portfolio.manage")),
+  "GET /staff/portfolio/:id/native-evidence/:label": staff(rolesWith("portfolio.manage"), { id: "portfolio", label: "evidenceLabel" }),
   "GET /staff/portfolio/files/:fileId": staff(rolesWith("portfolio.manage"), { fileId: "portfolioFile" }),
   "POST /staff/portfolio/testimonials/:tid/:action": staff(rolesWith("portfolio.manage"), { tid: "testimonial", action: "testimonialAction" }, act("testimonial.published")),
   "GET /staff/portfolio/:id": staff(rolesWith("portfolio.manage"), P("portfolio")),
