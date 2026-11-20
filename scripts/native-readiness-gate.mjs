@@ -14,9 +14,11 @@ for (const s of want) if (!rows.some((x) => x.slug === s)) required.push({ slug:
 console.log("| Entry | Published | Native state | Diagnosis | What is needed |\n|---|---|---|---|---|");
 let failed = 0;
 for (const x of required) {
-  const ok = x.state === "native_verified";
+  // Verified by an older verifier = not verified until it is repeated (its checks were fewer).
+  const ok = x.state === "native_verified" && !x.stale;
   if (!ok) failed++;
-  console.log(`| ${ok ? "✓" : "✗"} ${x.name} (${x.slug}) | ${x.published ? "yes" : "no"} | ${x.state} | ${(x.codes ?? []).join(", ") || "—"} | ${ok ? "—" : (x.action ?? x.reason ?? "").replace(/\|/g, "/").slice(0, 300)} |`);
+  const state = x.stale ? `native_verified by an older verifier (${x.verifier ?? "unversioned"}) — not counted` : x.state;
+  console.log(`| ${ok ? "✓" : "✗"} ${x.name} (${x.slug}) | ${x.published ? "yes" : "no"} | ${state} | ${(x.codes ?? []).join(", ") || "—"} | ${ok ? "—" : x.stale ? "re-verification with the current verifier (runs automatically, first in the queue)" : (x.action ?? x.reason ?? "").replace(/\|/g, "/").slice(0, 300)} |`);
 }
 // Measured performance (lab: Browser Run, the environment recorded with each measurement) — a diagnosis, not a
 // guarantee: what the website does on its own (direct) and inside Crestmont (embedded).

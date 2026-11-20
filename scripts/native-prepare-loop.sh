@@ -24,8 +24,9 @@ while :; do
     verdict=$(node -e '
       const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")), named = (process.argv[2] || "").split(",").filter(Boolean);
       const req = r.readiness.filter((x) => x.published || named.includes(x.slug));
-      const busy = req.filter((x) => x.state === "checking" || x.state === "preparing");
-      const ok = req.filter((x) => x.state === "native_verified");
+      // A verification by an older verifier (stale) is being repeated: in progress, not done.
+      const busy = req.filter((x) => x.state === "checking" || x.state === "preparing" || x.stale);
+      const ok = req.filter((x) => x.state === "native_verified" && !x.stale);
       console.log(`${ok.length}/${req.length} verified; in progress: ${busy.map((x) => x.slug).join(", ") || "none"}; this round: ${r.round.map((x) => x.slug + "=" + x.state).join(", ") || "nothing to do"}`);
       process.exit(ok.length === req.length ? 0 : busy.length ? 2 : 3);' "$out" "$slugs") && rc=0 || rc=$?
     echo "round $round: $verdict"

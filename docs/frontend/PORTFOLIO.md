@@ -110,6 +110,15 @@ Every portfolio entry — existing and future — follows one standard. There is
 - **Content:** text inside open shadow roots counts.
 - **Evidence:** screenshots of the direct, embedded and phone views are kept privately for staff (Staff → Portfolio → entry → Developer report).
 
+**Protected links stay out of the frame.** A visible sign-in, booking or checkout link on the site is clicked inside the frame through the site's own handlers. Its default action is observed and then cancelled, so nothing navigates or opens. If the link would load that page in the frame, it fails as `protected_link_in_frame`: the page refuses framing, so a visitor would see a broken frame. Links that open a new tab (`target="_blank"`, or a handler calling `window.open`) pass. This is the same rule the release acceptance applies.
+
+**Verifier version.** Every verification records `VERIFIER_VERSION` (`src/services/native/verify.ts`). A verification made by an older verifier is stale:
+- the next round verifies it again, first;
+- readiness reports it as `stale`;
+- the strict gate does not count it.
+
+A change to the verifier therefore reaches every existing entry, not only new ones. Release #42 found entries still "verified" by the previous verifier.
+
 **One action for many websites.**
 - **Staff → Portfolio → Add several** (up to 100 addresses), or the operations workflow's `batch` action. Each address is normalised (https, public host, redirects followed), de-duplicated (in the list and against existing entries; www, paths and redirects included) and queued unpublished.
 - The 15-minute job and Owner-approved prepare rounds work through the queue: bounded, concurrent (`PORTFOLIO_NATIVE_CONCURRENCY`, default 2; ops rounds use 4) and resumable.

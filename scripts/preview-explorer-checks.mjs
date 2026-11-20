@@ -182,8 +182,12 @@ export async function checkInteractive(p, label, ok, { touch = false, headersOf 
   // Scrolling outside the explorer scrolls the page normally.
   const head = await p.locator("h1").first().boundingBox();
   await p.mouse.move(20, Math.max(5, Math.min(head ? head.y : 40, 40)));
-  const before = await outerY(p); await p.mouse.wheel(0, 300); await sleep(500);
-  ok((await outerY(p)) !== before, `${tag}: scrolling outside the explorer scrolls the page`);
+  // The page must scroll; how long it took is reported (a heavy framed site can delay Crestmont's own scrolling on a
+  // busy machine — a performance observation, not a pass by itself: it must still scroll within 3 s).
+  const before = await outerY(p), t0 = Date.now(); await p.mouse.wheel(0, 300);
+  let movedOut = false; for (let k = 0; k < 30 && !movedOut; k++) { await sleep(100); movedOut = (await outerY(p)) !== before; }
+  const lag = Date.now() - t0;
+  ok(movedOut, `${tag}: scrolling outside the explorer scrolls the page${movedOut ? ` (after ${lag} ms${lag > 1000 ? " — slow: the framed site keeps the machine busy" : ""})` : " (not within 3 s)"}`);
   await iframe.evaluate((el) => el.scrollIntoView({ block: "center" })); await sleep(300);
 
   // A native live website (the real production site in a frame) is checked as what it is — its own navigation, its own
@@ -363,7 +367,8 @@ export async function checkLiveSite(p, fr, info, tag, ok, inner, headersOf) {
       const stayed = !!f2 && inFrame !== tapProtected.path;
       ok(stayed && p.url() === topUrl, `${tag}: protected link ${tapProtected.path} never loads inside the frame (${f2 ? `frame still on ${host}${inFrame === "/" ? "" : inFrame}` : "the frame left the site"}; Crestmont URL unchanged${(await outerY(p)) === y0 ? ", page still" : ""}) — ${popup ? `opened in a new tab (${new URL(popup).pathname})` : "no new tab opened"}`);
       for (const x of popups) await x.close().catch(() => {});
-      if (!stayed) { await p.locator("[data-pfx-reset]").first().click(); await sleep(2500); }
+      // Reset, then wait until the live site is really back in the frame (a heavy site takes longer than a fixed pause).
+      if (!stayed) { await p.locator("[data-pfx-reset]").first().click(); for (let k = 0; k < 60; k++) { await sleep(500); const f3 = frameNow(); if (f3 && await f3.evaluate(() => document.readyState !== "loading" && !!document.body).catch(() => false)) break; } await sleep(500); }
     } else console.log(`NOTE ${tag}: protected link ${tapProtected.path} is linked but not tappable on this layout — its headers are checked above`);
     p.context().off("page", onPage);
     await p.context().unroute(match, handler);
@@ -417,22 +422,27 @@ export async function checkLiveSite(p, fr, info, tag, ok, inner, headersOf) {
       console.log(`NOTE ${tag}: no public in-site navigation — ${inv.same.length} same-site link(s), all protected or not framable [${pages.map((x) => x.path).join(" ") || "none"}]; no in-page link that moves the page`);
       const iframe = p.locator(".pfx__slide:not([inert]) iframe.pfx__frame");
       const box = await iframe.boundingBox();
+      f = frameNow() ?? f;   // the frame as it is now (it may have been reloaded above)
+      // Any visible, non-interactive text — whatever the site's markup (div/span app shells included), as a visitor
+      // would click; never a control, a link or a form field.
       const spot = await f.evaluate(() => {
-        for (const e of document.querySelectorAll("h1, h2, h3, p")) {
-          const r = e.getBoundingClientRect();
-          if (r.width < 40 || r.height < 10 || r.top < 0 || r.bottom > innerHeight) continue;
-          const x = r.left + Math.min(20, r.width / 2), y = r.top + r.height / 2, hit = document.elementFromPoint(x, y);
-          if (hit && !hit.closest("a, button, input, select, textarea, label, [role=button], [onclick]")) {
-            window.__pfxClicks = 0; addEventListener("click", () => window.__pfxClicks++, { capture: true });
-            return { x, y, w: innerWidth };
+        const INTERACTIVE = "a, button, input, select, textarea, label, summary, [role=button], [role=link], [onclick], [contenteditable=''], [contenteditable=true], [tabindex]:not([tabindex='-1'])";
+        const safe = (hit) => !!hit && hit !== document.documentElement && hit !== document.body && !hit.closest(INTERACTIVE) && getComputedStyle(hit).cursor !== "pointer";
+        const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.nodeValue && n.nodeValue.trim().length >= 3 ? 1 : 3) });
+        for (let n, k = 0; (n = tw.nextNode()) && k < 5000; k++) {
+          const rg = document.createRange(); rg.selectNodeContents(n);
+          for (const r of rg.getClientRects()) {
+            if (r.width < 8 || r.height < 6 || r.top < 0 || r.bottom > innerHeight || r.left < 0 || r.right > innerWidth) continue;
+            const x = r.left + Math.min(6, r.width / 2), y = r.top + r.height / 2;
+            if (safe(document.elementFromPoint(x, y))) { window.__pfxClicks = 0; addEventListener("click", () => window.__pfxClicks++, { capture: true }); return { x, y, w: innerWidth }; }
           }
         }
         return null;
-      });
+      }).catch(() => null);
       if (spot && box) {
         const k = box.width / spot.w, y0 = await outerY(p);
-        await p.mouse.click(box.x + spot.x * k, box.y + spot.y * k); await sleep(500);
-        const got = await f.evaluate(() => window.__pfxClicks || 0);
+        await p.mouse.click(box.x + spot.x * k, box.y + spot.y * k);
+        let got = 0; for (let w = 0; w < 20 && !got; w++) { await sleep(150); got = await f.evaluate(() => window.__pfxClicks || 0).catch(() => 0); }
         ok(got > 0 && p.url() === topUrl && (await outerY(p)) === y0, `${tag}: no public in-site link to follow (recorded, not invented) — a real click reaches the live site (${got} click event${got === 1 ? "" : "s"} inside the frame; Crestmont unchanged)`);
       } else ok(false, `${tag}: no public in-site link and no visible content to click — the live site shows nothing interactive`);
     }
