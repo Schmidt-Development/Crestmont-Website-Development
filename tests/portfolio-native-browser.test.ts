@@ -35,9 +35,14 @@ async function world(w: NativeWorld, extra: Record<string, unknown> = {}) {
   // What the verification browser fetches: Crestmont's own pages from this in-process app, the TEST DATA sites from the
   // world (with the browser-side variance a test may set), and nothing from the real network.
   const client = t.client();
+  (t.env.overrides as { storage: unknown }).storage = t.storage;   // private evidence storage (screenshots)
   (t.env.overrides as { nativeFixture: unknown }).nativeFixture = async (url: string) => {
     const u = new URL(url);
     if (u.host === "crestmont.test") { const r = await client.get(u.pathname + u.search); const headers: Record<string, string> = {}; r.headers.forEach((v, k) => { if (k !== "set-cookie") headers[k] = v; }); return { status: r.status, headers, body: await r.text() }; }
+    // A site whose later loads differ from its first (a cache-dependent loading defect): the browser's first request
+    // for "/" gets the normal page, every later one the variant.
+    const later = laterLoads.get(u.hostname);
+    if (later && u.pathname === "/") { const n = (loads.get(u.hostname) ?? 0) + 1; loads.set(u.hostname, n); if (n > 1) return { status: 200, headers: { "content-type": "text/html; charset=utf-8", ...(browserVariance.get(u.hostname) ?? {}) }, body: later }; }
     const r = w.respond(url);
     if (!r) return { status: 404, headers: { "content-type": "text/plain" }, body: "" };
     return { ...r, headers: { ...r.headers, ...(browserVariance.get(u.hostname) ?? {}) } };
@@ -52,6 +57,7 @@ async function world(w: NativeWorld, extra: Record<string, unknown> = {}) {
   return { t, o, add, close: () => { for (const c of browsers) c(); t.close(); } };
 }
 const browserVariance = new Map<string, Record<string, string>>();
+const laterLoads = new Map<string, string>(), loads = new Map<string, number>();
 const checks = (p: { native_verification?: string | null }) => (JSON.parse(p.native_verification ?? "{}").checks ?? []) as { name: string; ok: boolean; detail: string }[];
 
 test("[PORT-NATIVE-E2E] a NEW owned website: refuses → prepared through Cloudflare → real Chromium verifies content, WebGL globe, scroll, click, phone width → published; protected pages still refuse; re-run changes nothing", { skip, timeout: 240_000 }, async () => {
@@ -77,6 +83,16 @@ test("[PORT-NATIVE-E2E] a NEW owned website: refuses → prepared through Cloudf
     assert.ok(perf.direct && perf.embedded, "direct and embedded performance recorded");
     assert.match(perf.environment, /viewport 1440×900/);
     assert.match(by.scroll.detail, /A wheel gesture scrolled the site/);                 // 10: scroll and safe interaction
+    // Visual evidence: what the visitor saw, directly and inside Crestmont (desktop and phone), kept privately for staff.
+    const shots = (JSON.parse(p.native_verification!).shots ?? []) as { label: string; key: string }[];
+    assert.deepEqual(shots.map((x) => x.label).sort(), ["direct", "embedded", "embedded-mobile"]);
+    const img = await o.get(`/staff/portfolio/${p.id}/native-evidence/embedded`);
+    assert.equal(img.status, 200);
+    assert.equal(img.headers.get("content-type"), "image/jpeg");
+    const bytes = new Uint8Array(await img.arrayBuffer());
+    assert.ok(bytes.length > 5000 && bytes[0] === 0xff && bytes[1] === 0xd8, "a real JPEG capture");
+    assert.equal((await t.client().get(`/staff/portfolio/${p.id}/native-evidence/embedded`)).status === 200, false, "never public");
+    assert.match(await (await o.get(`/staff/portfolio/${p.id}`)).text(), /data-testid="pf-native-shots"/);
     assert.match(by["protected pages"].detail, /\/book, \/login/);                       // 11: protected pages still refuse
     // 12: publishable after the existing authorization steps, and the public page frames the real site.
     await o.post(`/staff/portfolio/${p.id}/verify-link`, { verified_on: new Date().toISOString().slice(0, 10) });
@@ -136,4 +152,44 @@ test("[PORT-NATIVE-E2E] context-aware visuals: a decorative empty background can
     assert.match(draws.native_reason!, /essential 480×480 webgl canvas drew nothing \(\d+ draw calls produced no visible pixels\).*also when visited directly/);
     assert.ok(JSON.parse(draws.native_diagnosis!).codes.includes("site_render_defect"));
   } finally { close(); }
+});
+
+test("[PORT-NATIVE-E2E] tag-agnostic interaction and liveness: a div-only app shell inside a tabindex=-1 container is clicked; a heavy page at a few frames per second is slow but alive", { skip, timeout: 300_000 }, async () => {
+  const csp = "frame-ancestors http://crestmont.test";
+  const w = new NativeWorld()
+    .site({ host: "divs.fixture-native.com", baseXfo: null, baseCsp: csp, pages: { "/": homepage("Div Shell", { divOnly: true }) } })
+    .site({ host: "heavy.fixture-native.com", baseXfo: null, baseCsp: csp, pages: { "/": homepage("Heavy Site", { heavy: true, webgl: "ok" }) } });
+  const { add, close } = await world(w, { PORTFOLIO_CLOUDFLARE_TOKEN: "" });
+  try {
+    const divs = await add("divs", "https://divs.fixture-native.com/");
+    assert.equal(divs.native_state, "native_verified", divs.native_reason!);
+    assert.match(checks(divs).find((c) => c.name === "click")!.detail, /A real click reached the site/);
+    const heavy = await add("heavy", "https://heavy.fixture-native.com/");
+    assert.equal(heavy.native_state, "native_verified", heavy.native_reason!);
+    assert.match(checks(heavy).find((c) => c.name === "javascript")!.detail, /slow but running/);
+    const codes = JSON.parse(heavy.native_diagnosis ?? "{}").codes ?? [];
+    assert.ok(codes.includes("site_slow"), `slowness is a performance finding about the site: ${codes}`);
+  } finally { close(); }
+});
+
+test("[PORT-NATIVE-E2E] essential-visual parity: a 3D scene lost on cached reloads is the site's defect, a scene that refuses frames is the frame's — both block, whatever the frame rate", { skip, timeout: 300_000 }, async () => {
+  const csp = "frame-ancestors http://crestmont.test";
+  const w = new NativeWorld()
+    .site({ host: "race.fixture-native.com", baseXfo: null, baseCsp: csp, pages: { "/": homepage("Race Earth", { webgl: "ok" }) } })
+    .site({ host: "toponly.fixture-native.com", baseXfo: null, baseCsp: csp, pages: { "/": homepage("Top Only", { webgl: "top-only" }) } });
+  laterLoads.set("race.fixture-native.com", homepage("Race Earth", { webgl: "module-error" }));
+  const { add, close } = await world(w, { PORTFOLIO_CLOUDFLARE_TOKEN: "" });
+  try {
+    const race = await add("race", "https://race.fixture-native.com/");
+    assert.equal(race.native_state, "unavailable", "a missing essential scene is never verified");
+    const rv = checks(race).find((c) => c.name === "visuals")!;
+    assert.equal(rv.ok, false);
+    assert.match(rv.detail, /essential visual missing: 480×480 webgl canvas .* not when the website loads with cached files .*Failed to resolve module specifier/);
+    const rd = JSON.parse(race.native_diagnosis ?? "{}");
+    assert.ok(rd.codes.includes("site_render_defect"), JSON.stringify(rd));
+    assert.equal(rd.embedFailure, false, "the website's own loading defect — not blamed on the frame");
+    const top = await add("toponly", "https://toponly.fixture-native.com/");
+    assert.equal(top.native_state, "unavailable");
+    assert.ok(JSON.parse(top.native_diagnosis ?? "{}").codes.includes("iframe_render_failure"), top.native_reason!);
+  } finally { laterLoads.clear(); loads.clear(); close(); }
 });

@@ -31,7 +31,8 @@ import { discoverVercel, vercelDeployment, type VercelTarget } from "./vercel.ts
 import { advancePr, proposeChange, readFile, repoAccess, type ProposedChange } from "./github.ts";
 import { editPagesHeaders, editVercelJson, EditError } from "./editors.ts";
 import { frameAncestorDirectives, frameAncestorsValue, publicPaths, sensitiveLinks } from "./standard.ts";
-import { verifyNative, type FixtureResponder, type OpenBrowser, type VerifyResult } from "./verify.ts";
+import { verifyNative, type FixtureResponder, type OpenBrowser, type ShotSink, type VerifyResult } from "./verify.ts";
+import type { StorageAdapter } from "../../adapters/storage.ts";
 import { codesFor, diagnose, type DiagCode } from "./diagnostics.ts";
 
 export interface NativeDeps {
@@ -41,6 +42,8 @@ export interface NativeDeps {
    *  so a release that converts many entries finishes them instead of leaving some for tomorrow. */
   ownerApproved?: boolean;
   verify?: (pageUrl: string, liveOrigin: string) => Promise<VerifyResult>;
+  /** Private storage for visual evidence (screenshots of the direct and embedded views); none → no screenshots. */
+  storage?: StorageAdapter | null;
 }
 type Target = CloudflareTarget | VercelTarget;
 type Change =
@@ -128,7 +131,15 @@ async function runVerification(d: NativeDeps, p: pf.PortfolioProject, check: Emb
   if ((await verificationsToday(d.db, now)) >= cap) return `Today's real-browser verifications (${cap}) are used up; it runs again automatically within a day`;
   const token = await issuePreviewToken(d.db, p.id, 10, "native-verify", now);
   const pageUrl = `${d.siteOrigin}/portfolio/native-verify/${token}`;
-  const res = d.verify ? await d.verify(pageUrl, check.origin!) : await verifyNative(d.openBrowser!, pageUrl, check.origin!, { fixture: d.fixture, liveUrl: check.url ?? undefined });
+  // Visual evidence: each screenshot is kept privately (staff-only), and only the latest verification's set.
+  const store = d.storage ?? null;
+  const shot: ShotSink | undefined = store ? async (label, jpeg) => { const key = `portfolio-native-evidence/${p.id}/${now}-${label}.jpg`; await store.put(key, jpeg, "image/jpeg"); return key; } : undefined;
+  const res = d.verify ? await d.verify(pageUrl, check.origin!) : await verifyNative(d.openBrowser!, pageUrl, check.origin!, { fixture: d.fixture, liveUrl: check.url ?? undefined, shot });
+  if (store && res.shots?.length) {
+    let old: { key: string }[] = [];
+    try { old = (JSON.parse(p.native_verification ?? "{}").shots ?? []) as { key: string }[]; } catch { old = []; }
+    for (const o of old) if (o.key?.startsWith(`portfolio-native-evidence/${p.id}/`) && !res.shots.some((s) => s.key === o.key)) await store.delete(o.key).catch(() => undefined);
+  }
   const sens = await sensitiveStillProtected(d, check);
   res.checks.push({ name: "protected pages", ok: sens.ok, detail: sens.detail });
   if (!sens.ok) { res.ok = false; res.summary = `${res.summary.startsWith("Verified") ? "" : res.summary + " · "}protected pages: ${sens.detail}`; }

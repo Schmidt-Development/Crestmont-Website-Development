@@ -1129,6 +1129,19 @@ function registerPortfolioAdmin(r: Router) {
     return portfolioNew(ctx, { live_url: check.url ?? url.toString(), name, slug, description: check.description ?? "", relationship: "Relationship documentation pending" }, [], check, 200, hosting);
   });
 
+  // Visual evidence from the latest real-browser verification (private: staff only, never cached publicly).
+  r.get("/staff/portfolio/:id/native-evidence/:label", async (ctx, p) => {
+    requireStaff(ctx, "portfolio.manage");
+    const proj = await pf.getById(ctx.db, p.id);
+    let shots: { label: string; key: string }[] = [];
+    try { shots = JSON.parse(proj?.native_verification ?? "{}").shots ?? []; } catch { shots = []; }
+    const s = shots.find((x) => x.label === p.label);
+    if (!proj || !s || !ctx.storage || !s.key.startsWith(`portfolio-native-evidence/${proj.id}/`)) throw new HttpError(404, "Not found");
+    const obj = await ctx.storage.get(s.key);
+    if (!obj) throw new HttpError(404, "Not found");
+    return new Response(obj.body as BodyInit, { headers: { "content-type": "image/jpeg", "cache-control": "private, no-store", ...securityHeaders("api") } });
+  });
+
   r.post("/staff/portfolio/:id/embed-check", async (ctx, p) => {
     requireStaff(ctx, "portfolio.manage");
     await ctx.form();
@@ -1290,7 +1303,7 @@ function nativeCard(ctx: AppContext, p: pf.PortfolioProject): SafeHtml {
   const g = ownerProgress(p);
   let change: { kind?: string; pr?: { url?: string; repo?: string; path?: string }; host?: string; paths?: number; ref?: string; detail?: string; rewrite?: boolean } | null = null;
   try { change = p.native_change ? JSON.parse(p.native_change) : null; } catch { change = null; }
-  let ver: { ok?: boolean; at?: string; checks?: { name: string; ok: boolean; detail: string }[]; findings?: { code: string; kind: string; blocking: boolean; detail: string }[] } | null = null;
+  let ver: { ok?: boolean; at?: string; checks?: { name: string; ok: boolean; detail: string }[]; findings?: { code: string; kind: string; blocking: boolean; detail: string }[]; shots?: { label: string; key: string }[] } | null = null;
   try { ver = p.native_verification ? JSON.parse(p.native_verification) : null; } catch { ver = null; }
   let diag: { codes?: string[]; developer?: string } | null = null;
   try { diag = p.native_diagnosis ? JSON.parse(p.native_diagnosis) : null; } catch { diag = null; }
@@ -1312,6 +1325,7 @@ ${g.action ? html`<div class="alert alert--warn" role="status" data-testid="pf-n
 ${dl([["State", pf.NATIVE_LABEL[st]], ["Diagnosis", diag?.codes?.length ? diag.codes.join(", ") : "—"], ["Hosting (discovered)", p.native_provider ?? "Not discovered yet"], ["Change", changeRow], ["Real-browser verification", ver?.at ? `${ver.ok ? "Passed" : "Failed"} ${formatDateTime(ver.at)}` : "Not run yet"], ["Last embedding check", p.embed_detail ?? "—"]])}
 ${ver?.checks?.length ? html`<ul class="checklist" data-testid="pf-native-checks">${ver.checks.map((c) => html`<li>${c.ok ? "✓" : "✗"} <strong>${c.name}</strong> — ${c.detail}</li>`)}</ul>` : ""}
 ${ver?.findings?.length ? html`<ul class="checklist" data-testid="pf-native-findings">${ver.findings.map((f) => html`<li>${f.kind === "embed" ? "Frame" : f.kind === "site" ? "Website" : "Test environment"} · <code>${f.code}</code>${f.blocking ? " (blocking)" : ""} — ${f.detail}</li>`)}</ul>` : ""}
+${ver?.shots?.length ? html`<div class="row" data-testid="pf-native-shots">${ver.shots.map((s) => html`<figure style="margin:0;max-width:220px"><a href="/staff/portfolio/${p.id}/native-evidence/${s.label}" target="_blank" rel="noopener"><img loading="lazy" style="width:100%;height:auto;border:1px solid var(--border, #ccc)" src="/staff/portfolio/${p.id}/native-evidence/${s.label}" alt="${s.label} view of ${p.name} captured by the verification browser"></a><figcaption class="faint">${s.label === "direct" ? "The site on its own" : s.label === "embedded" ? "Inside Crestmont" : s.label === "embedded-mobile" ? "Inside Crestmont, 390 px" : "The site on its own, 390 px"}</figcaption></figure>`)}</div>` : ""}
 ${perf ? html`<div data-testid="pf-native-perf">${dl([["Embedded (in Crestmont)", metric(perf.embedded)], ["Direct (the site on its own)", metric(perf.direct)], ["Phone (embedded, 390 px)", metric(perf.mobile)], ["Verdict", perf.verdict ?? "—"], ["Test environment", perf.environment ?? "—"], ["Budgets", perf.budgets ?? "—"]])}</div>` : ""}
 </details>
 <p class="muted">Every portfolio website follows one standard: it is shown only as the real website in a native frame, after a real browser has verified it. Crestmont prepares owned websites itself through the connected Cloudflare, Vercel and GitHub accounts — only their public pages may be framed by ${new URL(ctx.baseUrl).origin}; sign-in, account, booking, application, checkout and payment pages keep refusing. It is never replaced by a remote stream, a demo or a screenshot. Progress continues automatically every 15 minutes; verified websites are re-checked daily.</p></div>`;
