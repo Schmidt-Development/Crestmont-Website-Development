@@ -32,6 +32,10 @@ import { SENSITIVE_ROUTE } from "./standard.ts";
  *  Bump whenever what the verifier checks changes. */
 export const VERIFIER_VERSION = "2026-11-20.2";
 
+/** A value as a JavaScript literal that is safe to place inside generated code: JSON, plus the characters that could
+ *  end a script or a line in some contexts (<, >, /, U+2028, U+2029) escaped. */
+const jsLiteral = (v: unknown) => JSON.stringify(v).replace(/[<>\/\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
 export interface BrowserHandle { cdp: Cdp; close(): void | Promise<void> }
 export type OpenBrowser = () => Promise<BrowserHandle>;
 type Fixture = { status: number; headers: Record<string, string>; body: string } | null;
@@ -401,7 +405,7 @@ export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigi
     // the site's own handlers, but its default action is observed and then cancelled: nothing navigates, no tab opens,
     // nothing is submitted. A link that opens a new tab (target=_blank, or a handler that calls window.open) passes; one
     // whose default would load the page in the frame (or replace Crestmont's page: _top/_parent) fails.
-    const protectedLink = JSON.parse(String(await page.evalIn(sid, `(() => { const re = new RegExp(${JSON.stringify(SENSITIVE_ROUTE.source)}, "i");
+    const protectedLink = JSON.parse(String(await page.evalIn(sid, `(() => { const re = new RegExp(${jsLiteral(SENSITIVE_ROUTE.source)}, "i");
       for (const a of document.querySelectorAll("a[href]")) { let u; try { u = new URL(a.href, location.href); } catch { continue; }
         if (u.origin !== location.origin || !re.test(u.pathname) || u.pathname === location.pathname) continue;
         const r = a.getBoundingClientRect(); if (!a.getClientRects().length || r.width < 2 || r.height < 2 || getComputedStyle(a).visibility === "hidden") continue;
