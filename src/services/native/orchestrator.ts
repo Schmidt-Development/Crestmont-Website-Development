@@ -31,7 +31,7 @@ import { discoverVercel, vercelDeployment, type VercelTarget } from "./vercel.ts
 import { advancePr, proposeChange, readFile, repoAccess, type ProposedChange } from "./github.ts";
 import { editPagesHeaders, editVercelJson, EditError } from "./editors.ts";
 import { frameAncestorDirectives, frameAncestorsValue, publicPaths, sensitiveLinks } from "./standard.ts";
-import { verifyNative, type FixtureResponder, type OpenBrowser, type ShotSink, type VerifyResult } from "./verify.ts";
+import { VERIFIER_VERSION, verifyNative, type FixtureResponder, type OpenBrowser, type ShotSink, type VerifyResult } from "./verify.ts";
 import type { StorageAdapter } from "../../adapters/storage.ts";
 import { codesFor, diagnose, type DiagCode } from "./diagnostics.ts";
 
@@ -82,7 +82,7 @@ async function discoverAll<T extends object>(conns: unknown[], label: string, fi
 export function outcomeDiagnosis(o: { state: pf.NativeState; reason: string; verification?: VerifyResult | null }, at = nowIso()) {
   const codes: DiagCode[] = codesFor(o.state, o.reason);
   const fs = o.verification?.findings ?? [];
-  for (const f of fs) if ((f.code as DiagCode) && !codes.includes(f.code as DiagCode) && ["iframe_render_failure", "site_render_defect", "js_module_error", "gpu_limited", "iframe_overhead", "site_slow", "interaction_blocked", "scroll_blocked", "mobile_overflow", "frame_not_loaded", "blank_in_frame", "hydration_failure"].includes(f.code)) codes.push(f.code as DiagCode);
+  for (const f of fs) if ((f.code as DiagCode) && !codes.includes(f.code as DiagCode) && ["iframe_render_failure", "site_render_defect", "js_module_error", "gpu_limited", "iframe_overhead", "site_slow", "interaction_blocked", "scroll_blocked", "mobile_overflow", "frame_not_loaded", "blank_in_frame", "hydration_failure", "protected_link_in_frame"].includes(f.code)) codes.push(f.code as DiagCode);
   const d = diagnose(codes, [o.reason, ...fs.map((f) => `${f.kind}/${f.code}${f.blocking ? " (blocking)" : ""}: ${f.detail}`)].join("\n"), at);
   // The frame itself fails only when a blocking finding is an embedding one (or the reason says the frame refuses).
   if (fs.length) d.embedFailure = fs.some((f) => f.blocking && f.kind === "embed") || (!o.verification?.ok && !fs.some((f) => f.blocking));
@@ -147,6 +147,7 @@ async function runVerification(d: NativeDeps, p: pf.PortfolioProject, check: Emb
     try { old = (JSON.parse(p.native_verification ?? "{}").shots ?? []) as { key: string }[]; } catch { old = []; }
     for (const o of old) if (o.key?.startsWith(`portfolio-native-evidence/${p.id}/`) && !res.shots.some((s) => s.key === o.key)) await store.delete(o.key).catch(() => undefined);
   }
+  res.verifier = VERIFIER_VERSION;   // the verification this code made (a stale one is repeated: verifiedBy)
   const sens = await sensitiveStillProtected(d, check);
   res.checks.push({ name: "protected pages", ok: sens.ok, detail: sens.detail });
   if (!sens.ok) { res.ok = false; res.summary = `${res.summary.startsWith("Verified") ? "" : res.summary + " · "}protected pages: ${sens.detail}`; }
@@ -155,6 +156,10 @@ async function runVerification(d: NativeDeps, p: pf.PortfolioProject, check: Emb
 
 /** Advances one project's native readiness by one step. */
 const LEASE_MS = 10 * 60_000;
+/** Which verifier made an entry's last verification (absent = before versioning). */
+export function verifiedBy(p: Pick<pf.PortfolioProject, "native_verification">): string | null {
+  try { return (JSON.parse(p.native_verification ?? "{}") as { verifier?: string }).verifier ?? null; } catch { return null; }
+}
 /** Transient failures (a provider outage or rate limit, the verification browser itself failing) are retried
  *  automatically on later ticks — bounded: after this many consecutive attempts the entry is reported as blocked. */
 const TRANSIENT_ATTEMPTS = 8;
@@ -193,7 +198,8 @@ async function advanceNativeStep(d: NativeDeps, id: string, now: number, opts: {
   if (change?.kind === "failed" && opts.force) change = null;
 
   if (check.status === "allowed") {
-    const fresh = p.native_state === "native_verified" && p.native_verified_at && now - Date.parse(p.native_verified_at) < VERIFIED_FRESH_MS && p.embed_url === check.url;
+    // Fresh only when made by THIS verifier: a verification by an older verifier is repeated (its checks were fewer).
+    const fresh = p.native_state === "native_verified" && p.native_verified_at && now - Date.parse(p.native_verified_at) < VERIFIED_FRESH_MS && p.embed_url === check.url && verifiedBy(p) === VERIFIER_VERSION;
     if (fresh && !opts.force) {
       // Still verified and still permitted: record the daily re-check (native availability is monitored on its own).
       await d.db.prepare(`UPDATE portfolio_projects SET native_updated_at = ? WHERE id = ?`).bind(nowIso(), id).run();
@@ -357,8 +363,9 @@ export async function advanceAllNative(d: NativeDeps, limit = 10, opts: { budget
   // Named entries (an Owner-approved round) are taken whatever their last state — a settled entry is retried now, not
   // after six hours (a failed change still stays failed: only "Check again" starts it over).
   const named = opts.slugs?.length ? `slug IN (${opts.slugs.map(() => "?").join(", ")})` : "";
-  const rows = (await d.db.prepare(`SELECT id, slug, published FROM portfolio_projects WHERE native_required = 1 AND archived_at IS NULL AND (${named ? `(${named} AND native_state != 'native_verified') OR ` : ""}native_state IN ('checking', 'preparing') OR (native_state = 'authorization_required' AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'unavailable' AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'native_verified' AND COALESCE(native_updated_at, '') < ?))
-    ORDER BY CASE native_state WHEN 'native_verified' THEN 2 ELSE 0 END, published DESC, CASE WHEN embed_status = 'allowed' THEN 1 ELSE 0 END, COALESCE(native_updated_at, ''), position LIMIT ?`).bind(...(opts.slugs ?? []), settledBefore, failedBefore, verifiedBefore, limit).all<{ id: string; slug: string; published: number }>()).results;
+  const rows = (await d.db.prepare(`SELECT id, slug, published FROM portfolio_projects WHERE native_required = 1 AND archived_at IS NULL AND (${named ? `(${named} AND (native_state != 'native_verified' OR COALESCE(native_verification, '') NOT LIKE '%"verifier":"${VERIFIER_VERSION}"%')) OR ` : ""}native_state IN ('checking', 'preparing') OR (native_state = 'authorization_required' AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'unavailable' AND COALESCE(native_updated_at, '') < ?) OR (native_state = 'native_verified' AND COALESCE(native_updated_at, '') < ?)
+      OR (native_state = 'native_verified' AND COALESCE(native_verification, '') NOT LIKE ?))
+    ORDER BY CASE WHEN native_state = 'native_verified' AND COALESCE(native_verification, '') NOT LIKE ? THEN 1 WHEN native_state = 'native_verified' THEN 2 ELSE 0 END, published DESC, CASE WHEN embed_status = 'allowed' THEN 1 ELSE 0 END, COALESCE(native_updated_at, ''), position LIMIT ?`).bind(...(opts.slugs ?? []), settledBefore, failedBefore, verifiedBefore, `%"verifier":"${VERIFIER_VERSION}"%`, `%"verifier":"${VERIFIER_VERSION}"%`, limit).all<{ id: string; slug: string; published: number }>()).results;
   const out: { slug: string; state: string; published: boolean }[] = [];
   // Bounded per run: a time budget and a number of real-browser verifications, so one tick never runs into the
   // platform's limits and the rest simply continues on the next tick (progress is stored per entry).
@@ -392,9 +399,13 @@ export async function advanceAllNative(d: NativeDeps, limit = 10, opts: { budget
 
 /** Every published entry's native readiness, for a release or an operations run: settled when each is verified, or
  *  stopped on a genuine blocker (authorization, provider, the site's own policy or defect). */
-export async function nativeReadiness(db: Db): Promise<{ slug: string; name: string; live: string; published: boolean; state: string; reason: string; codes: string[]; action: string | null; perf: unknown }[]> {
-  const rows = (await db.prepare(`SELECT slug, name, live_url, published, native_state, native_reason, native_diagnosis, native_perf FROM portfolio_projects WHERE archived_at IS NULL ORDER BY position, name`).all<{ slug: string; name: string; live_url: string; published: number; native_state: string; native_reason: string | null; native_diagnosis: string | null; native_perf: string | null }>()).results;
-  return rows.map((r) => { const d = parse<{ codes?: string[]; action?: string | null }>(r.native_diagnosis); return { slug: r.slug, name: r.name, live: r.live_url, published: !!r.published, state: r.native_state, reason: (r.native_reason ?? "").slice(0, 400), codes: d?.codes ?? [], action: d?.action ?? null, perf: parse(r.native_perf) }; });
+export async function nativeReadiness(db: Db): Promise<{ slug: string; name: string; live: string; published: boolean; state: string; reason: string; codes: string[]; action: string | null; perf: unknown; verifier: string | null; stale: boolean }[]> {
+  const rows = (await db.prepare(`SELECT slug, name, live_url, published, native_state, native_reason, native_diagnosis, native_perf, native_verification FROM portfolio_projects WHERE archived_at IS NULL ORDER BY position, name`).all<{ slug: string; name: string; live_url: string; published: number; native_state: string; native_reason: string | null; native_diagnosis: string | null; native_perf: string | null; native_verification: string | null }>()).results;
+  return rows.map((r) => {
+    const d = parse<{ codes?: string[]; action?: string | null }>(r.native_diagnosis), v = verifiedBy(r);
+    // A verification by an older verifier does not count as verified until it is repeated.
+    return { slug: r.slug, name: r.name, live: r.live_url, published: !!r.published, state: r.native_state, reason: (r.native_reason ?? "").slice(0, 400), codes: d?.codes ?? [], action: d?.action ?? null, perf: parse(r.native_perf), verifier: v, stale: r.native_state === "native_verified" && v !== VERIFIER_VERSION };
+  });
 }
 
 /** Step 2 of the Add flow (read-only): which connected account serves the site, before anything is created. */

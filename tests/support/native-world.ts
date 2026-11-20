@@ -271,8 +271,10 @@ export class NativeWorld {
 }
 
 /** A website's homepage: content, links (public and sensitive), and optionally a WebGL scene or broken script. */
-export function homepage(title: string, opts: { links?: string[]; webgl?: "ok" | "fail" | "deferred" | "decorative" | "broken-draws" | "module-error" | "top-only"; brokenJs?: boolean; divOnly?: boolean; heavy?: boolean } = {}): string {
-  const links = (opts.links ?? ["/services", "/about", "/login", "/book"]).map((h) => `<a href="${h}">${h.slice(1)}</a>`).join(" ");
+export function homepage(title: string, opts: { links?: string[]; webgl?: "ok" | "fail" | "deferred" | "decorative" | "broken-draws" | "module-error" | "top-only"; brokenJs?: boolean; divOnly?: boolean; heavy?: boolean; protectedInFrame?: boolean } = {}): string {
+  // As the native standard asks, protected links (sign-in, booking) open in a new tab; protectedInFrame = a site whose
+  // sign-in link navigates its own frame (it refuses framing, so an embedded visitor would get a broken frame).
+  const links = (opts.links ?? ["/services", "/about", "/login", "/book"]).map((h) => `<a href="${h}"${/login|book/.test(h) && !opts.protectedInFrame ? ' target="_blank" rel="noopener"' : ""}>${h.slice(1)}</a>`).join(" ");
   const gl = opts.webgl === "ok"
     ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>(function(){var c=document.getElementById("globe");var g=c.getContext("webgl");if(!g)return;var t=0;function f(){t+=0.03;g.clearColor(0.05,0.1+0.4*Math.abs(Math.sin(t)),0.6,1);g.clear(g.COLOR_BUFFER_BIT);g.enable(g.SCISSOR_TEST);g.scissor(120+60*Math.sin(t),120,240,240);g.clearColor(0.2,0.8,0.3,1);g.clear(g.COLOR_BUFFER_BIT);g.disable(g.SCISSOR_TEST);requestAnimationFrame(f);}requestAnimationFrame(f);})();</script>`
     : opts.webgl === "fail" ? `<canvas id="globe" width="480" height="480" style="width:min(480px,100%);aspect-ratio:1;display:block"></canvas><script>/* the scene fails to initialise: nothing is ever drawn */</script>`

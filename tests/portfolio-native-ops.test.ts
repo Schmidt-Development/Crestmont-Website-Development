@@ -155,3 +155,41 @@ test("[PORT-NATIVE] the 15-minute job is bounded: a time budget and a verificati
   assert.deepEqual(next.map((x) => x.state), ["native_verified", "native_verified"], "the deferred ones complete on the next tick; the verified ones are not repeated");
   t.close();
 });
+
+test("[PORT-NATIVE] a verification made by an older verifier is stale: reported as not verified, failed by the strict gate, verified again first — and then counts", async () => {
+  // Release #42 (2026-11-20): entries verified on 2026-11-19 by the previous verifier (no essential-visual parity) were
+  // still counted as verified because a verification was reused for 7 days. A verifier fix must reach existing entries.
+  const { execFileSync } = await import("node:child_process");
+  const { writeFileSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { advanceAllNative, nativeReadiness } = await import("../src/services/native/orchestrator.ts");
+  const { nativeDepsFrom } = await import("../src/services/native/deps.ts");
+  const { VERIFIER_VERSION } = await import("../src/services/native/verify.ts");
+  const w = new NativeWorld().site({ ...site("old.fixture-native.com"), baseXfo: null, baseCsp: "frame-ancestors http://crestmont.test" } as never);
+  let verifications = 0;
+  const t = await createTestApp({ ...TOKENS, overrides: { portfolioFetch: w.fetchSite, providerFetch: w.fetchApi, nativeVerify: async () => { verifications++; return { ok: true, at: new Date().toISOString(), summary: "Verified", checks: [] }; } } } as never);
+  const at = new Date().toISOString();
+  // Verified an hour ago — by the previous (unversioned) verifier; recently re-checked, so otherwise not due.
+  await t.db.prepare(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, position, published, updated_at, created_at, native_required, native_state, native_verified_at, native_updated_at, native_verification, embed_url) VALUES ('pf_old','old','Old','T','https://old.fixture-native.com/','TEST DATA','TEST DATA','[]',90,1,?,?,1,'native_verified',?,?,?, 'https://old.fixture-native.com/')`)
+    .bind(at, at, new Date(Date.now() - 3_600_000).toISOString(), at, JSON.stringify({ ok: true, at, checks: [], summary: "Verified" })).run();
+  await t.db.prepare(`UPDATE portfolio_projects SET archived_at = ? WHERE slug <> 'old'`).bind(at).run();   // only this entry here
+  const dir = mkdtempSync(join(tmpdir(), "stale-"));
+  const gate = async () => { writeFileSync(join(dir, "r.json"), JSON.stringify({ readiness: await nativeReadiness(t.db) })); try { execFileSync(process.execPath, ["scripts/native-readiness-gate.mjs", join(dir, "r.json")], { encoding: "utf8" }); return { code: 0, out: "" }; } catch (e) { const x = e as { status: number; stdout: string }; return { code: x.status, out: x.stdout }; } };
+  let row = (await nativeReadiness(t.db)).find((x) => x.slug === "old")!;
+  assert.equal(row.stale, true);
+  const g1 = await gate();
+  assert.equal(g1.code, 1, "a stale verification fails the strict gate");
+  assert.match(g1.out, /native_verified by an older verifier \(unversioned\) — not counted/);
+  const out = await advanceAllNative(nativeDepsFrom(t.env, t.db, "http://crestmont.test"), 10);
+  assert.equal(out[0]?.slug, "old", "taken in the very next round, although it was re-checked recently");
+  assert.equal(verifications, 1, "verified again");
+  row = (await nativeReadiness(t.db)).find((x) => x.slug === "old")!;
+  assert.equal(row.state, "native_verified");
+  assert.equal(row.verifier, VERIFIER_VERSION);
+  assert.equal(row.stale, false);
+  assert.equal((await gate()).code, 0, "now it counts");
+  await advanceAllNative(nativeDepsFrom(t.env, t.db, "http://crestmont.test"), 10);
+  assert.equal(verifications, 1, "a current verification is not repeated");
+  t.close();
+});

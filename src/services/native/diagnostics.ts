@@ -17,12 +17,13 @@ export type DiagCode =
   | "iframe_render_failure" | "site_render_defect" | "js_module_error" | "hydration_failure" | "gpu_limited"
   | "iframe_overhead" | "site_slow" | "interaction_blocked" | "scroll_blocked" | "mobile_overflow"
   | "protected_route_exposed" | "verification_budget" | "verifier_unavailable" | "regression" | "stale_record"
-  | "evidence_missing";
+  | "evidence_missing" | "protected_link_in_frame";
 
 export interface DiagSpec { owner: string; embedFailure: boolean; repair: string; verify: string; rollback: string; action?: string }
 
 /** The catalogue. `repair` is what Crestmont does by itself; `action` (if any) is the single thing a person must do. */
 export const CATALOGUE: Record<DiagCode, DiagSpec> = {
+  protected_link_in_frame: { owner: "A sign-in, booking or checkout link on the website opens inside Crestmont's frame, where that page can't be shown.", embedFailure: false, repair: "None in Crestmont: a link inside the website decides where it opens.", verify: "A real click on the link inside the frame must leave the frame on the site.", rollback: "—", action: "Make the website's sign-in, sign-up, booking and checkout links open in a new tab (target=\"_blank\" rel=\"noopener\")." },
   framing_refused_csp: { owner: "The website's security settings don't allow it to be shown inside Crestmont yet.", embedFailure: true, repair: "Allow only Crestmont's exact origins on the site's public pages, through the account that hosts it (Cloudflare rule, vercel.json or _headers).", verify: "Read the live public pages' headers, then a real-browser verification.", rollback: "Remove Crestmont's rule, or revert its pull request." },
   framing_refused_xfo: { owner: "The website's security settings don't allow it to be shown inside Crestmont yet.", embedFailure: true, repair: "Replace X-Frame-Options on public pages with a frame-ancestors list of Crestmont's exact origins.", verify: "Live headers, then a real-browser verification.", rollback: "Remove Crestmont's rule, or revert its pull request." },
   csp_conflict: { owner: "The website sends more than one security policy, so Crestmont can't safely adjust it automatically.", embedFailure: true, repair: "None automatic: a single rule cannot rewrite several policies safely.", verify: "—", rollback: "—", action: "Combine the site's Content-Security-Policy headers into one (or set frame-ancestors for Crestmont's origins on public pages) in the site's own code." },
@@ -104,6 +105,7 @@ export function codesFor(state: NativeState, reason: string): DiagCode[] {
   if (has(/website itself is slow/)) out.push("site_slow");
   if (has(/click .* did not reach/)) out.push("interaction_blocked");
   if (has(/did not scroll the site/)) out.push("scroll_blocked");
+  if (has(/link inside crestmont's frame loads/)) out.push("protected_link_in_frame");
   if (has(/wider than the screen/) && state !== "native_verified") out.push("mobile_overflow");
   if (has(/sensitive page\(s\) .* permit framing/)) out.push("protected_route_exposed");
   if (has(/real-browser verifications .* are used up/)) out.push("verification_budget");

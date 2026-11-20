@@ -61,10 +61,12 @@ const PAGES: Record<string, (t: string) => string> = {
   // the website's own design, not an embedding failure, so it is verified (and reported as nothing to scroll).
   "no-scroll": (t) => doc(t, `<style>html,body{overflow:hidden}</style>`, `<h1>${t}</h1><p>${t} cannot be scrolled: the rest of its content is unreachable.</p>${`<p>${P}</p>`.repeat(40)}`),
   "browser-refuses": (t) => homepage(t),
+  // Its sign-in link navigates the frame itself (the page refuses framing → a broken frame for an embedded visitor).
+  "protected-link-in-frame": (t) => homepage(t, { protectedInFrame: true }),
   "sensitive-exposed": (t) => homepage(t),
 };
 const GOOD = ["static", "div-only", "heavy", "webgl", "webgl-deferred", "decorative-canvas", "csr", "inner-scroll", "css-animation", "lazy-media", "web-components", "canvas-2d"];
-const BAD = ["webgl-fail", "broken-js", "broken-draws", "module-race", "top-only", "mobile-overflow", "browser-refuses"];
+const BAD = ["webgl-fail", "broken-js", "broken-draws", "module-race", "top-only", "mobile-overflow", "browser-refuses", "protected-link-in-frame"];
 type Framing = "xfo" | "csp-none" | "allowed" | "xfo+csp";
 const framing = (f: Framing): Pick<Site, "baseXfo" | "baseCsp"> => f === "xfo" ? { baseXfo: "DENY", baseCsp: null } : f === "csp-none" ? { baseXfo: null, baseCsp: "frame-ancestors 'none'; base-uri 'self'" } : f === "xfo+csp" ? { baseXfo: "SAMEORIGIN", baseCsp: "frame-ancestors 'none'" } : { baseXfo: null, baseCsp: "frame-ancestors http://crestmont.test" };
 
@@ -84,7 +86,7 @@ function build() {
   };
   // 12 technologies × 4 framing setups = 48 websites that must become native-verified.
   for (const k of GOOD) for (const f of ["xfo", "csp-none", "allowed", "xfo+csp"] as Framing[]) add(k, f, "native_verified");
-  // 7 defects × 3 framing setups = 21 websites that must NOT be verified (whatever their frame rate or framing).
+  // 8 defects × 3 framing setups = 24 websites that must NOT be verified (whatever their frame rate or framing).
   // The site's own design, identical direct and embedded (×3).
   for (const f of ["xfo", "csp-none", "allowed"] as Framing[]) add("no-scroll", f, "native_verified");
   for (const k of BAD) for (const f of ["xfo", "csp-none", "allowed"] as Framing[]) {
@@ -94,8 +96,8 @@ function build() {
   }
   // Security: sign-in and booking pages that permit framing block publication of an otherwise working site (×4).
   for (const v of ["a", "b", "c", "d"]) { const id = `sensitive-exposed-${v}`, host = `${id}.${D}`; w.site({ host, pages: { "/": PAGES["sensitive-exposed"](id), "/login": page("Sign in"), "/book": page("Book") }, ...framing("allowed"), sensitiveOpen: true }); configs.push({ id, input: `https://${host}/`, expect: "unavailable", kind: "sensitive-exposed", framing: "allowed" }); }
-  // Authorization blockers: not served by any connected account (×9); a per-request CSP nonce no rule can match (×5).
-  for (let i = 1; i <= 9; i++) { const id = `not-owned-${i}`, host = `${id}.${D}`; w.site({ host, pages: { "/": homepage(id), "/login": page("Sign in") }, ...framing("xfo") }); configs.push({ id, input: `https://${host}/`, expect: "authorization_required", kind: "not-owned", framing: "xfo" }); }
+  // Authorization blockers: not served by any connected account (×6); a per-request CSP nonce no rule can match (×5).
+  for (let i = 1; i <= 6; i++) { const id = `not-owned-${i}`, host = `${id}.${D}`; w.site({ host, pages: { "/": homepage(id), "/login": page("Sign in") }, ...framing("xfo") }); configs.push({ id, input: `https://${host}/`, expect: "authorization_required", kind: "not-owned", framing: "xfo" }); }
   for (let i = 1; i <= 5; i++) { const id = `csp-nonce-${i}`, host = `${id}.${D}`; w.site({ host, pages: { "/": homepage(id), "/login": page("Sign in") }, baseXfo: null, baseCsp: "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'", cspNonce: true }).cloudflareZone(host, ACCT, { proxied: [host] }); configs.push({ id, input: `https://${host}/`, expect: "unavailable", kind: "csp-unstable" }); }
   // Intake: invalid (×3) and duplicates — repeated, www, a deeper path, and redirects to a listed site (×7).
   for (const [id, input] of [["invalid-http-local", "http://localhost/"], ["invalid-text", "notawebsite"], ["invalid-private-ip", "https://10.0.0.1/"]]) configs.push({ id, input, expect: "invalid", kind: "intake" });

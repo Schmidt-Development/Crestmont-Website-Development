@@ -25,6 +25,16 @@
 // are kept. One verification lasts about a minute and only runs on onboarding transitions, a regression, a weekly
 // refresh or an explicit staff re-check, capped per day (orchestrator.ts).
 import { Cdp, type SocketLike } from "../remote-browser/cdp.ts";
+import { SENSITIVE_ROUTE } from "./standard.ts";
+
+/** The verifier's own version. A verification made by an older verifier is stale: the entry is verified again (first)
+ *  and does not count as verified until then — so a fix to the verifier reaches every existing entry, not only new ones.
+ *  Bump whenever what the verifier checks changes. */
+export const VERIFIER_VERSION = "2026-11-20.2";
+
+/** A value as a JavaScript literal that is safe to place inside generated code: JSON, plus the characters that could
+ *  end a script or a line in some contexts (<, >, /, U+2028, U+2029) escaped. */
+const jsLiteral = (v: unknown) => JSON.stringify(v).replace(/[<>\/\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
 export interface BrowserHandle { cdp: Cdp; close(): void | Promise<void> }
 export type OpenBrowser = () => Promise<BrowserHandle>;
@@ -39,7 +49,7 @@ export interface PerfReport { direct: ModePerf | null; embedded: ModePerf | null
 /** Visual evidence: a screenshot of what the visitor saw, stored by the caller (the verifier itself stores nothing). */
 export interface Shot { label: "direct" | "embedded" | "direct-mobile" | "embedded-mobile"; key: string }
 export type ShotSink = (label: Shot["label"], jpeg: Uint8Array) => Promise<string | null>;
-export interface VerifyResult { ok: boolean; checks: Check[]; summary: string; at: string; findings?: Finding[]; perf?: PerfReport; shots?: Shot[] }
+export interface VerifyResult { ok: boolean; checks: Check[]; summary: string; at: string; findings?: Finding[]; perf?: PerfReport; shots?: Shot[]; verifier?: string }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -390,6 +400,32 @@ export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigi
     perf = { direct: d, embedded: e, mobile: null, environment, budgets: BUDGETS, verdict: verdicts.join("; ") };
     add("performance", true, `embedded: LCP ${ms(e.lcp)}, CLS ${e.cls}, TBT ${e.tbt} ms, ${e.idleFps} fps idle${e.scrollFps !== null ? `, ${e.scrollFps} fps scrolling` : ""}, click ${ms(e.interaction)}; direct: ${d ? `LCP ${ms(d.lcp)}, CLS ${d.cls}, TBT ${d.tbt} ms, ${d.idleFps} fps idle${d.scrollFps !== null ? `, ${d.scrollFps} fps scrolling` : ""}` : "not measured"} — ${perf.verdict}`);
 
+    // Protected links: a visible sign-in/booking/checkout link inside the frame must not load that page IN the frame
+    // (it refuses framing, so the visitor would see a broken frame). The link is clicked as a visitor would, through
+    // the site's own handlers, but its default action is observed and then cancelled: nothing navigates, no tab opens,
+    // nothing is submitted. A link that opens a new tab (target=_blank, or a handler that calls window.open) passes; one
+    // whose default would load the page in the frame (or replace Crestmont's page: _top/_parent) fails.
+    const protectedLink = JSON.parse(String(await page.evalIn(sid, `(() => { const re = new RegExp(${jsLiteral(SENSITIVE_ROUTE.source)}, "i");
+      for (const a of document.querySelectorAll("a[href]")) { let u; try { u = new URL(a.href, location.href); } catch { continue; }
+        if (u.origin !== location.origin || !re.test(u.pathname) || u.pathname === location.pathname) continue;
+        const r = a.getBoundingClientRect(); if (!a.getClientRects().length || r.width < 2 || r.height < 2 || getComputedStyle(a).visibility === "hidden") continue;
+        const target = (a.getAttribute("target") || "").toLowerCase(); let opened = false, frameNav = false, leaves = false;
+        const wo = window.open; window.open = function () { opened = true; return null; };
+        const last = (e) => { if (!(e.target instanceof Element) || e.target.closest("a") !== a) return; if (!e.defaultPrevented) { if (target === "_top" || target === "_parent") leaves = true; else if (target !== "_blank") frameNav = true; } e.preventDefault(); };
+        window.addEventListener("click", last, false);
+        try { a.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window, button: 0 })); } finally { window.removeEventListener("click", last, false); window.open = wo; }
+        return JSON.stringify({ path: u.pathname, target, opened, frameNav, leaves }); }
+      return "null"; })()`).catch(() => "null"))) as { path: string; target: string; opened: boolean; frameNav: boolean; leaves: boolean } | null;
+    if (protectedLink) {
+      const bad = (protectedLink.frameNav && !protectedLink.opened) || protectedLink.leaves;
+      add("protected links", !bad, bad
+        ? protectedLink.leaves
+          ? `The site's ${protectedLink.path} link targets ${protectedLink.target}: clicked inside Crestmont's frame it would replace Crestmont's page. The website should open it in a new tab (target="_blank" rel="noopener").`
+          : `Clicking the site's ${protectedLink.path} link inside Crestmont's frame loads ${protectedLink.path} in the frame, which refuses framing — visitors would see a broken frame. The website should open it in a new tab (target="_blank" rel="noopener").`
+        : `The ${protectedLink.path} link opens outside the frame (${protectedLink.opened ? "the site opens a new window" : "target=_blank"})`);
+      if (bad) find("protected_link_in_frame", "site", true, checks.at(-1)!.detail);
+    } else add("protected links", true, "No visible sign-in, booking or checkout link");
+
     // Phone width (a fresh load at 390 px, as a visitor's phone would show the portfolio's mobile view).
     if (Date.now() < deadline - 15_000) {
       await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
@@ -422,7 +458,7 @@ export async function verifyNative(open: OpenBrowser, pageUrl: string, liveOrigi
 
 function finish(checks: Check[], at: string, findings: Finding[] = [], perf?: PerfReport, shots: Shot[] = []): VerifyResult {
   const failed = checks.filter((c) => !c.ok);
-  return { ok: checks.length > 0 && !failed.length, checks, at, findings, perf, ...(shots.length ? { shots } : {}), summary: failed.length ? failed.map((c) => `${c.name}: ${c.detail}`).join(" · ") : `Verified in a real browser: ${checks.map((c) => c.name).join(", ")}` };
+  return { ok: checks.length > 0 && !failed.length, checks, at, findings, perf, verifier: VERIFIER_VERSION, ...(shots.length ? { shots } : {}), summary: failed.length ? failed.map((c) => `${c.name}: ${c.detail}`).join(" · ") : `Verified in a real browser: ${checks.map((c) => c.name).join(", ")}` };
 }
 
 /** Opens Browser Run through the Worker's BROWSER binding. */
