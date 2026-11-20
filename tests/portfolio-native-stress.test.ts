@@ -14,6 +14,8 @@ import { advanceAllNative, advanceNative } from "../src/services/native/orchestr
 import { nativeDepsFrom } from "../src/services/native/deps.ts";
 
 const ACCT = "d".repeat(32);
+/** A stress-test entry (by its parsed hostname; the test database also holds its own seed entries). */
+const isStress = (u: string) => { try { return new URL(u).hostname.endsWith(".stress-native.com"); } catch { return false; } };
 type V = { ok: boolean; checks: { name: string; ok: boolean; detail: string }[]; summary: string; at: string };
 const pass = (): V => ({ ok: true, checks: [{ name: "frame", ok: true, detail: "loaded" }], summary: "Verified in a real browser: frame", at: new Date().toISOString() });
 const fail = (): V => ({ ok: false, checks: [{ name: "canvas", ok: false, detail: "essential 480×480 webgl canvas drew nothing — also when visited directly" }], summary: "canvas: essential canvas drew nothing — also when visited directly", at: new Date().toISOString() });
@@ -43,14 +45,14 @@ async function app(w: NativeWorld, opts: { verify?: (u: string, o: string) => Pr
 async function settle(t: Awaited<ReturnType<typeof createTestApp>>, max = 80) {
   let ticks = 0;
   for (; ticks < max; ticks++) {
-    if (!(await listActive(t.db)).some((p) => p.live_url.includes(".stress-native.com") && (p.native_state === "checking" || p.native_state === "preparing"))) break;
+    if (!(await listActive(t.db)).some((p) => isStress(p.live_url) && (p.native_state === "checking" || p.native_state === "preparing"))) break;
     await runJobs(t.env, ["portfolio_native"]);
   }
   return ticks;
 }
 
 function invariants(w: NativeWorld, all: Awaited<ReturnType<typeof listActive>>, n: number) {
-  const entries = all.filter((p) => p.live_url.includes(".stress-native.com"));   // (the test database's own seed entries aside)
+  const entries = all.filter((p) => isStress(p.live_url));   // (the test database's own seed entries aside)
   assert.equal(entries.length, n, "exactly one entry per website");
   assert.equal(new Set(entries.map((p) => p.live_url)).size, n, "no duplicate entries");
   assert.ok(w.zones.every((z) => (z.rulesets?.rules.length ?? 0) <= 1), "at most one Crestmont rule per zone");
@@ -82,7 +84,7 @@ test("[PORT-NATIVE-STRESS] overlapping operations: two rounds and a staff re-che
   const { t, o, verified } = await app(w, { verify: async (_u, origin) => { await new Promise((r) => setTimeout(r, 40)); return /-\d*[05]\.stress/.test(origin) ? fail() : pass(); } });
   await o.post("/staff/portfolio/bulk", { urls: urls.join("\n") });
   const d = nativeDepsFrom(t.env, t.db, "http://crestmont.test");
-  const first = (await listActive(t.db)).find((p) => p.live_url.includes(".stress-native.com"))!;
+  const first = (await listActive(t.db)).find((p) => isStress(p.live_url))!;
   await Promise.all([advanceAllNative(d, 30, { maxVerifications: 30, concurrency: 4 }), advanceAllNative(d, 30, { maxVerifications: 30, concurrency: 4 }), advanceNative(d, first.id, { force: true }), runJobs(t.env, ["portfolio_native"])]);
   await settle(t);
   invariants(w, await listActive(t.db), 20);
@@ -103,7 +105,7 @@ test("[PORT-NATIVE-STRESS] a worker that stops mid-step and a verifier that time
   await settle(t);
   // A crashed or timed-out step leaves its entry in progress for the next tick (the lease is released or expires; a
   // verification-browser failure is a transient error, retried automatically).
-  let entries = (await listActive(t.db)).filter((p) => p.live_url.includes(".stress-native.com"));
+  let entries = (await listActive(t.db)).filter((p) => isStress(p.live_url));
   const stuck = entries.filter((p) => p.native_state !== (/-\d*[05]\.stress/.test(p.live_url) ? "unavailable" : "native_verified"));
   assert.deepEqual(stuck.map((p) => p.slug), [], "recovered by the job alone — no one had to press Retry");
   entries = await listActive(t.db);

@@ -28,6 +28,8 @@ const CHROMIUM = await chromiumPath();
 const skip = CHROMIUM ? false : "Chromium is not available on this host (set NATIVE_E2E_CHROMIUM or PLAYWRIGHT_MODULE)";
 const ACCT = "c".repeat(32);
 const D = "matrix-native.com";
+/** A matrix entry (by its parsed hostname; the test database also holds its own seed entries). */
+const isMatrix = (u: string) => { try { return new URL(u).hostname.endsWith(`.${D}`); } catch { return false; } };
 
 // ── Page technologies (each a complete TEST DATA page) ──
 const P = "More TEST DATA content so the page can be scrolled by a visitor, written as ordinary paragraphs.";
@@ -136,11 +138,11 @@ test("[PORT-NATIVE-MATRIX] 100 configurations through one bulk Add and the real 
     // Only the real scheduled job advances them — no direct database edit, no forced step.
     let ticks = 0;
     for (; ticks < 60; ticks++) {
-      const busy = (await listActive(t.db)).filter((p) => p.live_url.includes(D) && p.native_state === "checking" || p.native_state === "preparing").length;
+      const busy = (await listActive(t.db)).filter((p) => isMatrix(p.live_url) && p.native_state === "checking" || p.native_state === "preparing").length;
       if (!busy) break;
       await runJobs(t.env, ["portfolio_native"]);
     }
-    const entries = (await listActive(t.db)).filter((p) => p.live_url.includes(D));   // (the test database's seed entries aside)
+    const entries = (await listActive(t.db)).filter((p) => isMatrix(p.live_url));   // (the test database's seed entries aside)
     const bySite = new Map(entries.map((p) => [new URL(p.live_url).hostname, p]));
     // Expected vs actual, per configuration.
     const rows = configs.map((c) => {
